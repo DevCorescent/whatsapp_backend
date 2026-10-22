@@ -1,4 +1,4 @@
-import { IsEmail, IsString, MinLength } from 'class-validator';
+import { IsEmail, IsString, IsOptional, MinLength } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class LoginDto {
@@ -11,7 +11,8 @@ export class LoginDto {
   @MinLength(6)
   password: string;
 
-  @ApiProperty({ example: 'my-workspace', description: 'Tenant slug' })
+  @ApiProperty({ example: 'my-workspace', description: 'Tenant slug (optional — omit to match by email across all tenants)' })
+  @IsOptional()
   @IsString()
-  tenantSlug: string;
+  tenantSlug?: string;
 }

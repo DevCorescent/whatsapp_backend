@@ -12,6 +12,6 @@ export class LocalStrategy extends PassportStrategy(Strategy) {
 
   validate(req: Request, email: string, password: string) {
     const tenantSlug = (req.body as any).tenantSlug ?? '';
-    return this.authService.validateUser(email, password, tenantSlug);
+    return this.authService.validateUser(email, password, tenantSlug as string);
   }
 }
