@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { GatewayController } from './gateway.controller';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bull';
 import { PrismaModule } from '@lib/prisma';
@@ -46,6 +47,7 @@ import { TicketsModule }      from './tickets/tickets.module';
 import { WebhooksModule }     from './webhooks/webhooks.module';
 
 @Module({
+  controllers: [GatewayController],
   imports: [
     ConfigModule.forRoot({ isGlobal: true, envFilePath: '.env' }),
 
