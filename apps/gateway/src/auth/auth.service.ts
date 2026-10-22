@@ -39,14 +39,19 @@ export class AuthService {
   // ── Login ──────────────────────────────────────────────────────────────────
 
   async validateUser(email: string, password: string, tenantSlug: string) {
-    const tenant = await this.prisma.tenant.findUnique({
-      where:  { slug: tenantSlug },
-      select: { id: true, isActive: true },
-    });
-    if (!tenant?.isActive) throw new UnauthorizedException('Workspace not found');
+    let tenantId: string | undefined;
+
+    if (tenantSlug) {
+      const tenant = await this.prisma.tenant.findUnique({
+        where:  { slug: tenantSlug },
+        select: { id: true, isActive: true },
+      });
+      if (!tenant?.isActive) throw new UnauthorizedException('Workspace not found');
+      tenantId = tenant.id;
+    }
 
     const user = await this.prisma.user.findFirst({
-      where:  { email, tenantId: tenant.id, isActive: true },
+      where:  { email, isActive: true, ...(tenantId ? { tenantId } : {}) },
       select: { id: true, email: true, name: true, password: true, role: true, tenantId: true },
     });
     if (!user) throw new UnauthorizedException('Invalid credentials');
@@ -58,11 +63,26 @@ export class AuthService {
   }
 
   async login(user: { id: string; email: string; role: string; tenantId: string }) {
-    const business = await this.prisma.business.findFirst({
-      where:   { tenantId: user.tenantId },
-      select:  { id: true },
-      orderBy: { createdAt: 'asc' },
-    });
+    const [business, fullUser] = await Promise.all([
+      this.prisma.business.findFirst({
+        where:   { tenantId: user.tenantId },
+        select:  { id: true },
+        orderBy: { createdAt: 'asc' },
+      }),
+      this.prisma.user.findUnique({
+        where:  { id: user.id },
+        select: {
+          id: true, email: true, name: true, role: true, tenantId: true, avatar: true,
+          tenant: {
+            select: {
+              slug: true, name: true, accountType: true,
+              resellerType: true, parentId: true,
+            },
+          },
+        },
+      }),
+    ]);
+
     const payload: JwtPayload = {
       sub:        user.id,
       tenantId:   user.tenantId,
@@ -70,9 +90,54 @@ export class AuthService {
       role:       user.role,
       email:      user.email,
     };
+
     return {
       access_token: this.jwt.sign(payload),
-      user: { id: user.id, email: user.email, role: user.role, tenantId: user.tenantId },
+      user: {
+        id:             fullUser!.id,
+        email:          fullUser!.email,
+        name:           fullUser!.name,
+        role:           fullUser!.role,
+        tenantId:       fullUser!.tenantId,
+        avatar:         fullUser!.avatar ?? null,
+        tenantSlug:     fullUser!.tenant.slug,
+        tenantName:     fullUser!.tenant.name,
+        accountType:    fullUser!.tenant.accountType,
+        resellerType:   fullUser!.tenant.resellerType ?? null,
+        parentTenantId: fullUser!.tenant.parentId ?? null,
+      },
+    };
+  }
+
+  async me(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where:  { id: userId },
+      select: {
+        id: true, email: true, name: true, role: true, tenantId: true,
+        avatar: true, isActive: true,
+        tenant: {
+          select: {
+            slug: true, name: true, accountType: true,
+            resellerType: true, parentId: true, isActive: true,
+          },
+        },
+      },
+    });
+
+    if (!user?.isActive || !user.tenant.isActive) return null;
+
+    return {
+      id:             user.id,
+      email:          user.email,
+      name:           user.name,
+      role:           user.role,
+      tenantId:       user.tenantId,
+      avatar:         user.avatar ?? null,
+      tenantSlug:     user.tenant.slug,
+      tenantName:     user.tenant.name,
+      accountType:    user.tenant.accountType,
+      resellerType:   user.tenant.resellerType ?? null,
+      parentTenantId: user.tenant.parentId ?? null,
     };
   }
 

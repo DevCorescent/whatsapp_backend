@@ -1,9 +1,10 @@
 import {
   Controller, Post, Get, Body, Query, UseGuards,
-  HttpCode, HttpStatus, Request,
+  HttpCode, HttpStatus, Request, NotFoundException,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { JwtAuthGuard } from '@lib/common';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
@@ -43,6 +44,15 @@ export class AuthController {
   async resetPassword(@Body() dto: ResetPasswordDto) {
     await this.authService.resetPassword(dto.token, dto.password);
     return { message: 'Password reset successfully' };
+  }
+
+  @Get('me')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Get current authenticated user profile' })
+  async me(@Request() req: any) {
+    const profile = await this.authService.me(req.user.userId);
+    if (!profile) throw new NotFoundException('User not found or deactivated');
+    return profile;
   }
 
   @Post('service-token')
