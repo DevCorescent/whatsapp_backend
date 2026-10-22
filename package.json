@@ -8,7 +8,7 @@
   "scripts": {
     "db:generate": "prisma generate --schema=libs/prisma/prisma/schema.prisma",
     "typecheck": "tsc --project tsconfig.check.json --noEmit",
-    "build": "npm run db:generate && nest build",
+    "build": "npm run db:generate && nest build gateway",
     "format": "prettier --write \"apps/**/*.ts\" \"libs/**/*.ts\"",
     "start:gateway": "nest start gateway --watch",
     "start:messaging": "nest start messaging --watch",
