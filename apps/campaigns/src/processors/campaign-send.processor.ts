@@ -2,13 +2,17 @@ import { Processor, Process } from '@nestjs/bull';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bull';
 import { PrismaService } from '@lib/prisma';
+import { WebhookDispatchService } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
 
 @Processor(QUEUE_CAMPAIGN_SEND)
 export class CampaignSendProcessor {
   private readonly logger = new Logger(CampaignSendProcessor.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma:    PrismaService,
+    private readonly webhooks:  WebhookDispatchService,
+  ) {}
 
   @Process({ concurrency: 10 })
   async handle(job: Job<CampaignSendJob>) {
@@ -109,12 +113,15 @@ export class CampaignSendProcessor {
         data:  { status: 'SENT', waMessageId, sentAt: new Date() },
       });
 
-      await this.prisma.campaign.update({
+      const updated = await this.prisma.campaign.update({
         where: { id: campaignId },
         data:  { sentCount: { increment: 1 } },
       });
 
       this.logger.debug(`Sent campaign ${campaignId} to ${recipient.phone} (${waMessageId})`);
+
+      // Mark COMPLETED and fire webhook when all recipients are done
+      await this.checkAndComplete(updated.tenantId, campaignId);
     } catch (err: any) {
       this.logger.error(`Campaign send failed for recipient ${recipientId}: ${err.message}`);
 
@@ -123,12 +130,39 @@ export class CampaignSendProcessor {
         data:  { status: 'FAILED', failedReason: String(err.message).slice(0, 500) },
       });
 
-      await this.prisma.campaign.update({
+      const failed = await this.prisma.campaign.update({
         where: { id: campaignId },
         data:  { failedCount: { increment: 1 } },
       });
 
+      await this.checkAndComplete(failed.tenantId, campaignId);
       throw err; // Re-throw so BullMQ can retry
     }
+  }
+
+  private async checkAndComplete(tenantId: string, campaignId: string) {
+    const campaign = await this.prisma.campaign.findUnique({
+      where:  { id: campaignId },
+      select: { status: true, totalCount: true, sentCount: true, failedCount: true },
+    });
+    if (!campaign || campaign.status !== 'RUNNING') return;
+
+    const done = campaign.sentCount + campaign.failedCount;
+    if (done < campaign.totalCount) return;
+
+    const completed = await this.prisma.campaign.update({
+      where: { id: campaignId },
+      data:  { status: 'COMPLETED', completedAt: new Date() },
+    });
+
+    this.webhooks.dispatchEvent(tenantId, 'campaign.completed', {
+      campaignId,
+      sentCount:      completed.sentCount,
+      failedCount:    completed.failedCount,
+      deliveredCount: completed.deliveredCount,
+      readCount:      completed.readCount,
+      totalCount:     completed.totalCount,
+      completedAt:    completed.completedAt?.toISOString(),
+    });
   }
 }

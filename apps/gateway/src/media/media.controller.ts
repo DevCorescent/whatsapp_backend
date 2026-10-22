@@ -17,7 +17,7 @@ export class MediaController {
   @Post('upload')
   @ApiOperation({ summary: 'Upload media files (multipart or base64 JSON)' })
   @ApiConsumes('multipart/form-data', 'application/json')
-  @UseInterceptors(FilesInterceptor('files[]', 10, { limits: { fileSize: 64 * 1024 * 1024 } }))
+  @UseInterceptors(FilesInterceptor('files', 10, { limits: { fileSize: 64 * 1024 * 1024 } }))
   uploadMedia(
     @CurrentTenant() scope: TenantScope,
     @UploadedFiles() files: Express.Multer.File[] | undefined,

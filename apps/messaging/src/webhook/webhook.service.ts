@@ -4,6 +4,7 @@ import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import * as crypto from 'crypto';
 import { PrismaService } from '@lib/prisma';
+import { WebhookDispatchService } from '@lib/common';
 import { QUEUE_INBOUND_MESSAGE } from '@lib/queue';
 import type { WAChangeValue, WAMessage, WAStatus, WAContact } from './webhook.types';
 
@@ -12,8 +13,9 @@ export class WebhookService {
   private readonly logger = new Logger(WebhookService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
-    private readonly cfg:    ConfigService,
+    private readonly prisma:      PrismaService,
+    private readonly cfg:         ConfigService,
+    private readonly webhooks:    WebhookDispatchService,
     @InjectQueue(QUEUE_INBOUND_MESSAGE) private readonly inboundQueue: Queue,
   ) {}
 
@@ -158,6 +160,17 @@ export class WebhookService {
         removeOnComplete: true,
       },
     );
+
+    // Fire outbound webhook event — fire-and-forget
+    this.webhooks.dispatchEvent(identity.tenantId, 'message.received', {
+      waMessageId:  message.id,
+      from:         message.from,
+      contactName,
+      type:         message.type,
+      content:      this.extractContent(message),
+      businessId:   identity.businessId,
+      phoneNumberId: identity.phoneNumberId,
+    });
   }
 
   private extractContent(message: WAMessage): string {
@@ -186,22 +199,47 @@ export class WebhookService {
     const rank = this.STATUS_RANK[status.status] ?? -1;
     if (rank < 0) return;
 
+    const now = new Date();
+
     await this.prisma.message.updateMany({
       where: {
         waMessageId: status.id,
         tenantId,
-        // Only advance forward (monotonic status)
         statusRank: { lt: rank },
       },
       data: {
         status:     status.status.toUpperCase() as any,
         statusRank: rank,
-        ...(status.status === 'delivered' ? { deliveredAt: new Date() } : {}),
-        ...(status.status === 'read'      ? { readAt:      new Date() } : {}),
-        ...(status.status === 'failed'    ? { failedAt:    new Date() } : {}),
+        ...(status.status === 'delivered' ? { deliveredAt: now } : {}),
+        ...(status.status === 'read'      ? { readAt:      now } : {}),
+        ...(status.status === 'failed'    ? { failedAt:    now } : {}),
       },
-    }).catch(() => {
-      // message may not exist (outbound from a different channel) — ignore
-    });
+    }).catch(() => {});
+
+    // On failure: store error code + title on the campaign recipient row so the
+    // next broadcast can skip or deprioritise risky numbers.
+    if (status.status === 'failed' && status.errors?.length) {
+      const { code, title } = status.errors[0];
+      await this.prisma.campaignContact.updateMany({
+        where: { waMessageId: status.id },
+        data: {
+          status:      'FAILED',
+          failedAt:    now,
+          errorCode:   code,
+          errorTitle:  title,
+          failedReason: title,
+        },
+      }).catch(() => {});
+    } else if (status.status === 'delivered') {
+      await this.prisma.campaignContact.updateMany({
+        where: { waMessageId: status.id },
+        data: { status: 'DELIVERED', deliveredAt: now },
+      }).catch(() => {});
+    } else if (status.status === 'read') {
+      await this.prisma.campaignContact.updateMany({
+        where: { waMessageId: status.id },
+        data: { status: 'READ', readAt: now },
+      }).catch(() => {});
+    }
   }
 }

@@ -332,6 +332,9 @@ model WhatsAppIntegration {
   qualityRating          String?
   codeVerificationStatus String?
 
+  /// WhatsApp Business API messaging tier (1=250, 2=2000, 3=10000, 0=unlimited/day)
+  messagingTier Int @default(1)
+
   isActive  Boolean @default(true)
   isDefault Boolean @default(false)
 
@@ -807,11 +810,17 @@ model CampaignContact {
   repliedAt    DateTime?
   clickedAt    DateTime?
   failedReason String?
+  /// WhatsApp error code from statuses[].errors[].code (e.g. 131026 = recipient not on WA)
+  errorCode    Int?
+  /// Human-readable title matching the error code
+  errorTitle   String?
+  failedAt     DateTime?
 
   campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   contact  Contact? @relation(fields: [contactId], references: [id])
 
   @@index([campaignId, status])
+  @@index([errorCode])
   @@map("campaign_contacts")
 }
 

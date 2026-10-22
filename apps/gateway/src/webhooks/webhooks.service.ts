@@ -1,11 +1,19 @@
 import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope } from '@lib/common';
+import { TenantScope, WebhookDispatchService } from '@lib/common';
 import * as crypto from 'crypto';
 
 @Injectable()
 export class WebhooksService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly dispatcher: WebhookDispatchService,
+  ) {}
+
+  /** Fire an event to all active webhook endpoints for the tenant. */
+  dispatchEvent(tenantId: string, event: string, data: Record<string, unknown>) {
+    return this.dispatcher.dispatchEvent(tenantId, event, data);
+  }
 
   // ── Webhook Endpoints ──────────────────────────────────────────────────────
 

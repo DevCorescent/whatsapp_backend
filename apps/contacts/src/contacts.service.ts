@@ -207,16 +207,50 @@ export class ContactsService {
 
   // ── Import (CSV rows already parsed by caller) ────────────────────────────
 
-  async importContacts(scope: TenantScope, rows: Array<Record<string, string>>) {
-    const mapped = rows.map(row => ({
-      name:    row['name'] ?? row['Name'] ?? '',
-      phone:   row['phone'] ?? row['Phone'] ?? row['mobile'] ?? '',
-      email:   row['email'] ?? row['Email'] ?? undefined,
-      company: row['company'] ?? row['Company'] ?? undefined,
-      source:  'import',
-    })).filter(r => r.name && r.phone);
+  async importContacts(
+    scope: TenantScope,
+    rows: Array<Record<string, string>>,
+    importTags: string[] = [],
+  ) {
+    let created = 0, skipped = 0;
 
-    return this.bulkCreate(scope, mapped);
+    const mapped = rows.map(row => {
+      const phone = row['phone'] ?? row['Phone'] ?? row['mobile'] ?? row['Mobile'] ?? '';
+      const name  = row['name']  ?? row['Name']  ?? '';
+      if (!name || !phone) return null;
+
+      // Per-row tags column (comma-separated, e.g. "VIP,Hospital,Delhi")
+      const rowTagsRaw = row['tags'] ?? row['Tags'] ?? row['tag'] ?? row['Tag'] ?? '';
+      const rowTags = rowTagsRaw
+        ? rowTagsRaw.split(',').map((t: string) => t.trim()).filter(Boolean)
+        : [];
+
+      return {
+        name, phone,
+        email:   row['email']   ?? row['Email']   ?? undefined,
+        company: row['company'] ?? row['Company'] ?? undefined,
+        source:  'import',
+        tags:    [...new Set([...rowTags, ...importTags])],
+      };
+    }).filter((r): r is NonNullable<typeof r> => r !== null);
+
+    for (const item of mapped) {
+      try {
+        const contact = await this.prisma.contact.upsert({
+          where:  { phone_businessId: { phone: item.phone, businessId: scope.businessId } },
+          create: { name: item.name, phone: item.phone, email: item.email, company: item.company, source: item.source, tenantId: scope.tenantId, businessId: scope.businessId },
+          update: {},
+        });
+        if (item.tags.length) {
+          await this.syncTagsAdd(scope, contact.id, item.tags);
+        }
+        created++;
+      } catch {
+        skipped++;
+      }
+    }
+
+    return { created, skipped, total: mapped.length };
   }
 
   // ── Sources ────────────────────────────────────────────────────────────────
@@ -249,6 +283,22 @@ export class ContactsService {
   }
 
   // ── Internal helpers ───────────────────────────────────────────────────────
+
+  /** Add tags without removing existing ones — used during import. */
+  private async syncTagsAdd(scope: TenantScope, contactId: string, tagNames: string[]) {
+    for (const name of tagNames) {
+      const tag = await this.prisma.tag.upsert({
+        where:  { name_businessId: { name, businessId: scope.businessId } },
+        create: { name, tenantId: scope.tenantId, businessId: scope.businessId },
+        update: {},
+      });
+      await this.prisma.contactTag.upsert({
+        where:  { contactId_tagId: { contactId, tagId: tag.id } },
+        create: { contactId, tagId: tag.id },
+        update: {},
+      });
+    }
+  }
 
   private async syncTags(scope: TenantScope, contactId: string, tagNames: string[]) {
     // Remove all existing tags for this contact

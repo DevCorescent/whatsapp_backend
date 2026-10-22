@@ -68,9 +68,13 @@ export class ContactsController {
 
   @Post('import')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Import contacts from parsed CSV rows' })
-  import(@CurrentTenant() scope: TenantScope, @Body('rows') rows: any[]) {
-    return this.svc.importContacts(scope, rows ?? []);
+  @ApiOperation({ summary: 'Import contacts from parsed CSV rows with optional tags' })
+  import(
+    @CurrentTenant() scope: TenantScope,
+    @Body('rows')       rows:       any[],
+    @Body('importTags') importTags: string[] | undefined,
+  ) {
+    return this.svc.importContacts(scope, rows ?? [], importTags ?? []);
   }
 
   @Patch(':id')

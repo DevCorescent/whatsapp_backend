@@ -201,6 +201,26 @@ export class CampaignsService {
     return this.findOne(scope, newCampaign.id);
   }
 
+  // ── Tier limits ────────────────────────────────────────────────────────────
+
+  /** Returns the daily send cap for a messaging tier (0 = unlimited). */
+  private tierDailyCap(tier: number): number {
+    const caps: Record<number, number> = { 1: 250, 2: 2000, 3: 10000, 4: 100000 };
+    return caps[tier] ?? 0;
+  }
+
+  /** Count outbound campaign messages sent from this business in the last 24 hours. */
+  private async sent24h(businessId: string): Promise<number> {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    return this.prisma.campaignContact.count({
+      where: {
+        campaign:  { businessId },
+        sentAt:    { gte: since },
+        status:    { in: ['SENT', 'DELIVERED', 'READ', 'REPLIED'] },
+      },
+    });
+  }
+
   // ── Launch ─────────────────────────────────────────────────────────────────
 
   async launch(scope: TenantScope, id: string) {
@@ -210,6 +230,36 @@ export class CampaignsService {
     }
     if (!campaign.templateId) {
       throw new BadRequestException('Campaign must have a template before launching');
+    }
+
+    // ── Tier limit check ──────────────────────────────────────────────────────
+    const integration = campaign.whatsappIntegrationId
+      ? await this.prisma.whatsAppIntegration.findUnique({
+          where:  { id: campaign.whatsappIntegrationId },
+          select: { messagingTier: true },
+        })
+      : await this.prisma.whatsAppIntegration.findFirst({
+          where:  { businessId: scope.businessId, isDefault: true, isActive: true },
+          select: { messagingTier: true },
+        });
+
+    const cap = this.tierDailyCap(integration?.messagingTier ?? 1);
+    if (cap > 0) {
+      const [alreadySent, recipientCount] = await Promise.all([
+        this.sent24h(scope.businessId),
+        this.prisma.campaignContact.count({ where: { campaignId: id, status: 'PENDING' } }),
+      ]);
+      const remaining = cap - alreadySent;
+      if (remaining <= 0) {
+        throw new BadRequestException(
+          `Daily messaging limit reached (${cap} messages). Your tier resets after 24 hours.`
+        );
+      }
+      if (recipientCount > remaining) {
+        throw new BadRequestException(
+          `Campaign has ${recipientCount} recipients but only ${remaining} messages remain in your 24-hour tier limit (${cap} total). Reduce recipients or upgrade your tier.`
+        );
+      }
     }
 
     // Set to RUNNING
