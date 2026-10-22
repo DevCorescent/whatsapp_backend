@@ -1,114 +1,332 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# WhatsCRM — NestJS Backend
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+The API backend for WhatsCRM: a multi-tenant WhatsApp CRM SaaS platform. Built as a NestJS monorepo that serves as the **single source of truth** for all business logic, database access, and background processing. The Next.js frontend is a thin shell — it holds the session layer and UI only; every data operation proxies here.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+---
 
-## Description
+## Architecture
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+```mermaid
+graph TB
+    subgraph "Frontend (Vercel)"
+        NextJS["Next.js App<br/>(session + UI only)"]
+    end
 
-## Project setup
+    subgraph "Backend (Render)"
+        GW["Gateway Service<br/>:4000"]
 
-```bash
-$ npm install
+        subgraph "Workers"
+            MSG["Messaging Worker"]
+            AI["AI Worker"]
+            CAM["Campaigns Worker"]
+        end
+    end
+
+    subgraph "Infrastructure"
+        DB[("PostgreSQL<br/>(Neon / Supabase)")]
+        REDIS[("Redis<br/>(Upstash)")]
+    end
+
+    subgraph "External APIs"
+        META["Meta Graph API<br/>(WhatsApp Cloud)"]
+        OPENAI["OpenAI / Groq<br/>(AI replies)"]
+        STRIPE["Stripe / Razorpay<br/>(Billing)"]
+    end
+
+    NextJS -->|"proxy /api/* → /api/nest/*"| GW
+    GW -->|JWT auth| NextJS
+
+    GW -->|Prisma| DB
+    GW -->|Bull queues| REDIS
+
+    REDIS -->|jobs| MSG
+    REDIS -->|jobs| AI
+    REDIS -->|jobs| CAM
+
+    MSG --> DB
+    MSG --> META
+    AI --> DB
+    AI --> OPENAI
+    CAM --> DB
+    CAM --> META
+
+    GW --> STRIPE
 ```
 
-## Compile and run the project
+### Request Flow
 
-```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+```
+Browser → Next.js (edge middleware, session check)
+       → /api/nest/* proxy route
+       → NestJS Gateway (JWT guard, ValidationPipe)
+       → Feature module (service → Prisma → DB)
+       → TransformInterceptor wraps: { success, data, pagination? }
+       → Browser
 ```
 
-## Run tests
+### Multi-Tenancy Model
 
-```bash
-# unit tests
-$ npm run test
+Every row is scoped by `tenantId`. The JWT payload carries `{ sub, tenantId, businessId, role, email }`. Guards enforce tenant isolation at the controller layer — no cross-tenant data leaks are possible even with a valid token.
 
-# e2e tests
-$ npm run test:e2e
+Account types: `PLATFORM` (super admin) · `RESELLER` · `CLIENT`
 
-# test coverage
-$ npm run test:cov
+---
+
+## Monorepo Structure
+
+```
+backend/
+├── apps/
+│   ├── gateway/          # Main HTTP API — the service Render runs
+│   │   └── src/
+│   │       ├── account/          contacts, profile, brand config
+│   │       ├── admin/            super-admin platform management
+│   │       ├── ai/               AI settings, knowledge base triggers
+│   │       ├── analytics/        dashboard metrics, reports
+│   │       ├── api-v1/           public REST API (v1 key-auth)
+│   │       ├── auth/             login, JWT issue, /auth/me refresh
+│   │       ├── billing/          plans, subscriptions, invoices
+│   │       ├── blacklist/        blocked numbers
+│   │       ├── businesses/       WhatsApp Business account CRUD
+│   │       ├── campaigns/        broadcast campaign management
+│   │       ├── chatbot/          flow builder, chatbot config
+│   │       ├── contacts/         contact CRUD, import, tagging
+│   │       ├── conversations/    inbox threads, assignments
+│   │       ├── export/           CSV/Excel data exports
+│   │       ├── integrations/     third-party webhook integrations
+│   │       ├── knowledge/        RAG knowledge base
+│   │       ├── leads/            lead pipeline, scoring
+│   │       ├── media/            file upload, S3 proxy
+│   │       ├── messages/         message history, send API
+│   │       ├── newsletter/       newsletter subscription
+│   │       ├── notifications/    in-app + email notifications
+│   │       ├── onboarding/       tenant onboarding checklist
+│   │       ├── quick-replies/    canned response library
+│   │       ├── reseller/         reseller portal, client provisioning
+│   │       ├── search/           full-text search across contacts/messages
+│   │       ├── segments/         dynamic contact segments
+│   │       ├── settings/         workspace settings, integrations config
+│   │       ├── team/             users, roles, invites
+│   │       ├── tickets/          support ticket management
+│   │       ├── wallet/           prepaid wallet, top-up, transactions
+│   │       ├── webhook/          inbound Meta webhook handler
+│   │       ├── webhooks/         outbound webhook config (user-defined)
+│   │       ├── gateway.controller.ts   /ping, /brand, /account/plan-name
+│   │       ├── gateway.service.ts      brand + plan queries
+│   │       └── gateway.module.ts       root module wiring
+│   │
+│   ├── messaging/        # Worker: inbound/outbound WhatsApp messages
+│   ├── ai-worker/        # Worker: AI auto-reply processing
+│   ├── campaigns/        # Worker: broadcast campaign sends
+│   ├── contacts/         # Worker: bulk contact operations
+│   └── billing/          # Worker: subscription lifecycle events
+│
+├── libs/
+│   ├── prisma/           # @lib/prisma — global PrismaService + schema
+│   │   └── prisma/
+│   │       └── schema.prisma
+│   ├── common/           # @lib/common — JwtAuthGuard, tenant decorator, permissions
+│   └── queue/            # @lib/queue — Bull queue names + module
+│
+├── nest-cli.json         # Monorepo app registry
+├── tsconfig.json
+└── package.json
 ```
 
-## Deployment
+---
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+## Tech Stack
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+| Layer | Technology |
+|---|---|
+| Framework | NestJS 12 (Express platform) |
+| Language | TypeScript 6 |
+| ORM | Prisma 7.10 (pg adapter) |
+| Database | PostgreSQL (Neon / Supabase compatible) |
+| Queue | Bull + BullMQ backed by Redis (Upstash) |
+| Auth | Passport JWT + bcryptjs |
+| Validation | class-validator + class-transformer |
+| AI | OpenAI SDK, Groq, OpenRouter |
+| Docs | Swagger / OpenAPI (`/api/docs`) |
+| Build | `@rspack/core` (fast bundler), `tsc` for type-check |
+| Test | Vitest |
+| Lint | oxlint |
 
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+---
+
+## Environment Variables
+
+Copy `.env` and fill in the values. All variables are required in production unless marked optional.
+
+```env
+# ── Database ───────────────────────────────────────────────
+DATABASE_URL=postgresql://user:pass@host/db?sslmode=require
+
+# ── Auth ───────────────────────────────────────────────────
+JWT_SECRET=                     # ≥32 random bytes
+JWT_EXPIRES_IN=7d
+SERVICE_SECRET=                 # shared secret for Next.js → NestJS service calls
+
+# ── Redis ──────────────────────────────────────────────────
+REDIS_HOST=
+REDIS_PORT=6379
+REDIS_PASSWORD=
+REDIS_TLS=true                  # set false for local Redis
+
+# ── CORS ───────────────────────────────────────────────────
+FRONTEND_URL=https://your-app.vercel.app
+
+# ── Ports (defaults shown — override per worker) ───────────
+GATEWAY_PORT=4000
+MESSAGING_PORT=4001
+AI_WORKER_PORT=4002
+CAMPAIGNS_PORT=4003
+CONTACTS_PORT=4004
+BILLING_PORT=4005
+
+# ── WhatsApp / Meta ────────────────────────────────────────
+WHATSAPP_APP_SECRET=
+WHATSAPP_APP_ID=
+WHATSAPP_ES_CONFIG_ID=
+WHATSAPP_API_VERSION=v22.0
+WHATSAPP_VERIFY_TOKEN=
+
+# ── Encryption (contact PII at rest) ───────────────────────
+ENCRYPTION_KEY=                 # 32-byte hex string
+
+# ── AI ─────────────────────────────────────────────────────
+GROQ_API_KEY=
+GROQ_MODEL=llama-3.1-8b-instant
+OPENROUTER_API_KEY=             # optional fallback
+OPENROUTER_MODEL=               # optional
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+---
 
-## Observability
+## Local Development
 
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
+### Prerequisites
 
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
+- Node.js 20+
+- A PostgreSQL database (local or Neon free tier)
+- Redis (local or Upstash free tier)
 
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
+### Setup
 
-## Resources
+```bash
+# 1. Install dependencies
+npm install
 
-Check out a few resources that may come in handy when working with NestJS:
+# 2. Copy and fill env
+cp .env.example .env   # edit DATABASE_URL, JWT_SECRET, REDIS_* at minimum
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observer](https://observer.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+# 3. Generate Prisma client
+npm run db:generate
 
-## Support
+# 4. Run migrations
+npx prisma migrate dev --schema=libs/prisma/prisma/schema.prisma
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+# 5. Start gateway in watch mode
+npm run start:gateway
+# → http://localhost:4000
+# → Swagger UI: http://localhost:4000/api/docs
+```
 
-## Stay in touch
+### Start individual workers
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+```bash
+npm run start:messaging     # WhatsApp message handler
+npm run start:ai-worker     # AI auto-reply worker
+npm run start:campaigns     # Campaign send worker
+```
+
+---
+
+## API Overview
+
+All responses are wrapped by `TransformInterceptor`:
+
+```json
+{ "success": true, "data": { ... } }
+```
+
+Pagination is included where applicable:
+
+```json
+{ "success": true, "data": [...], "pagination": { "page": 1, "limit": 20, "total": 142 } }
+```
+
+### Authentication
+
+```
+POST /auth/login        { email, password, tenantSlug? }  → { access_token, user }
+GET  /auth/me           Bearer <token>                    → full user + tenant profile
+```
+
+### Health
+
+```
+GET  /ping              → { status: "ok", ts: "..." }
+```
+
+### White-Label Branding (public)
+
+```
+GET  /brand?host=<host>              → brand config for a custom domain
+GET  /brand/by-tenant?tenantId=<id> → brand config for a tenant (used by email templates)
+```
+
+### Account
+
+```
+GET  /account/plan-name   Bearer   → subscription plan display name for sidebar badge
+```
+
+Full interactive docs at `/api/docs` when the server is running.
+
+---
+
+## Scripts
+
+| Script | Description |
+|---|---|
+| `npm run start:gateway` | Start gateway in watch mode |
+| `npm run build` | Generate Prisma client + build gateway for production |
+| `npm run start:prod:gateway` | Run compiled gateway (production) |
+| `npm run db:generate` | Regenerate Prisma client after schema changes |
+| `npm run typecheck` | Full TypeScript type-check (all apps + libs) |
+| `npm run lint` | oxlint across `apps/` and `libs/` |
+| `npm run test` | Run Vitest test suite |
+| `npm run test:watch` | Vitest watch mode |
+
+---
+
+## Deployment (Render)
+
+The gateway is deployed as a **Web Service** on Render.
+
+| Setting | Value |
+|---|---|
+| Build command | `npm install && npm run build` |
+| Start command | `npm run start:prod:gateway` |
+| Port | `4000` (or `PORT` env var) |
+| Health check | `GET /ping` |
+
+> **Free tier keep-alive:** Set up a cron job (e.g. cron-job.org) to `GET /ping` every 14 minutes — Render free tier sleeps after 15 minutes of inactivity.
+
+Set all env vars from the table above in the Render service dashboard. `DATABASE_URL` and `REDIS_*` are the minimum required to start.
+
+---
+
+## Remotes
+
+```
+origin      https://github.com/yashvardhansharma111/whatsapp_backend.git
+corescent   https://github.com/DevCorescent/whatsapp_backend.git
+```
+
+---
 
 ## License
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+Private — Corescent Technologies Pvt Ltd. All rights reserved.
