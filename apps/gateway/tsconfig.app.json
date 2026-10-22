@@ -1,0 +1,41 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "declaration": false,
+    "ignoreDeprecations": "6.0",
+    "baseUrl": "../../",
+    "rootDir": "../../",
+    "outDir": "../../dist/apps/gateway",
+    "paths": {
+      "@lib/prisma": ["libs/prisma/src/index.ts"],
+      "@lib/prisma/*": ["libs/prisma/src/*"],
+      "@lib/common": ["libs/common/src/index.ts"],
+      "@lib/common/*": ["libs/common/src/*"],
+      "@lib/queue": ["libs/queue/src/index.ts"],
+      "@lib/queue/*": ["libs/queue/src/*"]
+    }
+  },
+  "include": [
+    "src/**/*",
+    "../../apps/contacts/src/**/*",
+    "../../apps/campaigns/src/**/*",
+    "../../apps/messaging/src/conversations/**/*",
+    "../../apps/messaging/src/webhook/webhook.types.ts",
+    "../../apps/billing/src/**/*",
+    "../../libs/queue/src/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/*.spec.ts",
+    "**/*.test.ts",
+    "../../apps/contacts/src/main.ts",
+    "../../apps/contacts/src/**/*.spec.ts",
+    "../../apps/campaigns/src/main.ts",
+    "../../apps/campaigns/src/**/*.spec.ts",
+    "../../apps/messaging/src/main.ts",
+    "../../apps/messaging/src/**/*.spec.ts",
+    "../../apps/billing/src/main.ts",
+    "../../apps/billing/src/**/*.spec.ts"
+  ]
+}

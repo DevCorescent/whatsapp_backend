@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "declaration": false,
+    "ignoreDeprecations": "6.0",
+    "baseUrl": "../../",
+    "outDir": "../../dist/apps/contacts",
+    "paths": {
+      "@lib/prisma": ["libs/prisma/src/index.ts"],
+      "@lib/prisma/*": ["libs/prisma/src/*"],
+      "@lib/common": ["libs/common/src/index.ts"],
+      "@lib/common/*": ["libs/common/src/*"],
+      "@lib/queue": ["libs/queue/src/index.ts"],
+      "@lib/queue/*": ["libs/queue/src/*"]
+    }
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "**/*.spec.ts", "**/*.test.ts"]
+}

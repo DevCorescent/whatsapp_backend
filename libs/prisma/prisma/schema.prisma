@@ -1,0 +1,1663 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// WhatsCRM – Prisma Schema
+// Multi-tenant WhatsApp CRM & Automation SaaS Platform
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../../../node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── ENUMS ───────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  SUPER_ADMIN
+  TENANT_OWNER
+  ADMIN
+  MANAGER
+  AGENT
+  MARKETING_USER
+}
+
+/// What an account is in the platform hierarchy.
+///   PLATFORM — the super admin's own account (runs the platform).
+///   RESELLER — sells the platform to clients; manages accounts, never messages.
+///   CLIENT   — a business that owns contacts, campaigns and chats. Directly under the
+///              platform (parentId null) or under a reseller.
+enum AccountType {
+  PLATFORM
+  RESELLER
+  CLIENT
+}
+
+/// NORMAL uses the platform's branding; WHITE_LABEL shows its own (WhiteLabelConfig)
+/// to every client under it.
+enum ResellerType {
+  NORMAL
+  WHITE_LABEL
+}
+
+/// What a WhatsApp template message is priced as (MessageRate).
+enum RateCategory {
+  WA_MARKETING
+  WA_UTILITY
+  WA_AUTHENTICATION
+}
+
+enum WalletTxnType {
+  TOPUP
+  DEBIT
+  REFUND
+  ADJUSTMENT
+  TRANSFER_IN
+  TRANSFER_OUT
+}
+
+enum CommissionStatus {
+  PENDING
+  PAID
+  CANCELLED
+}
+
+enum ConversationStatus {
+  OPEN
+  ASSIGNED
+  RESOLVED
+  CLOSED
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  VIDEO
+  AUDIO
+  DOCUMENT
+  LOCATION
+  STICKER
+  TEMPLATE
+  INTERACTIVE
+  SYSTEM
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum MessageStatus {
+  PENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+// Semantic classification of a pipeline stage. Stage *identity* is now fully dynamic
+// (a PipelineStage row), but a handful of behaviours still need to know whether a stage
+// closes a deal: `closedAt` is stamped on WON/LOST, and analytics counts WON as revenue.
+// Kept as a small closed enum because it drives logic, not presentation.
+enum StageOutcome {
+  OPEN
+  WON
+  LOST
+}
+
+enum LeadScoreLabel {
+  COLD
+  WARM
+  HOT
+  QUALIFIED
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  RUNNING
+  PROCESSING
+  COMPLETED
+  SENT
+  FAILED
+  PAUSED
+  CANCELLED
+}
+
+enum TicketStatus {
+  OPEN
+  ASSIGNED
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum TicketPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELLED
+  EXPIRED
+  PAST_DUE
+  TRIALING
+}
+
+enum BillingCycle {
+  MONTHLY
+  ANNUAL
+}
+
+// Whether a plan is sold or granted. PRIVATE is the custom-plan marker: a tier a
+// super-admin negotiated for one customer, kept off every self-serve surface.
+enum PlanVisibility {
+  PUBLIC
+  PRIVATE
+}
+
+enum BusinessStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+// ─── TENANT (Workspace) ──────────────────────────────────────────────────────
+
+model Tenant {
+  id             String   @id @default(cuid())
+  name           String
+  slug           String   @unique
+  logo           String?
+  domain         String?  @unique
+  isActive       Boolean  @default(true)
+  /// Invite code of the user who referred this workspace at signup, if any.
+  referredByCode String?
+  /// What kind of business this account is (IT, Education, …). Admin-editable list.
+  categoryId     String?
+
+  // ── Hierarchy ──
+  accountType    AccountType   @default(CLIENT)
+  /// Only for RESELLER accounts.
+  resellerType   ResellerType?
+  /// The reseller that manages this client. Null for direct clients, resellers and the platform.
+  parentId       String?
+  /// The reseller credited with bringing this client in (commission). Usually equals parentId;
+  /// kept separately so a client moved to another reseller keeps its referral history.
+  referredById   String?
+  /// Percentage of a referred client's payments owed to this reseller (0 to 100). Resellers only.
+  commissionRate Float?
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  category             BusinessCategory?     @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  parent               Tenant?               @relation("AccountHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children             Tenant[]              @relation("AccountHierarchy")
+  referredBy           Tenant?               @relation("AccountReferrals", fields: [referredById], references: [id], onDelete: SetNull)
+  referrals            Tenant[]              @relation("AccountReferrals")
+  whiteLabel           WhiteLabelConfig?
+  resellerPlans        Plan[]                @relation("ResellerPlans")
+  payments             Payment[]
+  commissionsEarned    ResellerCommission[]  @relation("CommissionReseller")
+  commissionsGenerated ResellerCommission[]  @relation("CommissionClient")
+  wallet               Wallet?
+  walletTransactions   WalletTransaction[]
+  resellerRates        MessageRate[]
+  segments             Segment[]
+  blacklistEntries     BlacklistEntry[]
+  users                User[]
+  businesses           Business[]
+  contacts             Contact[]
+  conversations        Conversation[]
+  leads                Lead[]
+  pipelineStages       PipelineStage[]
+  campaigns            Campaign[]
+  templates            MessageTemplate[]
+  chatbotFlows         ChatbotFlow[]
+  tickets              Ticket[]
+  knowledgeDocs        KnowledgeDoc[]
+  knowledgeFaqSets     KnowledgeFaqSet[]
+  faqInteractions      FaqInteraction[]
+  flowRuns             FlowRun[]
+  tags                 Tag[]
+  subscription         Subscription?
+  customPlans          Plan[]                @relation("CustomPlans")
+  settings             TenantSettings?
+  auditLogs            AuditLog[]
+  quickReplies         QuickReply[]
+  whatsAppIntegrations WhatsAppIntegration[]
+  webhookEndpoints     WebhookEndpoint[]
+
+  @@index([parentId])
+  @@index([referredById])
+  @@map("tenants")
+}
+
+// ─── BUSINESS (WhatsApp account workspace within a Tenant) ───────────────────
+
+model Business {
+  id                    String         @id @default(cuid())
+  tenantId              String
+  name                  String
+  slug                  String
+  whatsappPhoneNumber   String?
+  whatsappPhoneNumberId String?        @unique
+  whatsappBusinessId    String?
+  whatsappAccessToken   String?
+  whatsappVerifyToken   String?
+  whatsappAppSecret     String?
+  status                BusinessStatus @default(ACTIVE)
+  logo                  String?
+  timezone              String         @default("Asia/Kolkata")
+  aiEnabled             Boolean        @default(false)
+  autoReply             Boolean        @default(false)
+  autoReplyDelay        Int            @default(3)
+  aiModel               String?
+  aiSystemPrompt        String?
+  // Structured, mandatory initial instructions (role/greeting/mode/tone/repetition...).
+  // See lib/aiInstructions.ts — null means this business still runs on aiSystemPrompt alone.
+  aiInstructions        Json?
+  aiPersonality         String?
+  aiResponseTone        String?
+  aiTemperature         Float          @default(0.7)
+  aiMaxTokens           Int            @default(500)
+  offHoursMessage       String?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contacts         Contact[]
+  conversations    Conversation[]
+  messages         Message[]
+  leads            Lead[]
+  campaigns        Campaign[]
+  templates        MessageTemplate[]
+  chatbotFlows     ChatbotFlow[]
+  tickets          Ticket[]
+  knowledgeDocs    KnowledgeDoc[]
+  knowledgeFaqSets KnowledgeFaqSet[]
+  faqInteractions  FaqInteraction[]
+  flowRuns         FlowRun[]
+  tags             Tag[]
+  quickReplies     QuickReply[]
+
+  // Multiple WhatsApp numbers/integrations per business
+  whatsappIntegrations WhatsAppIntegration[]
+
+  @@unique([slug, tenantId])
+  @@index([tenantId])
+  @@map("businesses")
+}
+
+// ─── WHATSAPP INTEGRATION ─────────────────────────────────────────────────────
+//
+// One row per connected WhatsApp number. This is the runtime source of truth for
+// multi-number workspaces: inbound webhooks route by `phoneNumberId`, and every
+// outbound send resolves its credentials from the conversation's integration (or
+// the business's default one). The legacy Business.whatsapp* columns are still
+// honoured as a fallback and are mirrored into a row here by
+// lib/whatsappIntegrations.ts#syncLegacyIntegration.
+//
+// Invariants (see prisma/migrations/20260918120000_whatsapp_integrations):
+//   · `phoneNumberId` is globally unique — it is Meta's webhook routing key.
+//   · At most one row per business has isDefault = true (partial unique index,
+//     created in raw SQL because Prisma cannot express it).
+//   · isDefault implies isActive. A disconnected row keeps its ids, so threads
+//     that used it refuse to send rather than switch numbers, but its token is wiped.
+
+model WhatsAppIntegration {
+  id String @id @default(cuid())
+
+  tenantId   String
+  businessId String
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  displayName        String?
+  phoneNumber        String?
+  phoneNumberId      String  @unique
+  whatsappBusinessId String
+
+  /// Encrypted (enc:v1). Null once the number is disconnected.
+  accessToken String?
+  verifyToken String?
+  appSecret   String?
+
+  qualityRating          String?
+  codeVerificationStatus String?
+
+  isActive  Boolean @default(true)
+  isDefault Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  conversations Conversation[]
+  campaigns     Campaign[]
+
+  @@index([tenantId])
+  @@index([businessId])
+  @@map("whatsapp_integrations")
+}
+
+// ─── TENANT SETTINGS ─────────────────────────────────────────────────────────
+
+model TenantSettings {
+  id                   String   @id @default(cuid())
+  tenantId             String   @unique
+  waPhoneNumberId      String?
+  waBusinessAccountId  String?
+  waApiKey             String?
+  waWebhookVerifyToken String?
+  aiEnabled            Boolean  @default(false)
+  aiModel              String   @default("gpt-4o-mini")
+  autoReply            Boolean  @default(false)
+  autoReplyDelay       Int      @default(3)
+  aiPersonality        String?
+  timezone             String   @default("Asia/Kolkata")
+  businessHoursStart   String   @default("09:00")
+  businessHoursEnd     String   @default("18:00")
+  businessDays         Int[]    @default([1, 2, 3, 4, 5])
+  offHoursMessage      String?
+  smtpHost             String?
+  smtpPort             Int?
+  smtpUser             String?
+  smtpPass             String?
+  smtpFrom             String?
+  waAppSecret          String?
+  onboardingCompleted  Boolean  @default(false)
+  /// API key for incoming webhook / external API access. Generated per tenant.
+  apiKey               String?  @unique
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("tenant_settings")
+}
+
+// ─── USER ─────────────────────────────────────────────────────────────────────
+
+model User {
+  id          String    @id @default(cuid())
+  tenantId    String
+  name        String
+  email       String
+  password    String
+  role        UserRole  @default(AGENT)
+  avatar      String?
+  phone       String?
+  isActive    Boolean   @default(true)
+  lastLoginAt DateTime?
+
+  /// This agent's own share of the workspace AI allowance, per billing period.
+  ///
+  /// Null means no personal cap: they draw on the tenant pool until the plan
+  /// runs out, which is how every account behaved before this existed and stays
+  /// the default. A number caps them individually so one agent cannot spend the
+  /// month on AI Suggest before anyone else logs in.
+  aiCreditLimit Int?
+
+  /// Requests this agent has made in the period named by aiCreditsPeriodStart.
+  aiCreditsUsed Int @default(0)
+
+  /// Which billing period aiCreditsUsed belongs to.
+  ///
+  /// Carried so the counter can reset itself on first use in a new period rather
+  /// than needing a cron: a nightly job that reset agent counters would have to
+  /// know each tenant's billing window, and would zero the wrong ones every time
+  /// a super-admin re-dated a custom plan.
+  aiCreditsPeriodStart DateTime?
+
+  /// Unique referral code for this user. Auto-generated on first access.
+  /// Share with others — whoever signs up with it gets linked back here.
+  inviteCode String? @unique
+
+  /// Set true once the user clicks the verification link in their welcome email.
+  /// Default true so existing accounts are unaffected by the migration.
+  emailVerified   Boolean   @default(true)
+  /// Single-use random hex token mailed at registration. Cleared on verification.
+  emailVerifyToken  String?   @unique
+  emailVerifyExpiry DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant          Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignedConvs   Conversation[]       @relation("AssignedAgent")
+  messages        Message[]
+  assignedLeads   Lead[]               @relation("AssignedLeadAgent")
+  leadActivities  LeadActivity[]
+  assignedTickets Ticket[]             @relation("AssignedTicketAgent")
+  auditLogs       AuditLog[]
+  resetTokens     PasswordResetToken[]
+  blacklistAdded  BlacklistEntry[]     @relation("BlacklistCreatedBy")
+  userPermissions UserPermission[]     @relation("UserPermissions")
+
+  @@unique([email, tenantId])
+  @@map("users")
+}
+
+// ─── PASSWORD RESET TOKEN ─────────────────────────────────────────────────────
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
+}
+
+// ─── CONTACT ──────────────────────────────────────────────────────────────────
+
+model Contact {
+  id           String   @id @default(cuid())
+  tenantId     String
+  name         String
+  phone        String
+  waId         String?
+  email        String?
+  company      String?
+  designation  String?
+  location     String?
+  source       String?
+  avatarUrl    String?
+  isBlocked    Boolean  @default(false)
+  optedOut     Boolean  @default(false)
+  customFields Json?
+  notes        String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  businessId      String
+  business        Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  tenant          Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversations   Conversation[]
+  leads           Lead[]
+  tags            ContactTag[]
+  campaignsSent   CampaignContact[]
+  faqInteractions FaqInteraction[]
+  flowRuns        FlowRun[]
+
+  @@unique([phone, businessId])
+  @@index([tenantId])
+  @@index([businessId])
+  @@map("contacts")
+}
+
+// ─── TAG ──────────────────────────────────────────────────────────────────────
+
+model Tag {
+  id         String   @id @default(cuid())
+  tenantId   String
+  businessId String
+  name       String
+  color      String   @default("#6366f1")
+  createdAt  DateTime @default(now())
+
+  business Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  tenant   Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contacts ContactTag[]
+
+  @@unique([name, businessId])
+  @@index([businessId])
+  @@map("tags")
+}
+
+model ContactTag {
+  contactId String
+  tagId     String
+  createdAt DateTime @default(now())
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tag     Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([contactId, tagId])
+  @@map("contact_tags")
+}
+
+// ─── CONVERSATION ─────────────────────────────────────────────────────────────
+
+model Conversation {
+  id                 String             @id @default(cuid())
+  tenantId           String
+  contactId          String
+  assignedToId       String?
+  status             ConversationStatus @default(OPEN)
+  channel            String             @default("WHATSAPP")
+  isAiActive         Boolean            @default(false)
+  unreadCount        Int                @default(0)
+  labels             String[]
+  lastMessageAt      DateTime?
+  lastMessagePreview String?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  // Chatbot flow session — null when no flow is active
+  activeFlowId String?
+  activeNodeId String?
+  flowVars     Json?
+
+  businessId      String
+  business        Business         @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact         Contact          @relation(fields: [contactId], references: [id])
+  assignedTo      User?            @relation("AssignedAgent", fields: [assignedToId], references: [id])
+  messages        Message[]
+  ticket          Ticket?
+  faqInteractions FaqInteraction[]
+  flowRuns        FlowRun[]
+
+  // The WhatsApp number this thread lives on. Replies go out from this number and no
+  // other; null for threads that predate multi-number support (legacy credentials).
+  whatsappIntegrationId String?
+  whatsappIntegration   WhatsAppIntegration? @relation(fields: [whatsappIntegrationId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, status])
+  @@index([businessId, status])
+  @@index([businessId, lastMessageAt(sort: Desc)])
+  @@index([whatsappIntegrationId])
+  @@map("conversations")
+}
+
+// ─── MESSAGE ──────────────────────────────────────────────────────────────────
+
+model Message {
+  id             String           @id @default(cuid())
+  tenantId       String
+  conversationId String
+  sentById       String?
+  waMessageId    String?          @unique
+  type           MessageType      @default(TEXT)
+  direction      MessageDirection
+  content        String?
+  mediaUrl       String?
+  mediaType      String?
+  mediaMimeType  String?
+  mediaSize      Int?
+  metadata       Json?
+  status         MessageStatus    @default(PENDING)
+  isNote         Boolean          @default(false)
+  isAiGenerated  Boolean          @default(false)
+  replyToId      String?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  businessId   String?
+  business     Business?    @relation(fields: [businessId], references: [id])
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sentBy       User?        @relation(fields: [sentById], references: [id])
+
+  @@index([conversationId, createdAt])
+  @@index([tenantId])
+  @@index([businessId])
+  // Every outbound send counts the last hour and the last day before it is
+  // allowed through. On @@index([tenantId]) alone that is a scan of the whole
+  // tenant's history to answer a question about the last sixty minutes.
+  @@index([tenantId, direction, createdAt])
+  @@map("messages")
+}
+
+// ─── QUICK REPLY ──────────────────────────────────────────────────────────────
+
+model QuickReply {
+  id         String   @id @default(cuid())
+  tenantId   String
+  businessId String
+  shortcode  String
+  content    String
+  createdAt  DateTime @default(now())
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([shortcode, businessId])
+  @@index([businessId])
+  @@map("quick_replies")
+}
+
+// ─── LEAD ─────────────────────────────────────────────────────────────────────
+
+model Lead {
+  id              String         @id @default(cuid())
+  tenantId        String
+  contactId       String
+  assignedToId    String?
+  title           String
+  stageId         String
+  score           Int            @default(0)
+  scoreLabel      LeadScoreLabel @default(COLD)
+  value           Float?
+  currency        String         @default("INR")
+  budget          String?
+  authority       String?
+  requirement     String?
+  timeline        String?
+  companySize     String?
+  isDecisionMaker Boolean        @default(false)
+  notes           String?
+  lostReason      String?
+  closedAt        DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  businessId String
+  business   Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  tenant     Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  contact    Contact        @relation(fields: [contactId], references: [id])
+  assignedTo User?          @relation("AssignedLeadAgent", fields: [assignedToId], references: [id])
+  stage      PipelineStage  @relation(fields: [stageId], references: [id])
+  activities LeadActivity[]
+
+  @@index([tenantId, stageId])
+  @@index([businessId, stageId])
+  @@map("leads")
+}
+
+// ─── PIPELINE STAGE (dynamic lead pipeline) ──────────────────────────────────
+// A tenant-owned, fully configurable pipeline stage. Replaces the former `LeadStage`
+// enum + `TenantSettings.leadStages` JSON override: every Lead now references a stage
+// row, and administrators can create, rename, recolour, reorder, enable/disable, delete
+// and mark a default stage — with no cap on how many a tenant defines.
+model PipelineStage {
+  id        String       @id @default(cuid())
+  tenantId  String
+  name      String
+  // A `StageColor` key from lib/utils (e.g. "blue"). Stored as text so the palette can
+  // grow without a migration; validated against the closed set on write.
+  color     String       @default("slate")
+  order     Int          @default(0)
+  enabled   Boolean      @default(true)
+  isDefault Boolean      @default(false)
+  outcome   StageOutcome @default(OPEN)
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  // Restrict, not Cascade: a stage with leads must have them reassigned before it can be
+  // deleted, so removing a stage can never silently delete the leads sitting in it.
+  leads  Lead[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId, order])
+  @@map("pipeline_stages")
+}
+
+model LeadActivity {
+  id        String   @id @default(cuid())
+  leadId    String
+  userId    String?
+  type      String
+  content   String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  lead Lead  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([leadId])
+  @@map("lead_activities")
+}
+
+// ─── MESSAGE TEMPLATE ─────────────────────────────────────────────────────────
+
+model MessageTemplate {
+  id              String    @id @default(cuid())
+  tenantId        String
+  name            String
+  category        String
+  language        String    @default("en")
+  headerType      String?
+  headerContent   String?
+  body            String
+  footer          String?
+  buttons         Json?
+  variables       String[]
+  headerVariables String[]  @default([])
+  waTemplateId    String?
+  status          String    @default("PENDING")
+  rejectionReason String?
+  lastSyncedAt    DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  businessId String
+  business   Business   @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campaigns  Campaign[]
+
+  @@unique([name, businessId])
+  @@index([businessId])
+  @@map("message_templates")
+}
+
+// ─── CAMPAIGN ─────────────────────────────────────────────────────────────────
+
+model Campaign {
+  id             String         @id @default(cuid())
+  tenantId       String
+  name           String
+  templateId     String?
+  /// Wallet cost estimated at launch, and what has actually been charged so far (paise).
+  estimatedCostMinor Int?
+  costMinor      Int            @default(0)
+  status         CampaignStatus @default(DRAFT)
+  scheduledAt    DateTime?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  totalCount     Int            @default(0)
+  sentCount      Int            @default(0)
+  deliveredCount Int            @default(0)
+  readCount      Int            @default(0)
+  repliedCount   Int            @default(0)
+  clickedCount   Int            @default(0)
+  failedCount    Int            @default(0)
+  lastError      String?
+  filters        Json?
+  metadata       Json?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  businessId             String
+  /// Which WhatsApp number sends this campaign. Null = use the business's default.
+  whatsappIntegrationId  String?
+
+  business            Business             @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  tenant              Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  template            MessageTemplate?     @relation(fields: [templateId], references: [id])
+  whatsappIntegration WhatsAppIntegration? @relation(fields: [whatsappIntegrationId], references: [id], onDelete: SetNull)
+  contacts            CampaignContact[]
+
+  @@index([tenantId, status])
+  @@index([businessId, status])
+  @@map("campaigns")
+}
+
+model CampaignContact {
+  id           String    @id @default(cuid())
+  campaignId   String
+  contactId    String?
+  phone        String
+  variables    Json?
+  status       String    @default("PENDING")
+  // Meta's id for the message sent to this recipient. Delivery receipts arrive keyed by it, so it
+  // is the only thing that can correlate a `statuses[]` callback back to the campaign recipient it
+  // belongs to. Nullable: historical rows predate it, and a send that never reached Meta has none.
+  waMessageId  String?   @unique
+  // When a send worker claimed this row (status SENDING). Makes a send exactly-once even if
+  // two queue jobs for the same recipient overlap; a stale claim can be retaken after a crash.
+  claimedAt    DateTime?
+  /// What was charged to the wallet for this message (paise).
+  costMinor    Int?
+  sentAt       DateTime?
+  deliveredAt  DateTime?
+  readAt       DateTime?
+  repliedAt    DateTime?
+  clickedAt    DateTime?
+  failedReason String?
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contact  Contact? @relation(fields: [contactId], references: [id])
+
+  @@index([campaignId, status])
+  @@map("campaign_contacts")
+}
+
+// ─── BLACKLIST ────────────────────────────────────────────────────────────────
+//
+// Numbers that must never be messaged. Enforced in lib/whatsapp.ts on every outbound send
+// (campaigns, broadcasts, inbox, AI/chatbot replies, FAQ sends) and excluded up front when a
+// campaign is created. `tenantId` null means platform-wide — set by a super admin, applies to
+// every account. Adds and removals are recorded in AuditLog (BLACKLIST_ADDED / _REMOVED).
+//
+// A partial unique index (raw SQL in the migration) keeps platform-wide phones unique, since
+// Postgres treats NULL tenantIds as distinct in the compound key below.
+
+model BlacklistEntry {
+  id          String   @id @default(cuid())
+  tenantId    String?
+  /// Digits-only E.164, normalised exactly like Contact.phone.
+  phone       String
+  reason      String?
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  tenant    Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdBy User?   @relation("BlacklistCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@unique([tenantId, phone])
+  @@index([phone])
+  @@map("blacklist_entries")
+}
+
+// ─── WHITE-LABEL ──────────────────────────────────────────────────────────────
+//
+// A WHITE_LABEL reseller's brand. Shown on its custom domain (login, sign-up, page
+// titles) and inside the app to the reseller and every client under it, in place of
+// the platform's branding. Resolved by lib/branding.ts.
+
+model WhiteLabelConfig {
+  id            String   @id @default(cuid())
+  tenantId      String   @unique
+  brandName     String
+  logoUrl       String?
+  faviconUrl    String?
+  /// Hex colours, e.g. "#0f766e".
+  primaryColor  String   @default("#059669")
+  accentColor   String?
+  /// Lower-case host without scheme or port, e.g. "crm.acme.com". Unique across the platform.
+  domain        String?  @unique
+  supportEmail  String?
+  supportPhone  String?
+  website       String?
+  address       String?
+  loginHeadline String?
+  loginSubtext  String?
+  /// Free address on the platform's domain: "<subdomain>.<PLATFORM_ROOT_DOMAIN>".
+  subdomain     String?  @unique
+  /// The public landing page on the brand's domain (off = straight to login).
+  landingEnabled  Boolean @default(true)
+  landingTitle    String?
+  landingSubtitle String?
+  /// The brand's own legal text; empty = a standard template in the brand's name.
+  termsContent    String?
+  privacyContent  String?
+  /// Monthly white-label fee for this reseller (paise); null = the platform default.
+  feeOverrideMinor Int?
+  /// When the current month's fee first failed to charge; cleared when paid.
+  feeDueSince      DateTime?
+  /// Set when the brand is switched off by the platform (e.g. unpaid fee). A suspended
+  /// brand falls back to the platform's; the reseller can't lift it by toggling isActive.
+  suspendedAt      DateTime?
+  suspendedReason  String?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("white_label_configs")
+}
+
+/// Platform-wide settings the super admin edits (single row, id "platform").
+model PlatformConfig {
+  id                  String   @id @default("platform")
+  /// Monthly fee for white-label resellers, taken from their wallet (paise). 0 = free.
+  whiteLabelFeeMinor  Int      @default(0)
+  /// Days an unpaid fee is tolerated before the brand is suspended.
+  whiteLabelGraceDays Int      @default(7)
+  updatedAt           DateTime @updatedAt
+
+  @@map("platform_config")
+}
+
+// ─── PAYMENTS & COMMISSION ────────────────────────────────────────────────────
+//
+// Every confirmed payment, from Razorpay or Stripe. `providerPaymentId` is unique, so a
+// payment can only ever be applied (and commissioned) once: the verify endpoint, the
+// webhook and a replayed request all converge on one row.
+
+model Payment {
+  id                String   @id @default(cuid())
+  tenantId          String
+  provider          String
+  providerPaymentId String   @unique
+  orderId           String?
+  amountMinor       Int
+  currency          String   @default("inr")
+  /// "subscription" | "plan_change" | "renewal"
+  purpose           String
+  planId            String?
+  createdAt         DateTime @default(now())
+
+  tenant     Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  commission ResellerCommission?
+
+  @@index([tenantId, createdAt])
+  @@map("payments")
+}
+
+/// What a reseller earned from one payment by a client it referred.
+model ResellerCommission {
+  id          String           @id @default(cuid())
+  resellerId  String
+  clientId    String
+  paymentId   String           @unique
+  /// Payment amount the commission was computed on, and the result, in minor units.
+  baseMinor   Int
+  amountMinor Int
+  rate        Float
+  currency    String           @default("inr")
+  status      CommissionStatus @default(PENDING)
+  paidAt      DateTime?
+  note        String?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  reseller Tenant  @relation("CommissionReseller", fields: [resellerId], references: [id], onDelete: Cascade)
+  client   Tenant  @relation("CommissionClient", fields: [clientId], references: [id], onDelete: Cascade)
+  payment  Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([resellerId, status])
+  @@map("reseller_commissions")
+}
+
+// ─── ROLE PERMISSIONS ─────────────────────────────────────────────────────────
+//
+// Super-admin overrides of the default role -> permission matrix in lib/permissions.ts,
+// per account type. A row can grant or revoke a permission for (accountType, role), but
+// never beyond the account type's ceiling: no row can give a RESELLER account
+// "messages.send" or "conversations.view". That ceiling is code, not data.
+
+model RolePermission {
+  id          String      @id @default(cuid())
+  accountType AccountType
+  role        UserRole
+  permission  String
+  allowed     Boolean
+  updatedAt   DateTime    @updatedAt
+
+  @@unique([accountType, role, permission])
+  @@map("role_permissions")
+}
+
+/// Per-user permission overrides — layer 4 on top of account ceiling + role defaults + role overrides.
+/// A row here grants or denies that specific permission for that user, regardless of their role.
+/// Still bounded by the account ceiling (a reseller user cannot hold messages.send, for example).
+model UserPermission {
+  id         String   @id @default(cuid())
+  userId     String
+  permission String
+  allowed    Boolean
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  user User @relation("UserPermissions", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, permission])
+  @@index([userId])
+  @@map("user_permissions")
+}
+
+// ─── WALLET ───────────────────────────────────────────────────────────────────
+//
+// Prepaid message credit, in paise. The plan pays for the software; the wallet
+// pays for messages (lib/wallet.ts). Every change is a WalletTransaction, and a
+// debit is keyed so a retried send can never be charged twice.
+
+model Wallet {
+  id                       String    @id @default(cuid())
+  tenantId                 String    @unique
+  balanceMinor             Int       @default(0)
+  currency                 String    @default("inr")
+  lowBalanceThresholdMinor Int       @default(10000)
+  lowBalanceNotifiedAt     DateTime?
+  createdAt                DateTime  @default(now())
+  updatedAt                DateTime  @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("wallets")
+}
+
+model WalletTransaction {
+  id                String        @id @default(cuid())
+  tenantId          String
+  type              WalletTxnType
+  /// Signed: positive credits, negative debits.
+  amountMinor       Int
+  balanceAfterMinor Int
+  description       String?
+  referenceType     String?
+  referenceId       String?
+  /// Makes a charge or credit happen at most once (e.g. "debit:<recipientId>").
+  idempotencyKey    String?       @unique
+  createdById       String?
+  createdAt         DateTime      @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+  @@map("wallet_transactions")
+}
+
+/// Price per message unit in paise. `resellerId` null = platform rate; a reseller's
+/// row prices that reseller's clients (never below the platform rate).
+model MessageRate {
+  id         String       @id @default(cuid())
+  category   RateCategory
+  resellerId String?
+  priceMinor Int
+  updatedAt  DateTime     @updatedAt
+
+  reseller Tenant? @relation(fields: [resellerId], references: [id], onDelete: Cascade)
+
+  @@unique([category, resellerId])
+  @@map("message_rates")
+}
+
+// ─── CUSTOMER SEGMENTS ────────────────────────────────────────────────────────
+//
+// A saved set of contact filters ("City is Delhi AND Tag is Student"). Live: the
+// matching contacts are worked out each time it's used; a campaign freezes the list
+// at launch. Rules are validated and turned into queries by lib/segments.ts.
+
+model Segment {
+  id          String   @id @default(cuid())
+  tenantId    String
+  businessId  String
+  name        String
+  description String?
+  /// { rules: SegmentRule[] } — see lib/segments.ts.
+  filters     Json
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, businessId])
+  @@map("segments")
+}
+
+// ─── BUSINESS CATEGORY ────────────────────────────────────────────────────────
+//
+// The industry an account belongs to (IT, Real Estate, Education, …). Super admins edit the
+// list; each account picks one in Settings. Deactivating a category hides it from the picker
+// without detaching accounts that already use it.
+
+model BusinessCategory {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenants Tenant[]
+
+  @@map("business_categories")
+}
+
+// ─── CHATBOT FLOW ─────────────────────────────────────────────────────────────
+
+model ChatbotFlow {
+  id          String   @id @default(cuid())
+  tenantId    String
+  name        String
+  description String?
+  trigger     String
+  keywords    String[]
+  nodes       Json
+  edges       Json
+  isActive    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  businessId String
+  business   Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  tenant     Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  flowRuns   FlowRun[]
+
+  @@index([businessId])
+  @@map("chatbot_flows")
+}
+
+// ─── TICKET ───────────────────────────────────────────────────────────────────
+
+model Ticket {
+  id             String         @id @default(cuid())
+  tenantId       String
+  conversationId String?        @unique
+  assignedToId   String?
+  subject        String
+  status         TicketStatus   @default(OPEN)
+  priority       TicketPriority @default(MEDIUM)
+  department     String?
+  slaDeadline    DateTime?
+  resolvedAt     DateTime?
+  closedAt       DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  businessId   String
+  business     Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id])
+  assignedTo   User?         @relation("AssignedTicketAgent", fields: [assignedToId], references: [id])
+
+  @@index([tenantId, status])
+  @@index([businessId, status])
+  @@map("tickets")
+}
+
+// ─── KNOWLEDGE BASE ───────────────────────────────────────────────────────────
+
+model KnowledgeDoc {
+  id         String   @id @default(cuid())
+  tenantId   String
+  businessId String
+  name       String
+  type       String
+  url        String?
+  content    String?
+  vectorIds  String[]
+  chunkCount Int      @default(0)
+  isIndexed  Boolean  @default(false)
+  metadata   Json?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([businessId])
+  @@map("knowledge_docs")
+}
+
+/// A set of FAQs drawn from SEVERAL documents at once.
+///
+/// Single-document FAQs live on KnowledgeDoc.metadata, written by the ingest
+/// worker as part of indexing. That has no room for a question whose answer
+/// spans two files — "what does the warranty cover and how do I claim it" is in
+/// the policy PDF and the claims form — and no row to hang a name on. This is
+/// that row.
+///
+/// docIds is a plain String[] rather than a relation: a set is a saved question
+/// list, not a container, and deleting a document it drew on must not delete the
+/// questions or block the delete. Ids that no longer resolve are filtered on
+/// read and reported as "1 document was removed".
+model KnowledgeFaqSet {
+  id         String   @id @default(cuid())
+  tenantId   String
+  businessId String
+  name       String
+  docIds     String[]
+
+  /// DocFaq[] — see lib/knowledgeFaq.ts. Json for the same reason the
+  /// per-document FAQs are: the list is read and written whole, never queried
+  /// into, and a row per question would buy ordering pain and nothing else.
+  faqs Json @default("[]")
+
+  /// FaqStyle — see lib/knowledgeFaq.ts. How answers in this set are written:
+  /// length, tone, audience, language. Stored rather than passed per click so a
+  /// question re-answered next month still matches the twenty beside it.
+  style Json?
+
+  /// The corpus was longer than the generator's cap, so the questions come from
+  /// the opening sections of each document rather than all of them.
+  truncated Boolean @default(false)
+  error     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, businessId])
+  @@map("knowledge_faq_sets")
+}
+
+/// A customer tapping one of your FAQ questions in WhatsApp.
+///
+/// The most direct intent signal the product can collect. A contact who taps
+/// "How do I pay?" has told you something a page view never could — they chose
+/// the question, from a list, inside their own conversation.
+///
+/// Recorded from the row id we set when sending the list, never by matching the
+/// text back: Meta truncates a row title to 24 characters, so two questions
+/// about pricing would collide on any fuzzy match.
+model FaqInteraction {
+  id             String  @id @default(cuid())
+  tenantId       String
+  businessId     String
+  contactId      String
+  conversationId String?
+  /// The question as it was sent, in full — not the truncated row title.
+  question       String
+  /// "document" or "set", and the id of the collection it came from.
+  sourceKind     String
+  sourceId       String
+
+  /// The intent weight the question carried WHEN IT WAS TAPPED.
+  ///
+  /// Copied onto the row rather than read back from the collection, because the
+  /// collection is editable: reclassifying a question next month must not
+  /// silently rewrite what last month's taps are said to have meant.
+  intent    String   @default("none")
+  points    Int      @default(0)
+  createdAt DateTime @default(now())
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  business     Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  contact      Contact       @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, businessId, createdAt(sort: Desc)])
+  @@index([contactId])
+  @@map("faq_interactions")
+}
+
+/// Whether a customer who entered a flow ever came out the other side.
+///
+/// There is no ABANDONED value on purpose. Abandonment is not an event anyone
+/// observes — the customer simply stops replying — so it cannot be written at
+/// the moment it happens without a cron guessing when "stopped" began. A run
+/// left IN_PROGRESS with no activity for a day IS abandoned, and deriving it at
+/// read time is both simpler and always current.
+enum FlowRunStatus {
+  IN_PROGRESS
+  COMPLETED
+  HANDOFF
+}
+
+/// One customer's journey through one chatbot flow.
+///
+/// Written because the conversation row cannot hold it: activeNodeId is
+/// overwritten at every step and flowVars is set to null the moment the flow
+/// ends, so the answers a customer gave — which menu branch, which address they
+/// typed — were destroyed exactly when they became worth keeping.
+///
+/// A run, not a tap. A flow is a session with a path through it, and the useful
+/// questions are about the whole journey: what did they choose, what did they
+/// tell us, and where did they give up.
+model FlowRun {
+  id             String        @id @default(cuid())
+  tenantId       String
+  businessId     String
+  contactId      String
+  conversationId String?
+  flowId         String?
+  /// Denormalised so a run survives its flow being deleted or renamed — the
+  /// export is a historical record, not a live join.
+  flowName       String
+  status         FlowRunStatus @default(IN_PROGRESS)
+
+  /// Ordered [{ nodeId, label, chose }] — the branches taken, in order.
+  path      Json @default("[]")
+  /// The flow's saveAs variables, snapshotted as they change. This is the
+  /// qualification data: what the customer picked and what they typed.
+  variables Json @default("{}")
+
+  /// Where the run currently stands, for drop-off analysis.
+  lastNodeId    String?
+  lastNodeLabel String?
+
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
+  updatedAt DateTime  @updatedAt
+
+  tenant       Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  business     Business      @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  contact      Contact       @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  flow         ChatbotFlow?  @relation(fields: [flowId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, businessId, startedAt(sort: Desc)])
+  @@index([flowId, status])
+  @@index([contactId])
+  @@map("flow_runs")
+}
+
+// ─── PLAN ────────────────────────────────────────────────────────────────────
+
+model Plan {
+  id             String  @id @default(cuid())
+  name           String  @unique
+  displayName    String
+  description    String?
+  priceMonthly   Float
+  priceAnnual    Float
+  maxContacts    Int
+  maxMsgPerMonth Int
+  maxAgents      Int
+  maxCampaigns   Int
+  maxFlows       Int     @default(5)
+  maxStorageMb   Int     @default(1024)
+  aiCredits      Int     @default(0)
+
+  // Throughput caps, checked per rolling window on every outbound send. 0 means
+  // unlimited (see isUnlimited), which is what an existing row backfills to —
+  // adding the columns must not start refusing sends for tenants already live.
+  maxMsgPerDay  Int @default(0)
+  maxMsgPerHour Int @default(0)
+
+  // Capacity caps. maxBusinesses defaults to 1 because that is what an account
+  // gets without paying for more; a tenant already over it keeps every business
+  // it has and is only stopped from creating the next one.
+  maxBusinesses    Int @default(1)
+  maxKnowledgeDocs Int @default(0)
+  maxTemplates     Int @default(0)
+  maxQuickReplies  Int @default(0)
+
+  // Per-request ceilings rather than running totals: these bound one campaign or
+  // one file, and are compared against the request itself, not against history.
+  maxCampaignRecipients Int @default(0)
+  maxUploadMb           Int @default(10)
+
+  // Days of message history kept before /api/cron/retention deletes it. 0 keeps
+  // everything forever, which is what every existing row backfills to — adding
+  // the column must never silently start destroying customer conversations.
+  retentionDays Int @default(0)
+
+  // Empty means "any model". Non-empty restricts which values a tenant may store
+  // in Business.aiModel / TenantSettings.aiModel — the lever on inference cost,
+  // since that column is otherwise free text pointing at whatever is priciest.
+  allowedAiModels String[]
+
+  allowExport Boolean @default(true)
+
+  // Which card wears the "Most Popular" ribbon. Presentation, not entitlement —
+  // it changes nothing about what the tier grants. Kept to at most one row by
+  // the admin write routes rather than by a constraint: Postgres can express
+  // "unique among rows where isPopular" with a partial index, but that turns
+  // promoting a different plan into a two-statement dance every caller has to
+  // get right, and a ribbon on two cards is a cosmetic bug, not a corrupt row.
+  isPopular Boolean @default(false)
+
+  // A PRIVATE plan is a custom, negotiated tier. It never appears on the pricing
+  // page and no self-serve path will sell it — it exists only because a
+  // super-admin built it and assigned it. PUBLIC is the default so every plan
+  // that already exists stays on the pricing page across this migration.
+  visibility PlanVisibility @default(PUBLIC)
+
+  // The tenant a private plan was negotiated for. Null on a public plan, and
+  // permitted on a private one too: an unowned private tier can be assigned to
+  // several tenants (one agency deal, many workspaces), where an owned one is
+  // locked to its tenant and every purchase path refuses it for anyone else.
+  //
+  // SetNull rather than Cascade. Deleting a tenant must not try to delete a Plan
+  // row as well — Subscription.plan has no cascade, so that delete would be
+  // restricted and would take the whole tenant delete down with it. The plan is
+  // left behind as an unowned private tier for an admin to clear up.
+  ownerTenantId String?
+  ownerTenant   Tenant? @relation("CustomPlans", fields: [ownerTenantId], references: [id], onDelete: SetNull)
+
+  /// A reseller's own plan, offered to that reseller's clients instead of the platform's
+  /// public plans. Its limits are copied from `basePlanId` (a platform plan) and can't be
+  /// raised; the reseller sets the name and price (never below the base plan's price).
+  resellerId  String?
+  reseller    Tenant? @relation("ResellerPlans", fields: [resellerId], references: [id], onDelete: Cascade)
+  basePlanId  String?
+
+  stripePriceId String?
+  aiEnabled     Boolean  @default(false)
+  ragEnabled    Boolean  @default(false)
+  whiteLabel    Boolean  @default(false)
+  advancedAi    Boolean  @default(false)
+  features      String[]
+  isActive      Boolean  @default(true)
+  sortOrder     Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  subscriptions Subscription[]
+
+  @@index([visibility])
+  @@index([ownerTenantId])
+  @@index([resellerId])
+  @@map("plans")
+}
+
+model Subscription {
+  id                 String             @id @default(cuid())
+  tenantId           String             @unique
+  planId             String
+  status             SubscriptionStatus @default(TRIALING)
+  billingCycle       BillingCycle       @default(MONTHLY)
+  currentPeriodStart DateTime
+  currentPeriodEnd   DateTime
+  trialEndsAt        DateTime?
+  cancelledAt        DateTime?
+  cancelAtPeriodEnd  Boolean            @default(false)
+  aiCreditsUsed      Int                @default(0)
+
+  /// Set when a super-admin assigned this plan by hand and Stripe cannot know
+  /// about it — an offline-invoiced custom tier with no Stripe price.
+  ///
+  /// While it is set, syncStripeSubscription leaves the row alone. Without it a
+  /// leftover Stripe subscription silently undoes the assignment: the webhook
+  /// resolves planId from the Stripe price and writes the OLD plan back on the
+  /// next invoice.paid, so a negotiated tier would quietly revert within a
+  /// billing cycle and reset the AI credits on its way out.
+  ///
+  /// Cleared automatically when a plan WITH a Stripe price is assigned, because
+  /// at that point Stripe is the source of truth again.
+  planLockedAt       DateTime?
+  razorpaySubId      String?
+  razorpayCustomerId String?
+  stripeSubId        String?
+  stripeCustomerId   String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  plan   Plan   @relation(fields: [planId], references: [id])
+
+  planChanges PlanChange[]
+
+  @@map("subscriptions")
+}
+
+/// One requested move between plans, priced by the server.
+///
+/// This row exists so that the amount a customer is charged is decided once, on the
+/// server, and then *re-read* when the payment comes back — rather than being
+/// recomputed from a request the browser could shape. The browser is only ever told
+/// which PlanChange to pay for; it never names a plan or an amount at the point of
+/// payment.
+///
+/// It is also what makes the flow safe to repeat. Stripe retries webhooks, customers
+/// refresh the success page, and double-clicks happen: `status` moves PENDING → PAID
+/// → APPLIED exactly once, so a replayed event finds the row already APPLIED and
+/// does nothing.
+model PlanChange {
+  id       String @id @default(cuid())
+  tenantId String
+
+  /// The plan they were on when the quote was made. Kept so a stale PENDING row
+  /// can be detected — if the subscription has moved on since, the quote is void.
+  fromPlanId String
+  toPlanId   String
+
+  kind   PlanChangeKind
+  status PlanChangeStatus @default(PENDING)
+
+  /// Payable amount in minor units (paise), as computed by lib/billing/proration.ts.
+  /// Integer, never a float: this is money.
+  amountDueMinor Int
+  currency       String @default("inr")
+
+  /// The window the change results in, computed at quote time. An upgrade keeps the
+  /// existing end date; a downgrade converts unused value into a new one.
+  resultPeriodStart DateTime
+  resultPeriodEnd   DateTime
+
+  /// Stripe Checkout Session for the one-off proration charge. Unique so the same
+  /// session can never be applied to two rows.
+  stripeSessionId  String? @unique
+  stripePaymentRef String?
+
+  appliedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  subscription Subscription @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
+
+  @@index([tenantId, status])
+  @@map("plan_changes")
+}
+
+enum PlanChangeKind {
+  UPGRADE
+  DOWNGRADE
+}
+
+enum PlanChangeStatus {
+  PENDING
+  PAID
+  APPLIED
+  FAILED
+  CANCELLED
+}
+
+/// Stripe event ids already handled, so a redelivery is a no-op.
+///
+/// Stripe guarantees at-least-once delivery, and two of the handlers are not
+/// naturally idempotent — resetAiUsage() would hand out a second month of AI
+/// credits, and applying a PlanChange twice would move a period end twice. The
+/// primary key is Stripe's own event id, so the insert itself is the lock.
+model ProcessedStripeEvent {
+  id          String   @id
+  type        String
+  processedAt DateTime @default(now())
+
+  @@map("processed_stripe_events")
+}
+
+// ─── AUDIT LOG ────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  tenantId   String
+  userId     String?
+  action     String
+  resource   String
+  resourceId String?
+  metadata   Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id])
+
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@index([tenantId, action])
+  @@map("audit_logs")
+}
+
+// ─── WEBSITE CMS ──────────────────────────────────────────────────────────────
+//
+// Content for the public marketing site that a super-admin edits from /admin/cms
+// instead of a developer editing components. Deliberately separate from Plan:
+// that table is billing entitlement, and rewording a pricing card must never be
+// able to change what a tenant is allowed to do.
+//
+// One row per section of a page, one row per repeatable item inside it. The
+// field shapes live in lib/cms/sections.ts, which validates every write — the
+// JSON columns are only ever written through that spec, and the public loader
+// re-normalises what it reads, so a hand-edited row cannot break a page.
+
+model CmsSection {
+  id          String   @id @default(cuid())
+  /// The page the section belongs to. Only "home" exists today.
+  page        String   @default("home")
+  /// Section key from lib/cms/sections.ts, e.g. "hero" or "pricing".
+  key         String
+  /// Off hides the whole section on the public site without losing its content.
+  isActive    Boolean  @default(true)
+  /// Section-level fields (headings, CTA labels, chat demo text).
+  content     Json     @default("{}")
+  /// Item kinds that were saved with this section. Distinguishes "the admin
+  /// removed every FAQ" (kind listed, no rows) from "this kind was added to the
+  /// spec after the section was saved" (kind missing, defaults apply).
+  itemKinds   String[]
+  updatedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  items CmsItem[]
+
+  @@unique([page, key])
+  @@map("cms_sections")
+}
+
+model CmsItem {
+  id        String   @id @default(cuid())
+  sectionId String
+  /// Collection within the section, e.g. "faq", "plan", "step".
+  kind      String
+  sortOrder Int      @default(0)
+  /// Inactive items stay editable in the admin and never render publicly.
+  isActive  Boolean  @default(true)
+  data      Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  section CmsSection @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+
+  @@index([sectionId, kind, sortOrder])
+  @@map("cms_items")
+}
+
+/// Addresses collected by the homepage newsletter form.
+model NewsletterSubscriber {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  source    String   @default("homepage")
+  createdAt DateTime @default(now())
+
+  @@map("newsletter_subscribers")
+}
+
+// ─── WEBHOOKS ─────────────────────────────────────────────────────────────────
+//
+// Two-direction integration layer:
+//   Outgoing — when platform events occur (campaign completed, message received,
+//              contact created) all active endpoints subscribed to that event
+//              receive a signed POST. Deliveries are logged so failures are visible.
+//   Incoming — external CRMs call /api/v1/* with the tenant's apiKey to send
+//              messages, create contacts or trigger broadcasts. apiKey lives on
+//              TenantSettings so there is only one per tenant.
+
+model WebhookEndpoint {
+  id          String   @id @default(cuid())
+  tenantId    String
+  url         String
+  /// Random secret used to sign the X-Webhook-Signature header (HMAC-SHA256).
+  secret      String
+  /// JSON array of event names this endpoint is subscribed to.
+  events      String[]
+  isActive    Boolean  @default(true)
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant     Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deliveries WebhookDelivery[]
+
+  @@index([tenantId])
+  @@map("webhook_endpoints")
+}
+
+model WebhookDelivery {
+  id          String    @id @default(cuid())
+  endpointId  String
+  event       String
+  payload     Json
+  statusCode  Int?
+  response    String?
+  error       String?
+  attempts    Int       @default(0)
+  deliveredAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  endpoint WebhookEndpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@index([endpointId, createdAt(sort: Desc)])
+  @@map("webhook_deliveries")
+}
