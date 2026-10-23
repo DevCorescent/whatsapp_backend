@@ -60,11 +60,23 @@ export class IntegrationsController {
     return this.svc.disconnectIntegration(scope, id);
   }
 
+  /** Called by the new direct-proxy route with id in the URL */
   @Post('whatsapp/:id/test')
   @HttpCode(HttpStatus.OK)
-  testIntegration(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
+  testIntegrationById(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
     this.logger.log(`POST /integrations/whatsapp/${id}/test — tenantId=${scope.tenantId} businessId=${scope.businessId}`);
     return this.svc.testIntegration(scope, id);
+  }
+
+  /** Called by the generic nest-proxy route with integrationId in the body */
+  @Post('whatsapp/test')
+  @HttpCode(HttpStatus.OK)
+  testIntegrationByBody(
+    @CurrentTenant() scope: TenantScope,
+    @Body() body: { integrationId: string },
+  ) {
+    this.logger.log(`POST /integrations/whatsapp/test (body) — id=${body.integrationId} tenantId=${scope.tenantId} businessId=${scope.businessId}`);
+    return this.svc.testIntegration(scope, body.integrationId);
   }
 
   @Delete('whatsapp/:id')
