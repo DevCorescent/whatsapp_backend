@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bull';
 import { PrismaModule } from '@lib/prisma';
+import { WebhookDispatchService } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, QUEUE_TEMPLATE_SYNC } from '@lib/queue';
 import { CampaignsController }      from '../../../../apps/campaigns/src/campaigns.controller';
 import { CampaignsService }         from '../../../../apps/campaigns/src/campaigns.service';
@@ -16,6 +17,6 @@ import { TemplateSyncProcessor }    from '../../../../apps/campaigns/src/process
     BullModule.registerQueue({ name: QUEUE_TEMPLATE_SYNC }),
   ],
   controllers: [CampaignsController, TemplatesController],
-  providers:   [CampaignsService, TemplatesService, CampaignSendProcessor, TemplateSyncProcessor],
+  providers:   [CampaignsService, TemplatesService, CampaignSendProcessor, TemplateSyncProcessor, WebhookDispatchService],
 })
 export class CampaignsModule {}
