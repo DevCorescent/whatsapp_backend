@@ -1,6 +1,6 @@
 import {
   Controller, Get, Post, Patch, Delete, Body, Param, Query,
-  UseGuards, HttpCode, HttpStatus,
+  UseGuards, HttpCode, HttpStatus, Logger,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
@@ -16,6 +16,8 @@ import { SettingsService } from '../settings/settings.service';
 @UseGuards(JwtAuthGuard)
 @Controller('integrations')
 export class IntegrationsController {
+  private readonly logger = new Logger(IntegrationsController.name);
+
   constructor(private readonly svc: SettingsService) {}
 
   // ── WhatsApp integrations ────────────────────────────────────────────────────
@@ -61,6 +63,7 @@ export class IntegrationsController {
   @Post('whatsapp/:id/test')
   @HttpCode(HttpStatus.OK)
   testIntegration(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
+    this.logger.log(`POST /integrations/whatsapp/${id}/test — tenantId=${scope.tenantId} businessId=${scope.businessId}`);
     return this.svc.testIntegration(scope, id);
   }
 

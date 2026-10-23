@@ -1,11 +1,13 @@
 import {
-  Injectable, NotFoundException, ForbiddenException, ConflictException,
+  Injectable, NotFoundException, ForbiddenException, ConflictException, Logger,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
 import { TenantScope, decryptSecret } from '@lib/common';
 
 @Injectable()
 export class SettingsService {
+  private readonly logger = new Logger(SettingsService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   // ── Combined settings (matches Next.js /api/settings GET/PATCH) ──────────────
@@ -252,24 +254,30 @@ export class SettingsService {
   }
 
   async testIntegration(scope: TenantScope, id: string) {
+    this.logger.log(`testIntegration start — id=${id} tenantId=${scope.tenantId} businessId=${scope.businessId}`);
     const integration = await this.getIntegration(scope, id);
+    this.logger.log(`testIntegration found — phoneNumberId=${integration.phoneNumberId} hasToken=${!!integration.accessToken} isActive=${integration.isActive}`);
     const apiVersion  = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
 
     const accessToken = decryptSecret(integration.accessToken);
+    this.logger.log(`testIntegration decryptSecret — tokenPresent=${!!accessToken} tokenPrefix=${accessToken ? accessToken.slice(0, 6) + '...' : 'null'}`);
     if (!accessToken) {
       return { ok: false, error: 'No access token stored for this integration', phoneNumber: null, qualityRating: null };
     }
 
     try {
       const url = `https://graph.facebook.com/${apiVersion}/${integration.phoneNumberId}`;
+      this.logger.log(`testIntegration → Meta GET ${url}`);
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
 
       const json: any = await res.json();
+      this.logger.log(`testIntegration ← Meta ${res.status}: ${JSON.stringify(json).slice(0, 300)}`);
 
       if (!res.ok) {
         const errMsg = json?.error?.message ?? `Meta ${res.status}`;
+        this.logger.warn(`testIntegration Meta error — code=${json?.error?.code} msg=${errMsg}`);
         return { ok: false, error: errMsg, phoneNumber: null, qualityRating: null };
       }
 
