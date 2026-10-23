@@ -1,11 +1,13 @@
 import {
-  Injectable, NotFoundException, BadRequestException,
+  Injectable, NotFoundException, BadRequestException, Logger,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
 import { TenantScope } from '@lib/common';
 
 @Injectable()
 export class ConversationsService {
+  private readonly logger = new Logger(ConversationsService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   // ── List ───────────────────────────────────────────────────────────────────
@@ -129,9 +131,14 @@ export class ConversationsService {
     mediaMimeType?: string; mediaSize?: number; type?: string; isNote?: boolean;
     interactive?: Record<string, unknown>; replyToId?: string;
   }) {
+    this.logger.log(`sendMessage start — conversationId=${conversationId} tenantId=${scope.tenantId} businessId=${scope.businessId} type=${payload.type ?? 'TEXT'} isNote=${payload.isNote}`);
+
     const { data: conv } = await this.findOne(scope, conversationId);
+    this.logger.log(`sendMessage conv found — whatsappIntegrationId=${conv.whatsappIntegrationId ?? 'null'}`);
+
     const isInteractive = (payload.type ?? '').toUpperCase() === 'INTERACTIVE';
     if (!payload.text && !payload.mediaUrl && !isInteractive) {
+      this.logger.warn('sendMessage — missing text/mediaUrl/interactive');
       throw new BadRequestException('Either text, mediaUrl, or interactive payload is required');
     }
 
@@ -144,15 +151,20 @@ export class ConversationsService {
           where: { businessId: scope.businessId, isActive: true },
         });
 
+    this.logger.log(`sendMessage integration — found=${!!integration} phoneNumberId=${integration?.phoneNumberId ?? 'null'} hasToken=${!!(integration?.accessToken)}`);
+
     if (!integration) throw new BadRequestException('No active WhatsApp integration found');
     if (!integration.accessToken) throw new BadRequestException('WhatsApp integration has no access token');
 
     const contact = conv.contact as any;
     const to: string = contact.phone ?? contact.waId;
+    this.logger.log(`sendMessage contact — to=${to ? to.slice(0, 6) + '***' : 'MISSING'}`);
     if (!to) throw new BadRequestException('Contact has no phone number');
 
     if (!payload.isNote) {
+      this.logger.log(`sendMessage → calling Meta API via sendWhatsApp`);
       await this.sendWhatsApp(integration.phoneNumberId, integration.accessToken, to, payload);
+      this.logger.log(`sendMessage ← Meta API OK`);
     }
 
     const messageData: any = {
@@ -178,6 +190,7 @@ export class ConversationsService {
       messageData.mediaId = payload.mediaId;
     }
     const message = await this.prisma.message.create({ data: messageData });
+    this.logger.log(`sendMessage saved — messageId=${message.id}`);
 
     await this.prisma.conversation.update({
       where: { id: conversationId },
@@ -187,6 +200,7 @@ export class ConversationsService {
       },
     });
 
+    this.logger.log(`sendMessage done — messageId=${message.id}`);
     return message;
   }
 
@@ -220,8 +234,11 @@ export class ConversationsService {
       apiBody.context = { message_id: payload.replyToId };
     }
 
+    const metaUrl = `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`;
+    this.logger.log(`sendWhatsApp → ${metaUrl} type=${type} tokenPrefix=${accessToken.slice(0, 6)}...`);
+
     const res = await fetch(
-      `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`,
+      metaUrl,
       {
         method:  'POST',
         headers: {
@@ -232,9 +249,11 @@ export class ConversationsService {
       },
     );
 
+    const responseText = await res.text();
     if (!res.ok) {
-      const err = await res.text();
-      throw new BadRequestException(`WhatsApp API error: ${err}`);
+      this.logger.error(`sendWhatsApp ← Meta ${res.status} ${res.statusText}: ${responseText.slice(0, 600)}`);
+      throw new BadRequestException(`WhatsApp API error: ${responseText}`);
     }
+    this.logger.log(`sendWhatsApp ← Meta ${res.status} OK: ${responseText.slice(0, 200)}`);
   }
 }

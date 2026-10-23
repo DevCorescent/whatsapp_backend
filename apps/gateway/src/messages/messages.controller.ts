@@ -1,4 +1,4 @@
-import { Controller, Post, Body, UseGuards } from '@nestjs/common';
+import { Controller, Post, Body, UseGuards, Logger } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
 import { ConversationsService } from '../../../../apps/messaging/src/conversations/conversations.service';
@@ -13,6 +13,8 @@ import { ConversationsService } from '../../../../apps/messaging/src/conversatio
 @UseGuards(JwtAuthGuard)
 @Controller('messages')
 export class MessagesController {
+  private readonly logger = new Logger(MessagesController.name);
+
   constructor(private readonly svc: ConversationsService) {}
 
   @Post()
@@ -34,6 +36,7 @@ export class MessagesController {
       mediaSize?:     number;
     },
   ) {
+    this.logger.log(`POST /messages — conversationId=${body.conversationId} type=${body.type ?? 'TEXT'} tenantId=${scope.tenantId} businessId=${scope.businessId}`);
     const { conversationId, content, ...rest } = body;
     // Next.js sends `content`; the service expects `text`
     const payload = { ...rest, text: rest.text ?? content };
