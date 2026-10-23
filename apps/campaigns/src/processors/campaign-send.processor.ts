@@ -178,32 +178,33 @@ export class CampaignSendProcessor {
   // Postgres guarantees only ONE concurrent UPDATE matches the WHERE clause
   // on the transition from RUNNING → COMPLETED, so the webhook fires exactly once.
   private async tryComplete(campaignId: string, tenantId: string): Promise<void> {
+    // Prisma maps camelCase fields to quoted camelCase columns in Postgres (confirmed by migration SQL).
     const rows = await this.prisma.$queryRaw<Array<{
-      tenant_id: string; sent_count: bigint; failed_count: bigint;
-      delivered_count: bigint; read_count: bigint; total_count: bigint;
-      completed_at: Date;
+      tenantId: string; sentCount: bigint; failedCount: bigint;
+      deliveredCount: bigint; readCount: bigint; totalCount: bigint;
+      completedAt: Date;
     }>>`
       UPDATE campaigns
-      SET    status = 'COMPLETED', completed_at = NOW()
+      SET    status = 'COMPLETED', "completedAt" = NOW()
       WHERE  id     = ${campaignId}
         AND  status = 'RUNNING'
-        AND  sent_count + failed_count >= total_count
-      RETURNING tenant_id, sent_count, failed_count, delivered_count, read_count, total_count, completed_at
+        AND  "sentCount" + "failedCount" >= "totalCount"
+      RETURNING "tenantId", "sentCount", "failedCount", "deliveredCount", "readCount", "totalCount", "completedAt"
     `;
 
-    if (!rows.length) return; // Not done yet, or already completed by another worker
+    if (!rows.length) return;
 
-    this.campaignCache.delete(campaignId); // evict stale cache entry
+    this.campaignCache.delete(campaignId);
 
     const c = rows[0];
-    this.webhooks.dispatchEvent(c.tenant_id ?? tenantId, 'campaign.completed', {
+    this.webhooks.dispatchEvent(c.tenantId ?? tenantId, 'campaign.completed', {
       campaignId,
-      sentCount:      Number(c.sent_count),
-      failedCount:    Number(c.failed_count),
-      deliveredCount: Number(c.delivered_count),
-      readCount:      Number(c.read_count),
-      totalCount:     Number(c.total_count),
-      completedAt:    c.completed_at?.toISOString(),
+      sentCount:      Number(c.sentCount),
+      failedCount:    Number(c.failedCount),
+      deliveredCount: Number(c.deliveredCount),
+      readCount:      Number(c.readCount),
+      totalCount:     Number(c.totalCount),
+      completedAt:    c.completedAt?.toISOString(),
     });
   }
 }
