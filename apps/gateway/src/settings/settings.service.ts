@@ -2,7 +2,7 @@ import {
   Injectable, NotFoundException, ForbiddenException, ConflictException,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope } from '@lib/common';
+import { TenantScope, decryptSecret } from '@lib/common';
 
 @Injectable()
 export class SettingsService {
@@ -255,24 +255,47 @@ export class SettingsService {
     const integration = await this.getIntegration(scope, id);
     const apiVersion  = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
 
+    const accessToken = decryptSecret(integration.accessToken);
+    if (!accessToken) {
+      return { ok: false, error: 'No access token stored for this integration', phoneNumber: null, qualityRating: null };
+    }
+
     try {
       const url = `https://graph.facebook.com/${apiVersion}/${integration.phoneNumberId}`;
       const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${integration.accessToken}` },
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
 
+      const json: any = await res.json();
+
       if (!res.ok) {
-        return { ok: false, phoneNumber: null, qualityRating: null };
+        const errMsg = json?.error?.message ?? `Meta ${res.status}`;
+        return { ok: false, error: errMsg, phoneNumber: null, qualityRating: null };
       }
 
-      const json: any = await res.json();
+      // Refresh snapshot so the settings card shows current Meta data
+      await this.prisma.whatsAppIntegration.update({
+        where: { id },
+        data: {
+          ...(json.display_phone_number     && { phoneNumber:            json.display_phone_number }),
+          ...(json.verified_name            && { displayName:            json.verified_name }),
+          ...(json.quality_rating           && { qualityRating:          json.quality_rating }),
+          ...(json.code_verification_status && { codeVerificationStatus: json.code_verification_status }),
+        },
+      });
+
       return {
-        ok:            true,
-        phoneNumber:   json.display_phone_number ?? integration.phoneNumber,
-        qualityRating: json.quality_rating ?? null,
+        ok:                     true,
+        integrationId:          id,
+        phoneNumberId:          integration.phoneNumberId,
+        wabaId:                 integration.whatsappBusinessId,
+        displayPhoneNumber:     json.display_phone_number          ?? integration.phoneNumber,
+        verifiedName:           json.verified_name                 ?? integration.displayName,
+        qualityRating:          json.quality_rating                ?? null,
+        codeVerificationStatus: json.code_verification_status      ?? null,
       };
     } catch {
-      return { ok: false, phoneNumber: null, qualityRating: null };
+      return { ok: false, error: 'Could not reach Meta API', phoneNumber: null, qualityRating: null };
     }
   }
 

@@ -2,7 +2,7 @@ import {
   Injectable, NotFoundException, BadRequestException, Logger,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope } from '@lib/common';
+import { TenantScope, decryptSecret } from '@lib/common';
 
 @Injectable()
 export class ConversationsService {
@@ -162,8 +162,10 @@ export class ConversationsService {
     if (!to) throw new BadRequestException('Contact has no phone number');
 
     if (!payload.isNote) {
+      const accessToken = decryptSecret(integration.accessToken);
+      if (!accessToken) throw new BadRequestException('WhatsApp integration access token could not be decrypted — check ENCRYPTION_KEY');
       this.logger.log(`sendMessage → calling Meta API via sendWhatsApp`);
-      await this.sendWhatsApp(integration.phoneNumberId, integration.accessToken, to, payload);
+      await this.sendWhatsApp(integration.phoneNumberId, accessToken, to, payload);
       this.logger.log(`sendMessage ← Meta API OK`);
     }
 
