@@ -1,10 +1,10 @@
 import {
-  Controller, Get, Post, Query, Headers, Req,
+  Controller, Get, Post, Query, Headers, Req, Res,
   HttpCode, HttpStatus, ForbiddenException, Logger,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
-import { Request } from 'express';
+import { Request, Response } from 'express';
 import { WebhookService } from '../../../../apps/messaging/src/webhook/webhook.service';
 import { BillingService } from '../../../../apps/billing/src/billing.service';
 import type { WAWebhookPayload } from '../../../../apps/messaging/src/webhook/webhook.types';
@@ -21,17 +21,22 @@ export class GatewayWebhookController {
   ) {}
 
   // ── GET: Meta webhook verification challenge ──────────────────────────────
+  // Uses @Res() to send the raw challenge string directly — bypassing the
+  // global TransformInterceptor which would otherwise wrap it in { success, data }
+  // and cause Meta's verification to fail (it expects the bare challenge back).
   @Get('whatsapp')
   @ApiOperation({ summary: 'Meta webhook verification challenge' })
   verifyWhatsApp(
     @Query('hub.mode')         mode:      string,
     @Query('hub.verify_token') token:     string,
     @Query('hub.challenge')    challenge: string,
-  ): string {
+    @Res() res: Response,
+  ): void {
     const expected = this.cfg.get<string>('WHATSAPP_VERIFY_TOKEN', '');
     if (mode === 'subscribe' && token === expected) {
       this.logger.log('Webhook verified');
-      return challenge;
+      res.status(200).send(challenge);
+      return;
     }
     throw new ForbiddenException('Webhook verification failed');
   }
