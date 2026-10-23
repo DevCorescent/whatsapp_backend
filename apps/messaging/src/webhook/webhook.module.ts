@@ -4,12 +4,14 @@ import { QUEUE_INBOUND_MESSAGE } from '@lib/queue';
 import { WebhookDispatchService } from '@lib/common';
 import { WebhookController } from './webhook.controller';
 import { WebhookService } from './webhook.service';
+import { StatusBufferService } from './status-buffer.service';
 
 @Module({
   imports: [
     BullModule.registerQueue({ name: QUEUE_INBOUND_MESSAGE }),
   ],
   controllers: [WebhookController],
-  providers: [WebhookService, WebhookDispatchService],
+  providers: [WebhookService, WebhookDispatchService, StatusBufferService],
+  exports: [StatusBufferService],
 })
 export class WebhookModule {}

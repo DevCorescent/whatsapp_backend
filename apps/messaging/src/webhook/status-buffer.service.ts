@@ -1,0 +1,136 @@
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { PrismaService } from '@lib/prisma';
+
+interface Buffered {
+  tenantId:    string;
+  waMessageId: string;
+  status:      string;
+  rank:        number;
+  deliveredAt?: Date;
+  readAt?:      Date;
+  failedAt?:    Date;
+  errorCode?:   number;
+  errorTitle?:  string;
+}
+
+const STATUS_RANK: Record<string, number> = {
+  pending: 0, sent: 1, delivered: 2, read: 3, failed: 4,
+};
+
+@Injectable()
+export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(StatusBufferService.name);
+
+  // keyed by waMessageId — keeps the highest-rank status per message
+  private readonly buffer = new Map<string, Buffered>();
+  private timer: NodeJS.Timeout | null = null;
+
+  constructor(private readonly prisma: PrismaService) {}
+
+  onModuleInit() {
+    this.timer = setInterval(() => { void this.flush(); }, 5_000);
+  }
+
+  async onModuleDestroy() {
+    if (this.timer) clearInterval(this.timer);
+    await this.flush();
+  }
+
+  buffer(tenantId: string, waMessageId: string, status: string, extras?: {
+    deliveredAt?: Date; readAt?: Date; failedAt?: Date;
+    errorCode?: number; errorTitle?: string;
+  }) {
+    const rank = STATUS_RANK[status] ?? -1;
+    if (rank < 0) return;
+
+    const existing = this.buffer.get(waMessageId);
+    if (existing && existing.rank >= rank) return; // already at higher/equal rank
+
+    this.buffer.set(waMessageId, { tenantId, waMessageId, status, rank, ...extras });
+  }
+
+  async flush() {
+    if (this.buffer.size === 0) return;
+
+    // Snapshot and clear atomically
+    const items = [...this.buffer.values()];
+    this.buffer.clear();
+
+    // Group by (tenantId, status) for bulk updateMany
+    const groups = new Map<string, Buffered[]>();
+    for (const item of items) {
+      const key = `${item.tenantId}:${item.status}`;
+      const g = groups.get(key);
+      if (g) g.push(item);
+      else groups.set(key, [item]);
+    }
+
+    const ops: Promise<unknown>[] = [];
+
+    for (const group of groups.values()) {
+      const { tenantId, status, rank } = group[0];
+      const ids = group.map(g => g.waMessageId);
+
+      const msgData: Record<string, unknown> = {
+        status:     status.toUpperCase(),
+        statusRank: rank,
+      };
+      if (status === 'delivered') msgData.deliveredAt = group[0].deliveredAt ?? new Date();
+      if (status === 'read')      msgData.readAt      = group[0].readAt      ?? new Date();
+      if (status === 'failed')    msgData.failedAt    = group[0].failedAt    ?? new Date();
+
+      // Bulk update messages table
+      ops.push(
+        this.prisma.message.updateMany({
+          where: { tenantId, waMessageId: { in: ids }, statusRank: { lt: rank } },
+          data:  msgData,
+        }).catch(err => this.logger.error(`message flush (${status}): ${err.message}`)),
+      );
+
+      // Bulk update campaign_contacts table
+      if (status === 'delivered') {
+        ops.push(
+          this.prisma.campaignContact.updateMany({
+            where: { waMessageId: { in: ids } },
+            data:  { status: 'DELIVERED', deliveredAt: new Date() },
+          }).catch(err => this.logger.error(`campaignContact flush (delivered): ${err.message}`)),
+        );
+      } else if (status === 'read') {
+        ops.push(
+          this.prisma.campaignContact.updateMany({
+            where: { waMessageId: { in: ids } },
+            data:  { status: 'READ', readAt: new Date() },
+          }).catch(err => this.logger.error(`campaignContact flush (read): ${err.message}`)),
+        );
+      } else if (status === 'failed') {
+        // Failed entries may each have different error codes — update individually
+        const failedItems = group.filter(g => g.errorCode !== undefined);
+        const failedNoCode = group.filter(g => g.errorCode === undefined);
+
+        if (failedNoCode.length) {
+          ops.push(
+            this.prisma.campaignContact.updateMany({
+              where: { waMessageId: { in: failedNoCode.map(g => g.waMessageId) } },
+              data:  { status: 'FAILED', failedAt: new Date() },
+            }).catch(err => this.logger.error(`campaignContact flush (failed): ${err.message}`)),
+          );
+        }
+
+        for (const f of failedItems) {
+          ops.push(
+            this.prisma.campaignContact.updateMany({
+              where: { waMessageId: f.waMessageId },
+              data: {
+                status: 'FAILED', failedAt: f.failedAt ?? new Date(),
+                errorCode: f.errorCode, errorTitle: f.errorTitle, failedReason: f.errorTitle,
+              },
+            }).catch(err => this.logger.error(`campaignContact flush (failed w/code): ${err.message}`)),
+          );
+        }
+      }
+    }
+
+    await Promise.allSettled(ops);
+    this.logger.debug(`Flushed ${items.length} status updates → ${ops.length} bulk DB ops`);
+  }
+}

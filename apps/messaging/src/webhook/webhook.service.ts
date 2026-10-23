@@ -6,6 +6,7 @@ import * as crypto from 'crypto';
 import { PrismaService } from '@lib/prisma';
 import { WebhookDispatchService } from '@lib/common';
 import { QUEUE_INBOUND_MESSAGE } from '@lib/queue';
+import { StatusBufferService } from './status-buffer.service';
 import type { WAChangeValue, WAMessage, WAStatus, WAContact } from './webhook.types';
 
 @Injectable()
@@ -13,9 +14,10 @@ export class WebhookService {
   private readonly logger = new Logger(WebhookService.name);
 
   constructor(
-    private readonly prisma:      PrismaService,
-    private readonly cfg:         ConfigService,
-    private readonly webhooks:    WebhookDispatchService,
+    private readonly prisma:        PrismaService,
+    private readonly cfg:           ConfigService,
+    private readonly webhooks:      WebhookDispatchService,
+    private readonly statusBuffer:  StatusBufferService,
     @InjectQueue(QUEUE_INBOUND_MESSAGE) private readonly inboundQueue: Queue,
   ) {}
 
@@ -120,11 +122,9 @@ export class WebhookService {
       );
     }
 
-    // Process delivery statuses — sequential
+    // Buffer delivery statuses — flushed to DB in bulk every 5 s
     for (const status of value.statuses ?? []) {
-      await this.processStatus(identity.tenantId, status).catch(err =>
-        this.logger.error(`Failed to process status ${status.id}`, err),
-      );
+      this.processStatus(identity.tenantId, status);
     }
   }
 
@@ -189,57 +189,18 @@ export class WebhookService {
     }
   }
 
-  // ── Status processing ─────────────────────────────────────────────────────
+  // ── Status processing — buffered, flushed in bulk every 5 s ─────────────
 
-  private readonly STATUS_RANK: Record<string, number> = {
-    pending: 0, sent: 1, delivered: 2, read: 3, failed: 4,
-  };
-
-  private async processStatus(tenantId: string, status: WAStatus): Promise<void> {
-    const rank = this.STATUS_RANK[status.status] ?? -1;
-    if (rank < 0) return;
-
+  private processStatus(tenantId: string, status: WAStatus): void {
     const now = new Date();
-
-    await this.prisma.message.updateMany({
-      where: {
-        waMessageId: status.id,
-        tenantId,
-        statusRank: { lt: rank },
-      },
-      data: {
-        status:     status.status.toUpperCase() as any,
-        statusRank: rank,
-        ...(status.status === 'delivered' ? { deliveredAt: now } : {}),
-        ...(status.status === 'read'      ? { readAt:      now } : {}),
-        ...(status.status === 'failed'    ? { failedAt:    now } : {}),
-      },
-    }).catch(() => {});
-
-    // On failure: store error code + title on the campaign recipient row so the
-    // next broadcast can skip or deprioritise risky numbers.
-    if (status.status === 'failed' && status.errors?.length) {
-      const { code, title } = status.errors[0];
-      await this.prisma.campaignContact.updateMany({
-        where: { waMessageId: status.id },
-        data: {
-          status:      'FAILED',
-          failedAt:    now,
-          errorCode:   code,
-          errorTitle:  title,
-          failedReason: title,
-        },
-      }).catch(() => {});
-    } else if (status.status === 'delivered') {
-      await this.prisma.campaignContact.updateMany({
-        where: { waMessageId: status.id },
-        data: { status: 'DELIVERED', deliveredAt: now },
-      }).catch(() => {});
-    } else if (status.status === 'read') {
-      await this.prisma.campaignContact.updateMany({
-        where: { waMessageId: status.id },
-        data: { status: 'READ', readAt: now },
-      }).catch(() => {});
-    }
+    const extras: Parameters<StatusBufferService['buffer']>[3] = {
+      ...(status.status === 'delivered' ? { deliveredAt: now } : {}),
+      ...(status.status === 'read'      ? { readAt:      now } : {}),
+      ...(status.status === 'failed'    ? { failedAt:    now } : {}),
+      ...(status.status === 'failed' && status.errors?.length
+        ? { errorCode: status.errors[0].code, errorTitle: status.errors[0].title }
+        : {}),
+    };
+    this.statusBuffer.buffer(tenantId, status.id, status.status, extras);
   }
 }
