@@ -103,10 +103,9 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
           }).catch(err => this.logger.error(`campaignContact flush (read): ${err.message}`)),
         );
       } else if (status === 'failed') {
-        // Failed entries may each have different error codes — update individually
-        const failedItems = group.filter(g => g.errorCode !== undefined);
+        // Fix #4: group failed items by (errorCode, errorTitle) — one updateMany per error code,
+        // not one per message. A campaign blast might have the same error for thousands of numbers.
         const failedNoCode = group.filter(g => g.errorCode === undefined);
-
         if (failedNoCode.length) {
           ops.push(
             this.prisma.campaignContact.updateMany({
@@ -116,14 +115,19 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
           );
         }
 
-        for (const f of failedItems) {
+        const codeGroups = new Map<string, Buffered[]>();
+        for (const f of group.filter(g => g.errorCode !== undefined)) {
+          const codeKey = `${f.errorCode}:${f.errorTitle ?? ''}`;
+          const cg = codeGroups.get(codeKey);
+          if (cg) cg.push(f);
+          else codeGroups.set(codeKey, [f]);
+        }
+        for (const cg of codeGroups.values()) {
+          const { errorCode, errorTitle, failedAt } = cg[0];
           ops.push(
             this.prisma.campaignContact.updateMany({
-              where: { waMessageId: f.waMessageId },
-              data: {
-                status: 'FAILED', failedAt: f.failedAt ?? new Date(),
-                errorCode: f.errorCode, errorTitle: f.errorTitle, failedReason: f.errorTitle,
-              },
+              where: { waMessageId: { in: cg.map(g => g.waMessageId) } },
+              data:  { status: 'FAILED', failedAt: failedAt ?? new Date(), errorCode, errorTitle, failedReason: errorTitle },
             }).catch(err => this.logger.error(`campaignContact flush (failed w/code): ${err.message}`)),
           );
         }

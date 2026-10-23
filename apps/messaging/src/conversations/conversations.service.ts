@@ -36,7 +36,6 @@ export class ConversationsService {
         include: {
           contact:    { select: { id: true, name: true, phone: true, avatarUrl: true } },
           assignedTo: { select: { id: true, name: true, email: true } },
-          messages:   { orderBy: { createdAt: 'desc' }, take: 1 },
         },
       }),
       this.prisma.conversation.count({ where }),

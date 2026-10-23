@@ -9,9 +9,22 @@ import { QUEUE_INBOUND_MESSAGE } from '@lib/queue';
 import { StatusBufferService } from './status-buffer.service';
 import type { WAChangeValue, WAMessage, WAStatus, WAContact } from './webhook.types';
 
+// Fix #3: cache per-phone-number integration row — merges the two separate
+// DB reads (resolveAppSecret + resolveTenant) that previously ran on every webhook.
+interface IntegrationRow {
+  id:                  string;
+  tenantId:            string;
+  businessId:          string;
+  appSecret:           string | null;
+  business:            { whatsappAppSecret: string | null } | null;
+}
+
 @Injectable()
 export class WebhookService {
   private readonly logger = new Logger(WebhookService.name);
+
+  private readonly integrationCache = new Map<string, { data: IntegrationRow; expiresAt: number }>();
+  private readonly INTEGRATION_TTL_MS = 5 * 60 * 1_000;
 
   constructor(
     private readonly prisma:        PrismaService,
@@ -20,6 +33,25 @@ export class WebhookService {
     private readonly statusBuffer:  StatusBufferService,
     @InjectQueue(QUEUE_INBOUND_MESSAGE) private readonly inboundQueue: Queue,
   ) {}
+
+  // ── Integration cache — one DB read per phone number per 5 min ───────────
+
+  private async getIntegration(phoneNumberId: string): Promise<IntegrationRow | null> {
+    const cached = this.integrationCache.get(phoneNumberId);
+    if (cached && cached.expiresAt > Date.now()) return cached.data;
+
+    const row = await this.prisma.whatsAppIntegration.findUnique({
+      where:  { phoneNumberId },
+      select: {
+        id: true, tenantId: true, businessId: true, appSecret: true,
+        business: { select: { whatsappAppSecret: true } },
+      },
+    }).catch(() => null);
+
+    if (!row) return null;
+    this.integrationCache.set(phoneNumberId, { data: row, expiresAt: Date.now() + this.INTEGRATION_TTL_MS });
+    return row;
+  }
 
   // ── Signature verification ────────────────────────────────────────────────
 
@@ -52,15 +84,10 @@ export class WebhookService {
 
   async resolveAppSecret(phoneNumberId: string | null): Promise<string> {
     if (phoneNumberId) {
-      const integration = await this.prisma.whatsAppIntegration.findUnique({
-        where:  { phoneNumberId },
-        select: { appSecret: true, business: { select: { whatsappAppSecret: true } } },
-      }).catch(() => null);
-
+      const integration = await this.getIntegration(phoneNumberId);
       if (integration?.appSecret) return this.decrypt(integration.appSecret);
       if (integration?.business?.whatsappAppSecret) return this.decrypt(integration.business.whatsappAppSecret);
     }
-
     return this.cfg.get<string>('WHATSAPP_APP_SECRET', '');
   }
 
@@ -84,14 +111,7 @@ export class WebhookService {
   // ── Tenant resolution ─────────────────────────────────────────────────────
 
   async resolveTenant(phoneNumberId: string) {
-    const integration = await this.prisma.whatsAppIntegration.findUnique({
-      where:  { phoneNumberId },
-      select: {
-        id:         true,
-        tenantId:   true,
-        businessId: true,
-      },
-    });
+    const integration = await this.getIntegration(phoneNumberId);
     if (!integration) return null;
     return {
       tenantId:              integration.tenantId,
