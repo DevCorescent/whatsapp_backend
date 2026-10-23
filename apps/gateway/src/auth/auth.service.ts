@@ -306,6 +306,47 @@ export class AuthService {
     // TODO: send email via SMTP when email service is configured
   }
 
+  // ── Workspace list (for multi-workspace selector) ─────────────────────────
+
+  async getWorkspaces(email: string, password: string) {
+    const users = await this.prisma.user.findMany({
+      where:  { email, isActive: true },
+      select: {
+        id: true, password: true, role: true, tenantId: true,
+        tenant: {
+          select: { slug: true, name: true, accountType: true, isActive: true },
+        },
+      },
+    });
+
+    if (!users.length) throw new UnauthorizedException('Invalid credentials');
+
+    // Validate password against each record (invited users may have different passwords)
+    const workspaces: Array<{
+      tenantId: string; tenantSlug: string; tenantName: string;
+      accountType: string; role: string; userId: string;
+    }> = [];
+
+    for (const u of users) {
+      if (!u.tenant.isActive) continue;
+      const valid = await bcrypt.compare(password, u.password);
+      if (valid) {
+        workspaces.push({
+          tenantId:    u.tenantId,
+          tenantSlug:  u.tenant.slug,
+          tenantName:  u.tenant.name,
+          accountType: u.tenant.accountType,
+          role:        u.role,
+          userId:      u.id,
+        });
+      }
+    }
+
+    if (!workspaces.length) throw new UnauthorizedException('Invalid credentials');
+
+    return { workspaces };
+  }
+
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   private async uniqueSlug(base: string): Promise<string> {

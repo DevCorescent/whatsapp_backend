@@ -30,6 +30,13 @@ export class AuthController {
     return this.authService.register(dto);
   }
 
+  @Post('workspaces')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'List all workspaces for a set of credentials (multi-workspace selector)' })
+  async workspaces(@Body() body: { email: string; password: string }) {
+    return this.authService.getWorkspaces(body.email, body.password);
+  }
+
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Send password reset email' })
