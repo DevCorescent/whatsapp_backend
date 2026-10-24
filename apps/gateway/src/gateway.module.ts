@@ -56,14 +56,20 @@ import { WebhooksModule }     from './webhooks/webhooks.module';
     BullModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
-      useFactory: (cfg: ConfigService) => ({
-        redis: {
-          host:     cfg.get('REDIS_HOST', 'localhost'),
-          port:     cfg.get<number>('REDIS_PORT', 6379),
-          password: cfg.get('REDIS_PASSWORD'),
-          tls:      cfg.get('REDIS_TLS') === 'true' ? {} : undefined,
-        },
-      }),
+      useFactory: (cfg: ConfigService) => {
+        const host     = cfg.get<string>('REDIS_HOST', 'localhost');
+        const port     = cfg.get<number>('REDIS_PORT', 6379);
+        const password = cfg.get<string>('REDIS_PASSWORD', '');
+        const useTls   = cfg.get<string>('REDIS_TLS') === 'true';
+
+        if (useTls && host && password) {
+          // Upstash and other TLS-only Redis providers require the rediss:// URL form;
+          // the separate host/port/tls object approach triggers MaxRetriesPerRequestError.
+          return { url: `rediss://default:${encodeURIComponent(password)}@${host}:${port}` };
+        }
+
+        return { redis: { host, port, password: password || undefined } };
+      },
     }),
 
     PrismaModule,
