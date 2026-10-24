@@ -1,61 +1,125 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
 import { TenantScope } from '@lib/common';
 
-// ── Filter builder ─────────────────────────────────────────────────────────────
+// ── Rule types (mirrors lib/segmentRules.ts in the Next.js app) ───────────────
 
-interface FilterRule {
-  field:    string;
-  operator: string;
-  value:    unknown;
+const TEXT_FIELDS = ['name', 'location', 'company', 'source', 'email'] as const;
+type TextField = (typeof TEXT_FIELDS)[number];
+
+type SegmentRule =
+  | { field: TextField;       op: 'is' | 'contains';       values: string[] }
+  | { field: 'tags';          op: 'any' | 'all' | 'none';  values: string[] }
+  | { field: 'status';        op: 'is';                     values: ('active' | 'opted_out' | 'blacklisted')[] }
+  | { field: 'leadStage';     op: 'any';                    values: string[] }
+  | { field: 'custom'; key: string; op: 'is' | 'contains'; values: string[] };
+
+interface SegmentFilters {
+  rules: SegmentRule[];
 }
 
-interface FilterSpec {
-  rules?: FilterRule[];
+// ── Validation ─────────────────────────────────────────────────────────────────
+
+function validateFilters(raw: unknown): SegmentFilters {
+  if (!raw || typeof raw !== 'object') throw new BadRequestException('filters must be an object');
+  const f = raw as Record<string, unknown>;
+  if (!Array.isArray(f.rules)) throw new BadRequestException('filters.rules must be an array');
+  if (f.rules.length > 20) throw new BadRequestException('At most 20 rules allowed');
+
+  for (const rule of f.rules) {
+    if (!rule || typeof rule !== 'object') throw new BadRequestException('Each rule must be an object');
+    const r = rule as Record<string, unknown>;
+    if (typeof r.field !== 'string') throw new BadRequestException('Each rule must have a string field');
+    if (!Array.isArray(r.values) || r.values.length === 0)
+      throw new BadRequestException(`Rule "${r.field}" must have a non-empty values array`);
+    if (r.field === 'custom' && typeof r.key !== 'string')
+      throw new BadRequestException('Custom rules must have a key property');
+  }
+
+  return f as unknown as SegmentFilters;
 }
 
-function buildWhere(filters: unknown): Record<string, unknown> {
-  const spec = filters as FilterSpec;
-  if (!spec || !Array.isArray(spec.rules) || spec.rules.length === 0) return {};
+// ── Where-clause builder (full port of lib/segments.ts) ───────────────────────
 
-  const andClauses: Record<string, unknown>[] = [];
+function textClause(field: TextField, op: 'is' | 'contains', values: string[]): Record<string, unknown> {
+  return {
+    OR: values.map((v) => ({
+      [field]: op === 'is'
+        ? { equals: v, mode: 'insensitive' }
+        : { contains: v, mode: 'insensitive' },
+    })),
+  };
+}
 
-  for (const rule of spec.rules) {
+async function buildWhere(
+  prisma: PrismaService,
+  tenantId: string,
+  businessId: string,
+  rules: SegmentRule[],
+): Promise<Record<string, unknown>> {
+  if (!rules.length) return { tenantId, businessId, isBlocked: false };
+
+  const and: Record<string, unknown>[] = [];
+  let blacklisted: string[] | null = null;
+
+  const getBlacklisted = async (): Promise<string[]> => {
+    if (blacklisted) return blacklisted;
+    const rows = await prisma.blacklistEntry.findMany({
+      where: { OR: [{ tenantId }, { tenantId: null }] },
+      select: { phone: true },
+    });
+    blacklisted = rows.map((r) => r.phone);
+    return blacklisted;
+  };
+
+  for (const rule of rules) {
     switch (rule.field) {
+      case 'name':
+      case 'location':
+      case 'company':
       case 'source':
-        andClauses.push({ source: { equals: rule.value as string, mode: 'insensitive' } });
+      case 'email':
+        and.push(textClause(rule.field, rule.op, rule.values));
         break;
 
-      case 'optedOut':
-        andClauses.push({ optedOut: Boolean(rule.value) });
+      case 'tags':
+        if (rule.op === 'any')
+          and.push({ tags: { some: { tagId: { in: rule.values } } } });
+        else if (rule.op === 'none')
+          and.push({ tags: { none: { tagId: { in: rule.values } } } });
+        else // 'all' — every tag must be present
+          for (const tagId of rule.values)
+            and.push({ tags: { some: { tagId } } });
         break;
 
-      case 'isBlocked':
-        andClauses.push({ isBlocked: Boolean(rule.value) });
+      case 'leadStage':
+        and.push({ leads: { some: { stageId: { in: rule.values } } } });
         break;
 
-      case 'tags': {
-        const tagNames = Array.isArray(rule.value) ? (rule.value as string[]) : [rule.value as string];
-        andClauses.push({
-          tags: {
-            some: {
-              tag: {
-                name: { in: tagNames },
-              },
-            },
-          },
-        });
+      case 'status': {
+        const orClauses: Record<string, unknown>[] = [];
+        for (const s of rule.values) {
+          if (s === 'opted_out')   orClauses.push({ optedOut: true });
+          if (s === 'active')      orClauses.push({ optedOut: false, phone: { notIn: await getBlacklisted() } });
+          if (s === 'blacklisted') orClauses.push({ phone: { in: await getBlacklisted() } });
+        }
+        if (orClauses.length) and.push({ OR: orClauses });
         break;
       }
 
-      default:
-        // Unknown field — skip
+      case 'custom':
+        and.push({
+          OR: rule.values.map((v) => ({
+            customFields: rule.op === 'is'
+              ? { path: [rule.key], equals: v }
+              : { path: [rule.key], string_contains: v },
+          })),
+        });
         break;
     }
   }
 
-  if (andClauses.length === 0) return {};
-  return { AND: andClauses };
+  return { tenantId, businessId, isBlocked: false, ...(and.length && { AND: and }) };
 }
 
 // ── Service ────────────────────────────────────────────────────────────────────
@@ -82,13 +146,15 @@ export class SegmentsService {
   }
 
   async create(scope: TenantScope, data: { name: string; description?: string; filters: unknown }) {
+    if (!data.name?.trim()) throw new BadRequestException('name is required');
+    const filters = validateFilters(data.filters);
     return this.prisma.segment.create({
       data: {
         tenantId:    scope.tenantId,
         businessId:  scope.businessId,
-        name:        data.name,
+        name:        data.name.trim(),
         description: data.description,
-        filters:     data.filters as any,
+        filters:     filters as any,
         createdById: scope.userId,
       },
     });
@@ -100,12 +166,13 @@ export class SegmentsService {
     data: { name?: string; description?: string; filters?: unknown },
   ) {
     await this.findOne(scope, id);
+    const filters = data.filters !== undefined ? validateFilters(data.filters) : undefined;
     return this.prisma.segment.update({
       where: { id },
-      data:  {
-        name:        data.name,
-        description: data.description,
-        filters:     data.filters as any,
+      data: {
+        ...(data.name        !== undefined && { name: data.name.trim() }),
+        ...(data.description !== undefined && { description: data.description }),
+        ...(filters          !== undefined && { filters: filters as any }),
       },
     });
   }
@@ -116,11 +183,18 @@ export class SegmentsService {
     return { deleted: true };
   }
 
-  async preview(scope: TenantScope, filters: unknown) {
-    const where = {
-      businessId: scope.businessId,
-      ...buildWhere(filters),
-    };
+  async preview(scope: TenantScope, rawFilters: unknown) {
+    const { tenantId, businessId } = scope;
+    let rules: SegmentRule[] = [];
+    try {
+      const f = validateFilters(rawFilters);
+      rules = f.rules;
+    } catch {
+      // If filters are invalid, return empty preview rather than crashing
+      return { count: 0, sample: [] };
+    }
+
+    const where = await buildWhere(this.prisma, tenantId, businessId, rules);
     const [count, contacts] = await Promise.all([
       this.prisma.contact.count({ where }),
       this.prisma.contact.findMany({
@@ -162,7 +236,6 @@ export class SegmentsService {
       }),
     ]);
 
-    // Custom field keys via raw SQL (cross-DB compatible via Prisma $queryRaw)
     let customKeys: string[] = [];
     try {
       const rows = await this.prisma.$queryRaw<{ key: string }[]>`
@@ -173,7 +246,7 @@ export class SegmentsService {
         LIMIT 100
       `;
       customKeys = rows.map((r) => r.key);
-    } catch { /* customFields may not exist yet */ }
+    } catch { /* customFields column may not exist yet */ }
 
     return {
       locations: locations
