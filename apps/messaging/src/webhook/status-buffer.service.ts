@@ -17,6 +17,15 @@ const STATUS_RANK: Record<string, number> = {
   pending: 0, sent: 1, delivered: 2, read: 3, failed: 4,
 };
 
+// Statuses that are "lower" than each target — used to make updates monotonic
+// without a statusRank DB column.
+const LOWER_STATUSES: Record<string, string[]> = {
+  sent:      ['PENDING'],
+  delivered: ['PENDING', 'SENT'],
+  read:      ['PENDING', 'SENT', 'DELIVERED'],
+  failed:    ['PENDING', 'SENT', 'DELIVERED', 'READ'],
+};
+
 @Injectable()
 export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(StatusBufferService.name);
@@ -71,18 +80,17 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
       const { tenantId, status, rank } = group[0];
       const ids = group.map(g => g.waMessageId);
 
-      const msgData: Record<string, unknown> = {
-        status:     status.toUpperCase(),
-        statusRank: rank,
-      };
+      const msgData: Record<string, unknown> = { status: status.toUpperCase() };
       if (status === 'delivered') msgData.deliveredAt = group[0].deliveredAt ?? new Date();
       if (status === 'read')      msgData.readAt      = group[0].readAt      ?? new Date();
       if (status === 'failed')    msgData.failedAt    = group[0].failedAt    ?? new Date();
 
-      // Bulk update messages table
+      const lowerStatuses = LOWER_STATUSES[status] ?? [];
+
+      // Bulk update messages table — only advance status, never regress
       ops.push(
         this.prisma.message.updateMany({
-          where: { tenantId, waMessageId: { in: ids }, statusRank: { lt: rank } },
+          where: { tenantId, waMessageId: { in: ids }, status: { in: lowerStatuses as never[] } },
           data:  msgData,
         }).catch(err => this.logger.error(`message flush (${status}): ${err.message}`)),
       );
