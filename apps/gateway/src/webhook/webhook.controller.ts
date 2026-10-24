@@ -49,14 +49,26 @@ export class GatewayWebhookController {
     @Req() req: Request & { rawBody?: Buffer },
     @Headers('x-hub-signature-256') signature: string,
   ) {
-    const rawBody = req.rawBody ?? Buffer.from(JSON.stringify(req.body));
+    const hasRawBody = Buffer.isBuffer(req.rawBody) && req.rawBody.length > 0;
+    const rawBody = hasRawBody ? req.rawBody! : Buffer.from(JSON.stringify(req.body));
     const rawText = rawBody.toString('utf8');
 
     const phoneNumberId = this.webhook.extractPhoneNumberId(rawText);
     const appSecret     = await this.webhook.resolveAppSecret(phoneNumberId);
 
+    this.logger.log(
+      `[WH] rawBodySource=${hasRawBody ? 'buffer' : 'json-fallback'} ` +
+      `bodyBytes=${rawBody.length} ` +
+      `sigPresent=${!!signature} ` +
+      `secretLen=${appSecret.length} ` +
+      `phoneNumberId=${phoneNumberId ?? 'null'}`,
+    );
+
     if (!this.webhook.verifySignature(rawBody, signature, appSecret)) {
-      this.logger.warn('Signature verification failed');
+      this.logger.warn(
+        `[WH] Signature verification failed — rawBodySource=${hasRawBody ? 'buffer' : 'json-fallback'} ` +
+        `bodyBytes=${rawBody.length} secretLen=${appSecret.length}`,
+      );
       throw new ForbiddenException('Invalid signature');
     }
 

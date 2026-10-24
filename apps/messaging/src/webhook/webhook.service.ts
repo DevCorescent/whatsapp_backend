@@ -63,6 +63,10 @@ export class WebhookService {
       .createHmac('sha256', appSecret)
       .update(rawBody)
       .digest('hex');
+    // Debug: log prefix of both sides so we can compare without exposing full HMAC
+    this.logger.log(
+      `[WH-HMAC] received=${parts[1].slice(0, 8)}... computed=${expected.slice(0, 8)}... match=${parts[1] === expected}`,
+    );
     try {
       return crypto.timingSafeEqual(
         Buffer.from(parts[1], 'hex'),
