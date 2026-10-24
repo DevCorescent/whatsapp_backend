@@ -57,23 +57,26 @@ import { WebhooksModule }     from './webhooks/webhooks.module';
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (cfg: ConfigService) => {
-        // Prefer a full REDIS_URL (e.g. the rediss:// URL Upstash shows in its dashboard).
-        // This is the simplest path: just copy the URL from Upstash → Render env var.
-        const redisUrl = cfg.get<string>('REDIS_URL', '');
-        if (redisUrl) {
-          return { url: redisUrl };
-        }
-
         const host     = cfg.get<string>('REDIS_HOST', 'localhost');
         const port     = cfg.get<number>('REDIS_PORT', 6379);
-        const password = cfg.get<string>('REDIS_PASSWORD', '');
+        const password = cfg.get<string>('REDIS_PASSWORD', '') || undefined;
         const useTls   = cfg.get<string>('REDIS_TLS') === 'true';
 
-        if (useTls && host && password) {
-          return { url: `rediss://default:${encodeURIComponent(password)}@${host}:${port}` };
-        }
-
-        return { redis: { host, port, password: password || undefined } };
+        // Use explicit ioredis options rather than URL parsing — Bull's URL
+        // parser sets tls:{} but omits connectTimeout/enableReadyCheck which
+        // causes ioredis to hang indefinitely on Render's networking.
+        return {
+          redis: {
+            host,
+            port: Number(port),
+            password,
+            tls:              useTls ? { servername: host } : undefined,
+            connectTimeout:   10_000,
+            enableReadyCheck: false,
+            maxRetriesPerRequest: null as any,
+            retryStrategy: (times: number) => Math.min(times * 200, 5_000),
+          },
+        };
       },
     }),
 
