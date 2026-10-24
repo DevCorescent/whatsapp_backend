@@ -1,23 +1,24 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { InjectQueue } from '@nestjs/bull';
-import { Queue } from 'bull';
 import * as crypto from 'crypto';
 import { PrismaService } from '@lib/prisma';
 import { WebhookDispatchService, decryptSecret } from '@lib/common';
-import { QUEUE_INBOUND_MESSAGE } from '@lib/queue';
 import { StatusBufferService } from './status-buffer.service';
 import type { WAChangeValue, WAMessage, WAStatus, WAContact } from './webhook.types';
 
-// Fix #3: cache per-phone-number integration row — merges the two separate
-// DB reads (resolveAppSecret + resolveTenant) that previously ran on every webhook.
 interface IntegrationRow {
-  id:                  string;
-  tenantId:            string;
-  businessId:          string;
-  appSecret:           string | null;
-  business:            { whatsappAppSecret: string | null } | null;
+  id:       string;
+  tenantId: string;
+  businessId: string;
+  appSecret:  string | null;
+  business:   { whatsappAppSecret: string | null } | null;
 }
+
+const TYPE_MAP: Record<string, string> = {
+  text: 'TEXT', image: 'IMAGE', audio: 'AUDIO', video: 'VIDEO',
+  document: 'DOCUMENT', sticker: 'STICKER', location: 'LOCATION',
+  interactive: 'INTERACTIVE', button: 'BUTTON', reaction: 'REACTION',
+};
 
 @Injectable()
 export class WebhookService {
@@ -27,11 +28,10 @@ export class WebhookService {
   private readonly INTEGRATION_TTL_MS = 5 * 60 * 1_000;
 
   constructor(
-    private readonly prisma:        PrismaService,
-    private readonly cfg:           ConfigService,
-    private readonly webhooks:      WebhookDispatchService,
-    private readonly statusBuffer:  StatusBufferService,
-    @InjectQueue(QUEUE_INBOUND_MESSAGE) private readonly inboundQueue: Queue,
+    private readonly prisma:       PrismaService,
+    private readonly cfg:          ConfigService,
+    private readonly webhooks:     WebhookDispatchService,
+    private readonly statusBuffer: StatusBufferService,
   ) {}
 
   // ── Integration cache — one DB read per phone number per 5 min ───────────
@@ -100,7 +100,6 @@ export class WebhookService {
   // ── Tenant resolution ─────────────────────────────────────────────────────
 
   async resolveTenant(phoneNumberId: string) {
-    // Primary: WhatsAppIntegration row (numbers connected through settings)
     const integration = await this.getIntegration(phoneNumberId);
     if (integration) {
       this.logger.log(`resolveTenant: via WhatsAppIntegration tenantId=${integration.tenantId}`);
@@ -112,7 +111,6 @@ export class WebhookService {
       };
     }
 
-    // Fallback: legacy Business.whatsappPhoneNumberId (numbers stored on the business row)
     const biz = await this.prisma.business.findFirst({
       where:  { whatsappPhoneNumberId: phoneNumberId },
       select: { id: true, tenantId: true },
@@ -128,7 +126,7 @@ export class WebhookService {
       };
     }
 
-    this.logger.warn(`resolveTenant: no record found for phoneNumberId=${phoneNumberId} — not in WhatsAppIntegration or Business`);
+    this.logger.warn(`resolveTenant: no record for phoneNumberId=${phoneNumberId}`);
     return null;
   }
 
@@ -150,61 +148,107 @@ export class WebhookService {
 
     const contacts = value.contacts ?? [];
 
-    // Process messages — sequential to preserve order
     for (const message of value.messages ?? []) {
-      await this.dispatchInboundMessage(identity, message, contacts).catch(err =>
-        this.logger.error(`Failed to dispatch message ${message.id}`, err),
+      await this.saveInboundMessage(identity, message, contacts).catch(err =>
+        this.logger.error(`Failed to save inbound message ${message.id}`, err),
       );
     }
 
-    // Buffer delivery statuses — flushed to DB in bulk every 5 s
     for (const status of value.statuses ?? []) {
       this.processStatus(identity.tenantId, status);
     }
   }
 
-  // ── Queue dispatch ─────────────────────────────────────────────────────────
+  // ── Inbound message — direct DB write, no queue ───────────────────────────
 
-  private async dispatchInboundMessage(
+  private async saveInboundMessage(
     identity: { tenantId: string; businessId: string; phoneNumberId: string; whatsappIntegrationId: string | null },
     message: WAMessage,
     contacts: WAContact[],
   ): Promise<void> {
-    const contact = contacts.find(c => c.wa_id === message.from) ?? contacts[0];
-    const contactName  = contact?.profile?.name;
-    const contactWaId  = contact?.bsuid ?? contact?.username ?? contact?.wa_id ?? message.from;
+    const contact    = contacts.find(c => c.wa_id === message.from) ?? contacts[0];
+    const contactName = contact?.profile?.name;
+    const contactWaId = contact?.bsuid ?? contact?.username ?? contact?.wa_id ?? message.from;
+    const phone       = message.from;
+    const content     = this.extractContent(message);
 
-    const job = await this.inboundQueue.add(
-      {
-        tenantId:              identity.tenantId,
-        businessId:            identity.businessId,
-        phoneNumberId:         identity.phoneNumberId,
-        whatsappIntegrationId: identity.whatsappIntegrationId,
-        waMessageId:           message.id,
-        from:                  message.from,
-        contactName,
-        contactWaId,
-        type:                  message.type,
-        content:               this.extractContent(message),
-        timestamp:             message.timestamp,
-        rawMessage:            message,
+    // 1. Upsert contact
+    const contactRow = await this.prisma.contact.upsert({
+      where:  { phone_businessId: { phone, businessId: identity.businessId } },
+      create: {
+        tenantId:   identity.tenantId,
+        businessId: identity.businessId,
+        phone,
+        waId:       contactWaId ?? phone,
+        name:       contactName ?? '',
       },
-      {
-        attempts:    3,
-        backoff:     { type: 'exponential', delay: 2000 },
-        removeOnComplete: true,
+      update: {
+        ...(contactName ? { name: contactName } : {}),
+        ...(contactWaId ? { waId: contactWaId } : {}),
       },
-    );
-    this.logger.log(`Queued inbound msg ${message.id} → job#${job.id}`);
+    });
 
-    // Fire outbound webhook event — fire-and-forget
+    // 2. Find or create conversation
+    let conversation = await this.prisma.conversation.findFirst({
+      where:   { tenantId: identity.tenantId, businessId: identity.businessId, contactId: contactRow.id },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!conversation) {
+      conversation = await this.prisma.conversation.create({
+        data: {
+          tenantId:              identity.tenantId,
+          businessId:            identity.businessId,
+          contactId:             contactRow.id,
+          whatsappIntegrationId: identity.whatsappIntegrationId,
+          isAiActive:            false,
+          status:                'OPEN',
+        },
+      });
+    }
+
+    // 3. Save message + update conversation (idempotent via waMessageId unique)
+    try {
+      await this.prisma.$transaction([
+        this.prisma.message.create({
+          data: {
+            tenantId:       identity.tenantId,
+            businessId:     identity.businessId,
+            conversationId: conversation.id,
+            waMessageId:    message.id,
+            direction:      'INBOUND',
+            status:         'DELIVERED',
+            type:           (TYPE_MAP[message.type] ?? 'TEXT') as any,
+            content,
+            metadata:       message as any,
+          },
+        }),
+        this.prisma.conversation.update({
+          where: { id: conversation.id },
+          data: {
+            status:             'OPEN',
+            lastMessageAt:      new Date(),
+            lastMessagePreview: content.slice(0, 100),
+            unreadCount:        { increment: 1 },
+          },
+        }),
+      ]);
+      this.logger.log(`Saved inbound ${message.id} → conversation ${conversation.id}`);
+    } catch (err: any) {
+      if (err?.code === 'P2002') {
+        this.logger.debug(`Duplicate inbound ${message.id}, skipping`);
+        return;
+      }
+      throw err;
+    }
+
+    // 4. Fire outbound webhook event — fire-and-forget
     this.webhooks.dispatchEvent(identity.tenantId, 'message.received', {
-      waMessageId:  message.id,
-      from:         message.from,
+      waMessageId:   message.id,
+      from:          message.from,
       contactName,
-      type:         message.type,
-      content:      this.extractContent(message),
-      businessId:   identity.businessId,
+      type:          message.type,
+      content,
+      businessId:    identity.businessId,
       phoneNumberId: identity.phoneNumberId,
     });
   }
