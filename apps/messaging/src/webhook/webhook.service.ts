@@ -174,7 +174,7 @@ export class WebhookService {
     const contactName  = contact?.profile?.name;
     const contactWaId  = contact?.bsuid ?? contact?.username ?? contact?.wa_id ?? message.from;
 
-    await this.inboundQueue.add(
+    const job = await this.inboundQueue.add(
       {
         tenantId:              identity.tenantId,
         businessId:            identity.businessId,
@@ -195,6 +195,7 @@ export class WebhookService {
         removeOnComplete: true,
       },
     );
+    this.logger.log(`Queued inbound msg ${message.id} → job#${job.id}`);
 
     // Fire outbound webhook event — fire-and-forget
     this.webhooks.dispatchEvent(identity.tenantId, 'message.received', {

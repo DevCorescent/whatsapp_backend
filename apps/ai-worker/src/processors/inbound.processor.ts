@@ -1,5 +1,5 @@
 import { Process, Processor } from '@nestjs/bull';
-import { Logger } from '@nestjs/common';
+import { Logger, OnModuleInit } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
 import { Job, Queue } from 'bull';
 import { PrismaService } from '@lib/prisma';
@@ -11,7 +11,7 @@ const OPT_OUT = new Set(['STOP','UNSUBSCRIBE','CANCEL','END','QUIT','OPTOUT']);
 const OPT_IN  = new Set(['START','SUBSCRIBE','YES','HELLO','HELP']);
 
 @Processor(QUEUE_INBOUND_MESSAGE)
-export class InboundProcessor {
+export class InboundProcessor implements OnModuleInit {
   private readonly logger = new Logger(InboundProcessor.name);
 
   constructor(
@@ -19,6 +19,10 @@ export class InboundProcessor {
     private readonly whatsapp: WhatsAppApiService,
     @InjectQueue(QUEUE_AI_REPLY) private readonly aiQueue: Queue,
   ) {}
+
+  onModuleInit() {
+    this.logger.log('InboundProcessor ready — listening on ' + QUEUE_INBOUND_MESSAGE);
+  }
 
   @Process({ concurrency: 5 })
   async handle(job: Job<InboundMessageJob>): Promise<void> {
