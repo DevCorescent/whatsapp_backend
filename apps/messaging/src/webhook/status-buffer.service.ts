@@ -22,7 +22,7 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(StatusBufferService.name);
 
   // keyed by waMessageId — keeps the highest-rank status per message
-  private readonly buffer = new Map<string, Buffered>();
+  private readonly pending = new Map<string, Buffered>();
   private timer: NodeJS.Timeout | null = null;
 
   constructor(private readonly prisma: PrismaService) {}
@@ -43,18 +43,18 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
     const rank = STATUS_RANK[status] ?? -1;
     if (rank < 0) return;
 
-    const existing = this.buffer.get(waMessageId);
+    const existing = this.pending.get(waMessageId);
     if (existing && existing.rank >= rank) return; // already at higher/equal rank
 
-    this.buffer.set(waMessageId, { tenantId, waMessageId, status, rank, ...extras });
+    this.pending.set(waMessageId, { tenantId, waMessageId, status, rank, ...extras });
   }
 
   async flush() {
-    if (this.buffer.size === 0) return;
+    if (this.pending.size === 0) return;
 
     // Snapshot and clear atomically
-    const items = [...this.buffer.values()];
-    this.buffer.clear();
+    const items = [...this.pending.values()];
+    this.pending.clear();
 
     // Group by (tenantId, status) for bulk updateMany
     const groups = new Map<string, Buffered[]>();
