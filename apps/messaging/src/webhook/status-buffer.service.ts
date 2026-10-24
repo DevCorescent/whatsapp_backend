@@ -6,11 +6,8 @@ interface Buffered {
   waMessageId: string;
   status:      string;
   rank:        number;
-  deliveredAt?: Date;
-  readAt?:      Date;
-  failedAt?:    Date;
-  errorCode?:   number;
-  errorTitle?:  string;
+  errorCode?:  number;
+  errorTitle?: string;
 }
 
 const STATUS_RANK: Record<string, number> = {
@@ -46,7 +43,6 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
   }
 
   buffer(tenantId: string, waMessageId: string, status: string, extras?: {
-    deliveredAt?: Date; readAt?: Date; failedAt?: Date;
     errorCode?: number; errorTitle?: string;
   }) {
     const rank = STATUS_RANK[status] ?? -1;
@@ -80,45 +76,39 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
       const { tenantId, status, rank } = group[0];
       const ids = group.map(g => g.waMessageId);
 
-      const msgData: Record<string, unknown> = { status: status.toUpperCase() };
-      if (status === 'delivered') msgData.deliveredAt = group[0].deliveredAt ?? new Date();
-      if (status === 'read')      msgData.readAt      = group[0].readAt      ?? new Date();
-      if (status === 'failed')    msgData.failedAt    = group[0].failedAt    ?? new Date();
-
       const lowerStatuses = LOWER_STATUSES[status] ?? [];
+      const now = new Date();
 
-      // Bulk update messages table — only advance status, never regress
+      // Bulk update messages table — status only (no timestamp columns on Message)
       ops.push(
         this.prisma.message.updateMany({
           where: { tenantId, waMessageId: { in: ids }, status: { in: lowerStatuses as never[] } },
-          data:  msgData,
+          data:  { status: status.toUpperCase() as never },
         }).catch(err => this.logger.error(`message flush (${status}): ${err.message}`)),
       );
 
-      // Bulk update campaign_contacts table
+      // Bulk update campaign_contacts table (has deliveredAt / readAt / failedAt columns)
       if (status === 'delivered') {
         ops.push(
           this.prisma.campaignContact.updateMany({
             where: { waMessageId: { in: ids } },
-            data:  { status: 'DELIVERED', deliveredAt: new Date() },
+            data:  { status: 'DELIVERED', deliveredAt: now },
           }).catch(err => this.logger.error(`campaignContact flush (delivered): ${err.message}`)),
         );
       } else if (status === 'read') {
         ops.push(
           this.prisma.campaignContact.updateMany({
             where: { waMessageId: { in: ids } },
-            data:  { status: 'READ', readAt: new Date() },
+            data:  { status: 'READ', readAt: now },
           }).catch(err => this.logger.error(`campaignContact flush (read): ${err.message}`)),
         );
       } else if (status === 'failed') {
-        // Fix #4: group failed items by (errorCode, errorTitle) — one updateMany per error code,
-        // not one per message. A campaign blast might have the same error for thousands of numbers.
         const failedNoCode = group.filter(g => g.errorCode === undefined);
         if (failedNoCode.length) {
           ops.push(
             this.prisma.campaignContact.updateMany({
               where: { waMessageId: { in: failedNoCode.map(g => g.waMessageId) } },
-              data:  { status: 'FAILED', failedAt: new Date() },
+              data:  { status: 'FAILED', failedAt: now },
             }).catch(err => this.logger.error(`campaignContact flush (failed): ${err.message}`)),
           );
         }
@@ -131,11 +121,11 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
           else codeGroups.set(codeKey, [f]);
         }
         for (const cg of codeGroups.values()) {
-          const { errorCode, errorTitle, failedAt } = cg[0];
+          const { errorCode, errorTitle } = cg[0];
           ops.push(
             this.prisma.campaignContact.updateMany({
               where: { waMessageId: { in: cg.map(g => g.waMessageId) } },
-              data:  { status: 'FAILED', failedAt: failedAt ?? new Date(), errorCode, errorTitle, failedReason: errorTitle },
+              data:  { status: 'FAILED', failedAt: now, errorCode, errorTitle, failedReason: errorTitle },
             }).catch(err => this.logger.error(`campaignContact flush (failed w/code): ${err.message}`)),
           );
         }

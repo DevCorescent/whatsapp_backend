@@ -213,15 +213,9 @@ export class WebhookService {
   // ── Status processing — buffered, flushed in bulk every 5 s ─────────────
 
   private processStatus(tenantId: string, status: WAStatus): void {
-    const now = new Date();
-    const extras: Parameters<StatusBufferService['buffer']>[3] = {
-      ...(status.status === 'delivered' ? { deliveredAt: now } : {}),
-      ...(status.status === 'read'      ? { readAt:      now } : {}),
-      ...(status.status === 'failed'    ? { failedAt:    now } : {}),
-      ...(status.status === 'failed' && status.errors?.length
-        ? { errorCode: status.errors[0].code, errorTitle: status.errors[0].title }
-        : {}),
-    };
+    const extras = status.status === 'failed' && status.errors?.length
+      ? { errorCode: status.errors[0].code, errorTitle: status.errors[0].title }
+      : undefined;
     this.statusBuffer.buffer(tenantId, status.id, status.status, extras);
   }
 }
