@@ -103,6 +103,7 @@ export class WebhookService {
     // Primary: WhatsAppIntegration row (numbers connected through settings)
     const integration = await this.getIntegration(phoneNumberId);
     if (integration) {
+      this.logger.log(`resolveTenant: via WhatsAppIntegration tenantId=${integration.tenantId}`);
       return {
         tenantId:              integration.tenantId,
         businessId:            integration.businessId,
@@ -118,7 +119,7 @@ export class WebhookService {
     }).catch(() => null);
 
     if (biz) {
-      this.logger.log(`resolveTenant: resolved via Business fallback for phoneNumberId=${phoneNumberId}`);
+      this.logger.log(`resolveTenant: via Business fallback tenantId=${biz.tenantId}`);
       return {
         tenantId:              biz.tenantId,
         businessId:            biz.id,
@@ -127,6 +128,7 @@ export class WebhookService {
       };
     }
 
+    this.logger.warn(`resolveTenant: no record found for phoneNumberId=${phoneNumberId} — not in WhatsAppIntegration or Business`);
     return null;
   }
 
