@@ -1,74 +1,128 @@
-# WhatsCRM — NestJS Backend
+# Waboxa — NestJS Backend
 
-The API backend for WhatsCRM: a multi-tenant WhatsApp CRM SaaS platform. Built as a NestJS monorepo that serves as the **single source of truth** for all business logic, database access, and background processing. The Next.js frontend is a thin shell — it holds the session layer and UI only; every data operation proxies here.
+The API backend for Waboxa: a multi-tenant WhatsApp CRM SaaS platform. Built as a **NestJS monorepo** containing multiple independently deployable microservice apps. The Next.js frontend is a thin shell — it holds the session layer and UI only; every data operation proxies here.
 
 ---
 
-## Architecture
+## Architecture Overview
+
+**Monorepo + Microservices:** one Git repository (`backend/`), shared libraries (`libs/`), and multiple NestJS apps under `apps/` — each with its own `main.ts` and capable of running as a separate process. Currently all workers are bundled into the gateway process on a single Render Web Service for cost efficiency, but each app is architected to split out independently.
+
+### System Architecture
 
 ```mermaid
 graph TB
-    subgraph "Frontend (Vercel)"
-        NextJS["Next.js App<br/>(session + UI only)"]
+    subgraph Client["Client Layer"]
+        Browser["🌐 Browser"]
+        NextJS["▲ Next.js App\n(Vercel)\nsession + UI only"]
     end
 
-    subgraph "Backend (Render)"
-        GW["Gateway Service<br/>:4000"]
+    subgraph Render["Backend (Render Web Service)"]
+        GW["🔀 Gateway :4000\nJwtAuthGuard · TenantGuard\nValidationPipe · Swagger"]
 
-        subgraph "Workers"
-            MSG["Messaging Worker"]
-            AI["AI Worker"]
-            CAM["Campaigns Worker"]
+        subgraph Workers["Queue Workers (same process)"]
+            MSG["📨 messaging\nWhatsApp I/O"]
+            AI["🤖 ai-worker\nRAG + LLM replies"]
+            CAM["📢 campaigns\nbroadcast sends"]
+            CON["👥 contacts\nbulk import"]
+            BIL["💳 billing\nsubscription events"]
         end
     end
 
-    subgraph "Infrastructure"
-        DB[("PostgreSQL<br/>(Neon / Supabase)")]
-        REDIS[("Redis<br/>(Upstash)")]
+    subgraph Infra["Infrastructure"]
+        DB[("🐘 PostgreSQL\nNeon / Supabase")]
+        REDIS[("⚡ Redis\nUpstash · Bull queues")]
     end
 
-    subgraph "External APIs"
-        META["Meta Graph API<br/>(WhatsApp Cloud)"]
-        OPENAI["OpenAI / Groq<br/>(AI replies)"]
-        STRIPE["Stripe / Razorpay<br/>(Billing)"]
+    subgraph External["External APIs"]
+        META["📱 Meta Graph API\nWhatsApp Cloud"]
+        AI_API["🧠 OpenAI / Groq\nLLM inference"]
+        PAY["💰 Stripe / Razorpay\nPayments"]
     end
 
-    NextJS -->|"proxy /api/* → /api/nest/*"| GW
-    GW -->|JWT auth| NextJS
+    Browser -->|HTTPS| NextJS
+    NextJS -->|"/api/nest/* proxy\nBearer JWT"| GW
 
-    GW -->|Prisma| DB
-    GW -->|Bull queues| REDIS
+    GW -->|Prisma ORM| DB
+    GW -->|enqueue jobs| REDIS
+    GW -->|send messages| META
+    GW -->|billing events| PAY
 
-    REDIS -->|jobs| MSG
-    REDIS -->|jobs| AI
-    REDIS -->|jobs| CAM
+    REDIS -->|inbound-message queue| MSG
+    REDIS -->|ai-reply queue| AI
+    REDIS -->|campaign-send queue| CAM
+    REDIS -->|contact-import queue| CON
+    REDIS -->|billing-event queue| BIL
 
     MSG --> DB
     MSG --> META
     AI --> DB
-    AI --> OPENAI
+    AI --> AI_API
     CAM --> DB
     CAM --> META
-
-    GW --> STRIPE
+    CON --> DB
+    BIL --> DB
 ```
+
+### Apps
+
+| App | Port | Role |
+|-----|------|------|
+| `gateway` | 4000 | Public HTTP API — auth, CRUD, webhooks, billing |
+| `messaging` | 4001 | WhatsApp inbound/outbound message processing |
+| `ai-worker` | 4002 | AI auto-reply via RAG + LLM |
+| `campaigns` | 4003 | Broadcast campaign job processor |
+| `contacts` | 4004 | Bulk contact import/operations |
+| `billing` | 4005 | Subscription lifecycle event handler |
 
 ### Request Flow
 
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant N as Next.js (Vercel)
+    participant G as Gateway (Render)
+    participant DB as PostgreSQL
+
+    B->>N: HTTPS request
+    N->>N: Edge middleware — session check
+    N->>G: /api/nest/* proxy (Bearer JWT)
+    G->>G: JwtAuthGuard → TenantGuard → ValidationPipe
+    G->>DB: Prisma query (tenantId scoped)
+    DB-->>G: result
+    G-->>N: { success, data, pagination? }
+    N-->>B: response
 ```
-Browser → Next.js (edge middleware, session check)
-       → /api/nest/* proxy route
-       → NestJS Gateway (JWT guard, ValidationPipe)
-       → Feature module (service → Prisma → DB)
-       → TransformInterceptor wraps: { success, data, pagination? }
-       → Browser
+
+### Queue Flow (async jobs)
+
+```mermaid
+flowchart LR
+    GW["Gateway"] -->|"Bull enqueue"| REDIS[("Redis")]
+
+    REDIS -->|inbound-message| MSG["messaging worker\nWhatsApp I/O"]
+    REDIS -->|ai-reply| AI["ai-worker\nRAG + LLM"]
+    REDIS -->|campaign-send| CAM["campaigns worker\nbroadcast sends"]
+    REDIS -->|contact-import| CON["contacts worker\nCSV import"]
+    REDIS -->|billing-event| BIL["billing worker\nplan lifecycle"]
 ```
 
-### Multi-Tenancy Model
+### Multi-Tenancy
 
-Every row is scoped by `tenantId`. The JWT payload carries `{ sub, tenantId, businessId, role, email }`. Guards enforce tenant isolation at the controller layer — no cross-tenant data leaks are possible even with a valid token.
+```mermaid
+graph TD
+    PLATFORM["👑 PLATFORM\nsuper admin — full access"]
+    RESELLER["🏢 RESELLER\nmanages clients, sets pricing"]
+    CLIENT["👤 CLIENT\nworkspace — contacts, campaigns, inbox"]
 
-Account types: `PLATFORM` (super admin) · `RESELLER` · `CLIENT`
+    PLATFORM --> RESELLER --> CLIENT
+
+    style PLATFORM fill:#7c3aed,color:#fff
+    style RESELLER fill:#0284c7,color:#fff
+    style CLIENT fill:#059669,color:#fff
+```
+
+Every DB row is scoped by `tenantId`. The JWT payload carries `{ sub, tenantId, businessId, role, email }`. Guards enforce tenant isolation at the controller layer — cross-tenant data leaks are not possible even with a valid token.
 
 ---
 

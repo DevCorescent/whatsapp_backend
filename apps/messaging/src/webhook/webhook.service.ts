@@ -4,6 +4,7 @@ import * as crypto from 'crypto';
 import { PrismaService } from '@lib/prisma';
 import { WebhookDispatchService, decryptSecret } from '@lib/common';
 import { StatusBufferService } from './status-buffer.service';
+import { InboundPipelineService } from './inbound-pipeline.service';
 import type { WAChangeValue, WAMessage, WAStatus, WAContact } from './webhook.types';
 
 interface IntegrationRow {
@@ -32,6 +33,7 @@ export class WebhookService {
     private readonly cfg:          ConfigService,
     private readonly webhooks:     WebhookDispatchService,
     private readonly statusBuffer: StatusBufferService,
+    private readonly pipeline:     InboundPipelineService,
   ) {}
 
   // ── Integration cache — one DB read per phone number per 5 min ───────────
@@ -254,6 +256,18 @@ export class WebhookService {
 
     // 5. Pusher real-time notification — fire-and-forget
     this.triggerPusher(identity.tenantId, { conversationId: conversation.id }).catch(() => {});
+
+    // 6. Chatbot flow + AI auto-reply pipeline — fire-and-forget
+    this.pipeline.process({
+      tenantId:           identity.tenantId,
+      businessId:         identity.businessId,
+      conversationId:     conversation.id,
+      contactId:          contactRow.id,
+      content,
+      interactiveReplyId: (message as any).interactive?.list_reply?.id
+                       ?? (message as any).interactive?.button_reply?.id
+                       ?? null,
+    }).catch(() => {});
   }
 
   private async triggerPusher(tenantId: string, data: Record<string, unknown>): Promise<void> {
