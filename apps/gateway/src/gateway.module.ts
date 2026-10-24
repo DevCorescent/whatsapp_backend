@@ -57,14 +57,19 @@ import { WebhooksModule }     from './webhooks/webhooks.module';
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (cfg: ConfigService) => {
+        // Prefer a full REDIS_URL (e.g. the rediss:// URL Upstash shows in its dashboard).
+        // This is the simplest path: just copy the URL from Upstash → Render env var.
+        const redisUrl = cfg.get<string>('REDIS_URL', '');
+        if (redisUrl) {
+          return { url: redisUrl };
+        }
+
         const host     = cfg.get<string>('REDIS_HOST', 'localhost');
         const port     = cfg.get<number>('REDIS_PORT', 6379);
         const password = cfg.get<string>('REDIS_PASSWORD', '');
         const useTls   = cfg.get<string>('REDIS_TLS') === 'true';
 
         if (useTls && host && password) {
-          // Upstash and other TLS-only Redis providers require the rediss:// URL form;
-          // the separate host/port/tls object approach triggers MaxRetriesPerRequestError.
           return { url: `rediss://default:${encodeURIComponent(password)}@${host}:${port}` };
         }
 
