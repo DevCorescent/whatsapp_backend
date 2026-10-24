@@ -100,14 +100,34 @@ export class WebhookService {
   // ── Tenant resolution ─────────────────────────────────────────────────────
 
   async resolveTenant(phoneNumberId: string) {
+    // Primary: WhatsAppIntegration row (numbers connected through settings)
     const integration = await this.getIntegration(phoneNumberId);
-    if (!integration) return null;
-    return {
-      tenantId:              integration.tenantId,
-      businessId:            integration.businessId,
-      whatsappIntegrationId: integration.id,
-      phoneNumberId,
-    };
+    if (integration) {
+      return {
+        tenantId:              integration.tenantId,
+        businessId:            integration.businessId,
+        whatsappIntegrationId: integration.id,
+        phoneNumberId,
+      };
+    }
+
+    // Fallback: legacy Business.whatsappPhoneNumberId (numbers stored on the business row)
+    const biz = await this.prisma.business.findFirst({
+      where:  { whatsappPhoneNumberId: phoneNumberId },
+      select: { id: true, tenantId: true },
+    }).catch(() => null);
+
+    if (biz) {
+      this.logger.log(`resolveTenant: resolved via Business fallback for phoneNumberId=${phoneNumberId}`);
+      return {
+        tenantId:              biz.tenantId,
+        businessId:            biz.id,
+        whatsappIntegrationId: null as string | null,
+        phoneNumberId,
+      };
+    }
+
+    return null;
   }
 
   // ── Change value processing ───────────────────────────────────────────────
@@ -140,7 +160,7 @@ export class WebhookService {
   // ── Queue dispatch ─────────────────────────────────────────────────────────
 
   private async dispatchInboundMessage(
-    identity: { tenantId: string; businessId: string; phoneNumberId: string; whatsappIntegrationId: string },
+    identity: { tenantId: string; businessId: string; phoneNumberId: string; whatsappIntegrationId: string | null },
     message: WAMessage,
     contacts: WAContact[],
   ): Promise<void> {
