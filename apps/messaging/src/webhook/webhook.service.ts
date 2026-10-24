@@ -136,9 +136,13 @@ export class WebhookService {
     const phoneNumberId = value.metadata?.phone_number_id;
     if (!phoneNumberId) return;
 
+    this.logger.log(
+      `Webhook change: phoneNumberId=${phoneNumberId} msgs=${value.messages?.length ?? 0} statuses=${value.statuses?.length ?? 0}`,
+    );
+
     const identity = await this.resolveTenant(phoneNumberId);
     if (!identity) {
-      this.logger.warn(`No integration found for phone_number_id=${phoneNumberId}`);
+      this.logger.warn(`No tenant for phone_number_id=${phoneNumberId}`);
       return;
     }
 
