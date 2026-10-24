@@ -63,10 +63,6 @@ export class WebhookService {
       .createHmac('sha256', appSecret)
       .update(rawBody)
       .digest('hex');
-    // Debug: log prefix of both sides so we can compare without exposing full HMAC
-    this.logger.log(
-      `[WH-HMAC] received=${parts[1].slice(0, 8)}... computed=${expected.slice(0, 8)}... match=${parts[1] === expected}`,
-    );
     try {
       return crypto.timingSafeEqual(
         Buffer.from(parts[1], 'hex'),
@@ -91,22 +87,14 @@ export class WebhookService {
       const integration = await this.getIntegration(phoneNumberId);
       if (integration?.appSecret) {
         const plain = decryptSecret(integration.appSecret);
-        if (plain) {
-          this.logger.log(`resolveAppSecret: using integration.appSecret (phoneNumberId=${phoneNumberId})`);
-          return plain;
-        }
+        if (plain) return plain;
       }
       if (integration?.business?.whatsappAppSecret) {
         const plain = decryptSecret(integration.business.whatsappAppSecret);
-        if (plain) {
-          this.logger.log(`resolveAppSecret: using business.whatsappAppSecret (phoneNumberId=${phoneNumberId})`);
-          return plain;
-        }
+        if (plain) return plain;
       }
     }
-    const envSecret = this.cfg.get<string>('WHATSAPP_APP_SECRET', '');
-    this.logger.log(`resolveAppSecret: using WHATSAPP_APP_SECRET env (phoneNumberId=${phoneNumberId ?? 'null'} hasValue=${!!envSecret})`);
-    return envSecret;
+    return this.cfg.get<string>('WHATSAPP_APP_SECRET', '');
   }
 
   // ── Tenant resolution ─────────────────────────────────────────────────────
