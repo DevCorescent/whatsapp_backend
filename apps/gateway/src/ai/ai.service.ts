@@ -120,7 +120,7 @@ export class AiService {
 
   // ── Billing guards ──────────────────────────────────────────────────────────
 
-  private async checkAiAccess(scope: TenantScope): Promise<void> {
+  async checkAiAccess(scope: TenantScope): Promise<void> {
     const sub = await this.prisma.subscription.findUnique({
       where:   { tenantId: scope.tenantId },
       include: { plan: { select: { aiEnabled: true, aiCredits: true } } },
@@ -300,12 +300,24 @@ export class AiService {
   ): Promise<void> {
     await this.checkAiAccess(scope);
 
-    // Load conversation + messages
-    const conversation = await this.prisma.conversation.findFirst({
-      where:   { id: conversationId, businessId: scope.businessId },
-      include: { business: { select: { aiSystemPrompt: true, aiModel: true, aiPersonality: true, aiResponseTone: true } } },
-    });
+    // Load conversation + messages + TenantSettings (aiModel/aiPersonality/aiEnabled live there)
+    const [conversation, tenantSettings] = await Promise.all([
+      this.prisma.conversation.findFirst({
+        where:   { id: conversationId, businessId: scope.businessId },
+        include: { business: { select: { aiSystemPrompt: true, aiResponseTone: true } } },
+      }),
+      this.prisma.tenantSettings.findUnique({
+        where:  { tenantId: scope.tenantId },
+        select: { aiEnabled: true, aiModel: true, aiPersonality: true },
+      }),
+    ]);
     if (!conversation) {
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
+    if (tenantSettings?.aiEnabled === false) {
+      res.write(`data: ${JSON.stringify({ chunk: 'AI is disabled for this workspace.' })}\n\n`);
       res.write('data: [DONE]\n\n');
       res.end();
       return;
@@ -353,9 +365,10 @@ export class AiService {
     }
 
     const biz         = (conversation as any).business;
+    const personality = tenantSettings?.aiPersonality ?? '';
     const systemParts = [
       biz?.aiSystemPrompt ?? 'You are a helpful WhatsApp CRM assistant.',
-      biz?.aiPersonality  ? `Personality: ${biz.aiPersonality}` : '',
+      personality ? `Personality: ${personality}` : '',
       biz?.aiResponseTone ? `Tone: ${biz.aiResponseTone}` : '',
       ragContext,
     ].filter(Boolean).join('\n');
@@ -372,8 +385,9 @@ export class AiService {
       ? 'https://openrouter.ai/api/v1/chat/completions'
       : 'https://api.groq.com/openai/v1/chat/completions';
 
+    // Prefer TenantSettings.aiModel (user-selected in settings UI) over env default
     const model = this.openRouterKey
-      ? (biz?.aiModel ?? this.aiModel)
+      ? (tenantSettings?.aiModel ?? this.aiModel)
       : (this.config.get<string>('GROQ_MODEL') ?? 'llama-3.3-70b-versatile');
 
     const allMessages = [

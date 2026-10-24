@@ -76,22 +76,50 @@ export class SettingsService {
     autoReply?: boolean; autoReplyDelay?: number; offHoursMessage?: string;
   }) {
     await this.getBusiness(scope); // 404 guard
-    return this.prisma.business.update({
-      where: { id: scope.businessId },
-      data:  {
-        aiEnabled:       data.aiEnabled,
-        aiModel:         data.aiModel,
-        aiSystemPrompt:  data.aiSystemPrompt,
-        aiInstructions:  data.aiInstructions as any,
-        aiPersonality:   data.aiPersonality,
-        aiResponseTone:  data.aiResponseTone,
-        aiTemperature:   data.aiTemperature,
-        aiMaxTokens:     data.aiMaxTokens,
-        autoReply:       data.autoReply,
-        autoReplyDelay:  data.autoReplyDelay,
-        offHoursMessage: data.offHoursMessage,
-      },
-    });
+
+    // Split writes to match the Next.js schema split:
+    // TenantSettings: aiEnabled, aiModel, autoReply, autoReplyDelay, aiPersonality
+    // Business:       aiSystemPrompt, aiInstructions, aiResponseTone, aiTemperature, aiMaxTokens, offHoursMessage
+    const tenantData: Record<string, unknown> = {};
+    if (data.aiEnabled      !== undefined) tenantData.aiEnabled      = data.aiEnabled;
+    if (data.aiModel        !== undefined) tenantData.aiModel        = data.aiModel;
+    if (data.autoReply      !== undefined) tenantData.autoReply      = data.autoReply;
+    if (data.autoReplyDelay !== undefined) tenantData.autoReplyDelay = data.autoReplyDelay;
+    if (data.aiPersonality  !== undefined) tenantData.aiPersonality  = data.aiPersonality;
+
+    const bizData: Record<string, unknown> = {};
+    if (data.aiSystemPrompt  !== undefined) bizData.aiSystemPrompt  = data.aiSystemPrompt;
+    if (data.aiInstructions  !== undefined) bizData.aiInstructions  = data.aiInstructions;
+    if (data.aiResponseTone  !== undefined) bizData.aiResponseTone  = data.aiResponseTone;
+    if (data.aiTemperature   !== undefined) bizData.aiTemperature   = data.aiTemperature;
+    if (data.aiMaxTokens     !== undefined) bizData.aiMaxTokens     = data.aiMaxTokens;
+    if (data.offHoursMessage !== undefined) bizData.offHoursMessage = data.offHoursMessage;
+
+    const [settings, business] = await Promise.all([
+      Object.keys(tenantData).length > 0
+        ? this.prisma.tenantSettings.upsert({
+            where:  { tenantId: scope.tenantId },
+            create: { tenantId: scope.tenantId, ...tenantData },
+            update: tenantData,
+            select: { aiEnabled: true, aiModel: true, autoReply: true, autoReplyDelay: true, aiPersonality: true },
+          })
+        : this.prisma.tenantSettings.findUnique({
+            where:  { tenantId: scope.tenantId },
+            select: { aiEnabled: true, aiModel: true, autoReply: true, autoReplyDelay: true, aiPersonality: true },
+          }),
+      Object.keys(bizData).length > 0
+        ? this.prisma.business.update({
+            where:  { id: scope.businessId },
+            data:   bizData,
+            select: { aiSystemPrompt: true, aiInstructions: true, aiResponseTone: true, aiTemperature: true, aiMaxTokens: true, offHoursMessage: true },
+          })
+        : this.prisma.business.findUnique({
+            where:  { id: scope.businessId },
+            select: { aiSystemPrompt: true, aiInstructions: true, aiResponseTone: true, aiTemperature: true, aiMaxTokens: true, offHoursMessage: true },
+          }),
+    ]);
+
+    return { ...(settings ?? {}), ...(business ?? {}) };
   }
 
   // ── WhatsApp integrations ──────────────────────────────────────────────────

@@ -198,8 +198,11 @@ export class KnowledgeController {
 
   @Get('flows')
   @ApiOperation({ summary: 'List chatbot flows' })
-  listFlows(@CurrentTenant() scope: TenantScope) {
-    return this.svc.listFlows(scope);
+  listFlows(
+    @CurrentTenant() scope: TenantScope,
+    @Query('active') active?: string,
+  ) {
+    return this.svc.listFlows(scope, active !== undefined ? { active: active === 'true' } : {});
   }
 
   @Post('flows')
@@ -231,15 +234,19 @@ export class KnowledgeController {
   previewFlow(
     @CurrentTenant() scope: TenantScope,
     @Param('id') id: string,
-    @Body() body: { message: string },
+    @Body() body: { message?: string; nodes?: unknown[]; edges?: unknown[]; fromNodeId?: string; variables?: Record<string, string> },
   ) {
-    return this.svc.previewFlow(scope, id, body.message);
+    return this.svc.previewFlow(scope, id, body);
   }
 
   @Post('flows/:id/validate')
   @ApiOperation({ summary: 'Validate a flow structure' })
-  validateFlow(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
-    return this.svc.validateFlow(scope, id);
+  validateFlow(
+    @CurrentTenant() scope: TenantScope,
+    @Param('id') id: string,
+    @Body() body: { nodes?: unknown[]; edges?: unknown[] },
+  ) {
+    return this.svc.validateFlow(scope, id, body?.nodes, body?.edges);
   }
 
   @Post('flows/:id/autosave')

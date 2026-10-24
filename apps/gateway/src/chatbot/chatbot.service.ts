@@ -17,6 +17,8 @@ export class ChatbotService {
     scope: TenantScope,
     body: { conversationId: string; message: string },
   ) {
+    await this.ai.checkAiAccess(scope);
+
     // 1. Load conversation (scoped to business)
     const conversation = await this.prisma.conversation.findFirst({
       where: { id: body.conversationId, tenantId: scope.tenantId, businessId: scope.businessId },

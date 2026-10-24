@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '@lib/prisma';
 import { TenantScope } from '@lib/common';
 import { AiService } from '../ai/ai.service';
@@ -6,8 +7,9 @@ import { AiService } from '../ai/ai.service';
 @Injectable()
 export class KnowledgeService {
   constructor(
-    private readonly prisma: PrismaService,
-    private readonly ai:     AiService,
+    private readonly prisma:  PrismaService,
+    private readonly ai:      AiService,
+    private readonly config:  ConfigService,
     @Optional() private readonly queue?: any,
   ) {}
 
@@ -108,9 +110,30 @@ export class KnowledgeService {
   }
 
   async deleteDoc(scope: TenantScope, id: string) {
-    await this.getDoc(scope, id);
+    const doc = await this.getDoc(scope, id);
     await this.prisma.knowledgeDoc.delete({ where: { id } });
+    // Fire-and-forget: remove vectors from Qdrant so they don't orphan
+    this.deleteDocumentVectors(doc).catch(() => {});
     return { success: true };
+  }
+
+  private async deleteDocumentVectors(doc: any): Promise<void> {
+    const url     = this.config.get<string>('QDRANT_URL', '');
+    const apiKey  = this.config.get<string>('QDRANT_API_KEY', '');
+    const collection = this.config.get<string>('QDRANT_COLLECTION', 'knowledge');
+    if (!url) return;
+
+    const vectorIds: string[] = Array.isArray(doc.vectorIds) ? doc.vectorIds : [];
+    if (vectorIds.length === 0) return;
+
+    await fetch(`${url}/collections/${collection}/points/delete`, {
+      method:  'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(apiKey ? { 'api-key': apiKey } : {}),
+      },
+      body: JSON.stringify({ points: vectorIds }),
+    });
   }
 
   async reindexDoc(scope: TenantScope, id: string) {
@@ -422,11 +445,10 @@ export class KnowledgeService {
 
   // ── Chatbot flows ───────────────────────────────────────────────────────────
 
-  async listFlows(scope: TenantScope) {
-    return this.prisma.chatbotFlow.findMany({
-      where:   { tenantId: scope.tenantId, businessId: scope.businessId },
-      orderBy: { createdAt: 'desc' },
-    });
+  async listFlows(scope: TenantScope, opts: { active?: boolean } = {}) {
+    const where: any = { tenantId: scope.tenantId, businessId: scope.businessId };
+    if (opts.active !== undefined) where.isActive = opts.active;
+    return this.prisma.chatbotFlow.findMany({ where, orderBy: { createdAt: 'desc' } });
   }
 
   async getFlow(scope: TenantScope, id: string) {
@@ -515,26 +537,101 @@ export class KnowledgeService {
     });
   }
 
-  async previewFlow(scope: TenantScope, id: string, message: string) {
-    const flow  = await this.getFlow(scope, id);
-    const nodes = Array.isArray(flow.nodes) ? flow.nodes as any[] : [];
-    const first = nodes[0] ?? null;
-    return { node: first, response: first?.data?.message ?? first?.data?.text ?? null };
+  async previewFlow(
+    scope: TenantScope,
+    id: string,
+    opts: { message?: string; nodes?: unknown[]; edges?: unknown[]; fromNodeId?: string; variables?: Record<string, string> } | string = {},
+  ) {
+    const flow = await this.getFlow(scope, id);
+
+    // Accept legacy call signature: previewFlow(scope, id, "message string")
+    if (typeof opts === 'string') opts = { message: opts };
+
+    const nodes = (opts.nodes && (opts.nodes as any[]).length > 0) ? opts.nodes as any[]
+                : Array.isArray(flow.nodes) ? flow.nodes as any[] : [];
+    const edges = (opts.edges && (opts.edges as any[]).length > 0) ? opts.edges as any[]
+                : Array.isArray(flow.edges) ? flow.edges as any[] : [];
+    const vars  = opts.variables ?? {};
+
+    const nodeMap  = new Map(nodes.map((n: any) => [n.id, n]));
+    const edgeMap  = new Map<string, any[]>();
+    for (const edge of edges) {
+      if (!edgeMap.has(edge.source)) edgeMap.set(edge.source, []);
+      edgeMap.get(edge.source)!.push(edge);
+    }
+
+    // Find the start node (or the fromNodeId override)
+    const startNode = opts.fromNodeId
+      ? nodeMap.get(opts.fromNodeId)
+      : nodes.find((n: any) => n.type === 'start') ?? nodes[0] ?? null;
+
+    const actions: any[] = [];
+    let current  = startNode;
+    const visited = new Set<string>();
+    let status: 'awaiting_input' | 'ended' | 'dead_end' = 'dead_end';
+
+    while (current && !visited.has(current.id)) {
+      visited.add(current.id);
+      const type = current.type as string;
+      const data = current.data ?? {};
+
+      // Render text with simple {{variable}} substitution
+      const renderText = (t: string) =>
+        t.replace(/\{\{(\w+)\}\}/g, (_: string, k: string) => vars[k] ?? `{{${k}}}`);
+
+      if (type === 'start') {
+        // no output — just advance
+      } else if (type === 'message' || type === 'template') {
+        const text = data.text ?? data.message ?? '';
+        if (text) actions.push({ type: 'message', nodeId: current.id, text: renderText(text) });
+      } else if (type === 'ai') {
+        actions.push({ type: 'ai', nodeId: current.id, text: `[AI reply${data.prompt ? `: ${data.prompt.slice(0, 40)}` : ''}]` });
+      } else if (type === 'question') {
+        const text = data.question ?? data.text ?? '';
+        if (text) actions.push({ type: 'message', nodeId: current.id, text: renderText(text) });
+        status = 'awaiting_input';
+        break;
+      } else if (type === 'menu') {
+        actions.push({ type: 'menu', nodeId: current.id, text: data.body ?? data.text ?? '[menu]' });
+        status = 'awaiting_input';
+        break;
+      } else if (type === 'delay') {
+        actions.push({ type: 'delay', nodeId: current.id, seconds: data.seconds ?? 1 });
+      } else if (type === 'end') {
+        status = 'ended';
+        break;
+      }
+
+      const outEdges = edgeMap.get(current.id) ?? [];
+      current = outEdges[0]?.target ? (nodeMap.get(outEdges[0].target) ?? null) : null;
+    }
+
+    if (status === 'dead_end' && current === null) status = 'ended';
+
+    return { actions, status, nodeCount: nodes.length, edgeCount: edges.length };
   }
 
-  async validateFlow(scope: TenantScope, id: string) {
+  async validateFlow(scope: TenantScope, id: string, overrideNodes?: unknown[], overrideEdges?: unknown[]) {
     const flow   = await this.getFlow(scope, id);
     const errors: string[] = [];
-    const nodes  = Array.isArray(flow.nodes) ? flow.nodes as any[] : [];
-    const edges  = Array.isArray(flow.edges) ? flow.edges as any[] : [];
+    // Use request-body nodes/edges when provided (validates unsaved builder state)
+    const nodes  = (overrideNodes && overrideNodes.length > 0) ? overrideNodes as any[]
+                 : Array.isArray(flow.nodes) ? flow.nodes as any[] : [];
+    const edges  = (overrideEdges !== undefined) ? overrideEdges as any[]
+                 : Array.isArray(flow.edges) ? flow.edges as any[] : [];
 
     if (nodes.length === 0) errors.push('Flow has no nodes');
-    if (edges.length === 0) errors.push('Flow has no edges');
 
     const nodeIds = new Set(nodes.map((n: any) => n.id));
+    const hasStart = nodes.some((n: any) => n.type === 'start');
+    if (!hasStart) errors.push('Flow has no start node');
+
     for (const edge of edges) {
       if (edge.target && !nodeIds.has(edge.target)) {
         errors.push(`Edge target "${edge.target}" does not exist`);
+      }
+      if (edge.source && !nodeIds.has(edge.source)) {
+        errors.push(`Edge source "${edge.source}" does not exist`);
       }
     }
     return { valid: errors.length === 0, errors };
