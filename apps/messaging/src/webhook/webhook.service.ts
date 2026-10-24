@@ -4,7 +4,7 @@ import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import * as crypto from 'crypto';
 import { PrismaService } from '@lib/prisma';
-import { WebhookDispatchService } from '@lib/common';
+import { WebhookDispatchService, decryptSecret } from '@lib/common';
 import { QUEUE_INBOUND_MESSAGE } from '@lib/queue';
 import { StatusBufferService } from './status-buffer.service';
 import type { WAChangeValue, WAMessage, WAStatus, WAContact } from './webhook.types';
@@ -85,27 +85,24 @@ export class WebhookService {
   async resolveAppSecret(phoneNumberId: string | null): Promise<string> {
     if (phoneNumberId) {
       const integration = await this.getIntegration(phoneNumberId);
-      if (integration?.appSecret) return this.decrypt(integration.appSecret);
-      if (integration?.business?.whatsappAppSecret) return this.decrypt(integration.business.whatsappAppSecret);
+      if (integration?.appSecret) {
+        const plain = decryptSecret(integration.appSecret);
+        if (plain) {
+          this.logger.log(`resolveAppSecret: using integration.appSecret (phoneNumberId=${phoneNumberId})`);
+          return plain;
+        }
+      }
+      if (integration?.business?.whatsappAppSecret) {
+        const plain = decryptSecret(integration.business.whatsappAppSecret);
+        if (plain) {
+          this.logger.log(`resolveAppSecret: using business.whatsappAppSecret (phoneNumberId=${phoneNumberId})`);
+          return plain;
+        }
+      }
     }
-    return this.cfg.get<string>('WHATSAPP_APP_SECRET', '');
-  }
-
-  private decrypt(value: string): string {
-    // Mirror lib/crypto.ts from Next.js — if not encrypted just return raw
-    if (!value.includes(':')) return value;
-    try {
-      const key = this.cfg.getOrThrow<string>('ENCRYPTION_KEY');
-      const [ivHex, encrypted] = value.split(':');
-      const decipher = crypto.createDecipheriv(
-        'aes-256-cbc',
-        Buffer.from(key, 'hex'),
-        Buffer.from(ivHex, 'hex'),
-      );
-      return decipher.update(encrypted, 'hex', 'utf8') + decipher.final('utf8');
-    } catch {
-      return value;
-    }
+    const envSecret = this.cfg.get<string>('WHATSAPP_APP_SECRET', '');
+    this.logger.log(`resolveAppSecret: using WHATSAPP_APP_SECRET env (phoneNumberId=${phoneNumberId ?? 'null'} hasValue=${!!envSecret})`);
+    return envSecret;
   }
 
   // ── Tenant resolution ─────────────────────────────────────────────────────
