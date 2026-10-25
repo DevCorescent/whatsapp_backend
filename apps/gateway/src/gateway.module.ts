@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, Logger } from '@nestjs/common';
 import { GatewayController } from './gateway.controller';
 import { GatewayService } from './gateway.service';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -61,20 +61,26 @@ import { WebhooksModule }     from './webhooks/webhooks.module';
         const port     = cfg.get<number>('REDIS_PORT', 6379);
         const password = cfg.get<string>('REDIS_PASSWORD', '') || undefined;
         const useTls   = cfg.get<string>('REDIS_TLS') === 'true';
+        const logger   = new Logger('BullRedis');
 
-        // Use explicit ioredis options rather than URL parsing — Bull's URL
-        // parser sets tls:{} but omits connectTimeout/enableReadyCheck which
-        // causes ioredis to hang indefinitely on Render's networking.
+        logger.log(`Connecting to Redis host=${host} port=${port} tls=${useTls} password=${password ? `set(${password.length}ch)` : 'not set'}`);
+
         return {
           redis: {
             host,
             port: Number(port),
             password,
-            tls:              useTls ? { servername: host } : undefined,
-            connectTimeout:   10_000,
-            enableReadyCheck: false,
+            tls:                  useTls ? { servername: host } : undefined,
+            connectTimeout:       10_000,
+            enableReadyCheck:     false,
             maxRetriesPerRequest: null as any,
-            retryStrategy: (times: number) => Math.min(times * 200, 5_000),
+            retryStrategy: (times: number) => {
+              const delay = Math.min(times * 200, 5_000);
+              if (times === 1 || times % 10 === 0) {
+                logger.error(`Redis retry #${times} in ${delay}ms — check REDIS_HOST/PORT/PASSWORD/TLS env vars`);
+              }
+              return delay;
+            },
           },
         };
       },
