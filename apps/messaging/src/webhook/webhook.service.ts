@@ -255,7 +255,9 @@ export class WebhookService {
     });
 
     // 5. Real-time notification via Redis pub/sub → SSE
-    this.pubSub.publish(identity.tenantId, { event: 'new-message', conversationId: conversation.id }).catch(() => {});
+    this.logger.log(`[WH] Publishing new-message tenantId=${identity.tenantId} conversationId=${conversation.id}`);
+    this.pubSub.publish(identity.tenantId, { event: 'new-message', conversationId: conversation.id })
+      .catch((err) => this.logger.error(`[WH] pubSub.publish failed: ${err?.message ?? err}`));
 
     // 6. Chatbot flow + AI auto-reply pipeline — fire-and-forget
     this.pipeline.process({

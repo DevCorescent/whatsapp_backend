@@ -32,17 +32,24 @@ export class RedisPubSubService implements OnModuleInit, OnModuleDestroy {
   }
 
   async publish(tenantId: string, data: Record<string, unknown>): Promise<void> {
+    const channel = `tenant:${tenantId}`;
+    const payload = JSON.stringify(data);
+    this.logger.log(`[Redis] PUBLISH channel=${channel} event=${data.event ?? '?'} payload=${payload}`);
     try {
-      await this.pub.publish(`tenant:${tenantId}`, JSON.stringify(data));
+      const receivers = await this.pub.publish(channel, payload);
+      this.logger.log(`[Redis] PUBLISH delivered to ${receivers} subscriber(s) on channel=${channel}`);
     } catch (err: any) {
-      this.logger.warn(`Redis publish failed for tenant ${tenantId}: ${err.message}`);
+      this.logger.error(`[Redis] PUBLISH FAILED channel=${channel}: ${err.message}`);
     }
   }
 
   /** Each SSE client gets its own subscriber connection (SUBSCRIBE mode is exclusive). */
   createSubscriber(): Redis {
     const sub = makeRedis(this.cfg);
-    sub.on('error', (err) => this.logger.warn(`Redis sub error: ${err.message}`));
+    sub.on('connect',   ()    => this.logger.log('[Redis] subscriber connected'));
+    sub.on('ready',     ()    => this.logger.log('[Redis] subscriber ready'));
+    sub.on('error',     (err) => this.logger.warn(`[Redis] sub error: ${err.message}`));
+    sub.on('end',       ()    => this.logger.log('[Redis] subscriber connection closed'));
     return sub;
   }
 }
