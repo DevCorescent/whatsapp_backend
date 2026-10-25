@@ -58,18 +58,20 @@ export class ConversationsService {
     });
     if (!conv) throw new NotFoundException('Conversation not found');
 
-    const page = Math.max(1, query.page ?? 1);
     const pageSize = 50;
-    const skip = (page - 1) * pageSize;
-    const [messages, msgTotal] = await Promise.all([
-      this.prisma.message.findMany({
-        where: { conversationId: id, tenantId: scope.tenantId },
-        skip, take: pageSize,
-        orderBy: { createdAt: 'asc' },
-        include: { sentBy: { select: { id: true, name: true } } },
-      }),
-      this.prisma.message.count({ where: { conversationId: id, tenantId: scope.tenantId } }),
-    ]);
+    // page 1 = most recent 50; page 2 = the 50 before that; etc.
+    const page = Math.max(1, query.page ?? 1);
+    const msgTotal = await this.prisma.message.count({ where: { conversationId: id, tenantId: scope.tenantId } });
+    // skip from the end so page 1 is always the newest messages
+    const skipFromEnd = (page - 1) * pageSize;
+    const messages = await this.prisma.message.findMany({
+      where:   { conversationId: id, tenantId: scope.tenantId },
+      orderBy: { createdAt: 'desc' },
+      skip:    skipFromEnd,
+      take:    pageSize,
+      include: { sentBy: { select: { id: true, name: true } } },
+    });
+    messages.reverse(); // display oldest → newest in the chat window
     // Reset unread count
     await this.prisma.conversation.update({ where: { id }, data: { unreadCount: 0 } });
 
@@ -85,17 +87,17 @@ export class ConversationsService {
 
     const page  = Math.max(1, query.page ?? 1);
     const limit = Math.min(100, query.limit ?? 50);
-    const skip  = (page - 1) * limit;
 
-    const [messages, total] = await Promise.all([
-      this.prisma.message.findMany({
-        where:   { conversationId, tenantId: scope.tenantId },
-        skip, take: limit,
-        orderBy: { createdAt: 'asc' },
-        include: { sentBy: { select: { id: true, name: true } } },
-      }),
-      this.prisma.message.count({ where: { conversationId, tenantId: scope.tenantId } }),
-    ]);
+    const total = await this.prisma.message.count({ where: { conversationId, tenantId: scope.tenantId } });
+    const skipFromEnd = (page - 1) * limit;
+    const messages = await this.prisma.message.findMany({
+      where:   { conversationId, tenantId: scope.tenantId },
+      orderBy: { createdAt: 'desc' },
+      skip:    skipFromEnd,
+      take:    limit,
+      include: { sentBy: { select: { id: true, name: true } } },
+    });
+    messages.reverse();
 
     // Mark conversation as read
     await this.prisma.conversation.update({
