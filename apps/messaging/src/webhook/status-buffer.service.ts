@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
+import { RedisPubSubService } from '@lib/common';
 
 interface Buffered {
   tenantId:    string;
@@ -31,7 +32,10 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
   private readonly pending = new Map<string, Buffered>();
   private timer: NodeJS.Timeout | null = null;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma:  PrismaService,
+    private readonly pubSub:  RedisPubSubService,
+  ) {}
 
   onModuleInit() {
     this.timer = setInterval(() => { void this.flush(); }, 5_000);
@@ -134,5 +138,12 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
 
     await Promise.allSettled(ops);
     this.logger.debug(`Flushed ${items.length} status updates → ${ops.length} bulk DB ops`);
+
+    // Notify SSE subscribers so message status icons update in real-time
+    const affectedTenants = new Set(items.map(i => i.tenantId));
+    for (const tenantId of affectedTenants) {
+      this.pubSub.publish(tenantId, { event: 'status-update' })
+        .catch(err => this.logger.error(`pubSub status-update failed: ${err?.message ?? err}`));
+    }
   }
 }
