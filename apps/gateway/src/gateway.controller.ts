@@ -29,4 +29,10 @@ export class GatewayController {
   planName(@Request() req: any) {
     return this.svc.getPlanName(req.user.tenantId);
   }
+
+  /** Public CMS sections for the marketing site (no auth required). */
+  @Get('cms/sections/public')
+  getPublicCmsSections() {
+    return this.svc.getPublicCmsSections();
+  }
 }

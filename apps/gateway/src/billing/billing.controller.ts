@@ -15,6 +15,12 @@ import { BillingService } from '../../../../apps/billing/src/billing.service';
 export class GatewayBillingController {
   constructor(private readonly svc: BillingService) {}
 
+  @Get('plans/public')
+  @ApiOperation({ summary: 'List public plans for landing page (no auth)' })
+  getPublicPlans(@Query('resellerId') resellerId?: string) {
+    return this.svc.getPublicPlans(resellerId);
+  }
+
   @Get('plans')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)

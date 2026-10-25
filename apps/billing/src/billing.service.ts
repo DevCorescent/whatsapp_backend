@@ -8,6 +8,23 @@ export class BillingService {
 
   // ── Plans ──────────────────────────────────────────────────────────────────
 
+  async getPublicPlans(resellerId?: string) {
+    if (resellerId) {
+      const own = await this.prisma.plan.findMany({
+        where:   { resellerId, isActive: true },
+        orderBy: [{ sortOrder: 'asc' }, { priceMonthly: 'asc' }],
+        take:    4,
+      });
+      if (own.length) return { success: true, data: { plans: own } };
+    }
+    const plans = await this.prisma.plan.findMany({
+      where:   { visibility: 'PUBLIC', isActive: true, resellerId: null },
+      orderBy: [{ sortOrder: 'asc' }, { priceMonthly: 'asc' }],
+      take:    4,
+    });
+    return { success: true, data: { plans } };
+  }
+
   async getPlans(scope: TenantScope) {
     const plans = await this.prisma.plan.findMany({
       where:   { isActive: true, visibility: 'PUBLIC' },

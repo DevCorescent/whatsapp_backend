@@ -64,4 +64,28 @@ export class GatewayService {
       select: CONFIG_SELECT,
     });
   }
+
+  async getPublicCmsSections() {
+    const rows = await (this.prisma as any).cmsSection.findMany({
+      where:   { page: 'home' },
+      include: { items: { orderBy: { sortOrder: 'asc' } } },
+    });
+    return {
+      success: true,
+      data: rows.map((r: any) => ({
+        key:       r.key,
+        isActive:  r.isActive,
+        content:   r.content,
+        itemKinds: r.itemKinds,
+        updatedAt: r.updatedAt,
+        items:     r.items.map((i: any) => ({
+          id:        i.id,
+          kind:      i.kind,
+          sortOrder: i.sortOrder,
+          isActive:  i.isActive,
+          data:      i.data,
+        })),
+      })),
+    };
+  }
 }
