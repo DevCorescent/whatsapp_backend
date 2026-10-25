@@ -113,6 +113,8 @@ export class InboundPipelineService {
       return;
     }
 
+    this.logger.log(`Pipeline start conv=${opts.conversationId} creds=${creds ? 'ok' : 'null'}`);
+
     // ── 2. Chatbot flow ──────────────────────────────────────────────────────
     const flowHandled = await this.executeFlow(
       opts.tenantId,
@@ -125,8 +127,10 @@ export class InboundPipelineService {
     );
 
     // ── 3. AI auto-reply fallback ────────────────────────────────────────────
+    this.logger.log(`Pipeline flowHandled=${flowHandled} conv=${opts.conversationId}`);
     if (!flowHandled && creds) {
       const cfg = await this.resolveAutoReplyConfig(opts.tenantId, opts.businessId);
+      this.logger.log(`AutoReply cfg: aiEnabled=${cfg.aiEnabled} autoReply=${cfg.autoReply} conv=${opts.conversationId}`);
       if (!cfg.aiEnabled || !cfg.autoReply) return;
 
       // Re-read per-thread AI toggle.
@@ -134,10 +138,13 @@ export class InboundPipelineService {
         where:  { id: conversation.id },
         select: { isAiActive: true },
       });
+      this.logger.log(`AutoReply isAiActive=${live?.isAiActive} conv=${opts.conversationId}`);
       if (!live?.isAiActive) return;
 
       const delayMs = (cfg.autoReplyDelay ?? 0) * 1000;
-      const run = () => this.handleAutoReply(cfg, conversation, contact, creds).catch(() => {});
+      const run = () => this.handleAutoReply(cfg, conversation, contact, creds).catch((err) =>
+        this.logger.error(`handleAutoReply failed conv=${opts.conversationId}`, err?.message ?? err),
+      );
       if (delayMs > 0) setTimeout(run, delayMs); else await run();
     }
   }
@@ -491,6 +498,7 @@ export class InboundPipelineService {
 
     const messages = [{ role: 'system', content: systemPrompt }, ...history];
 
+    this.logger.log(`generateReply model=${resolvedModel} msgs=${history.length}`);
     try {
       const res = await fetch(endpoint, {
         method:  'POST',
@@ -506,10 +514,14 @@ export class InboundPipelineService {
           temperature: temperature ?? 0.7,
         }),
       });
-      if (!res.ok) return null;
+      if (!res.ok) {
+        this.logger.error(`LLM ${res.status}: ${await res.text()}`);
+        return null;
+      }
       const json: any = await res.json();
       return json?.choices?.[0]?.message?.content ?? null;
-    } catch {
+    } catch (err: any) {
+      this.logger.error('generateReply fetch failed', err?.message);
       return null;
     }
   }

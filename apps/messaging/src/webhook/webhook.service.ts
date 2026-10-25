@@ -267,7 +267,7 @@ export class WebhookService {
       interactiveReplyId: (message as any).interactive?.list_reply?.id
                        ?? (message as any).interactive?.button_reply?.id
                        ?? null,
-    }).catch(() => {});
+    }).catch((err) => this.logger.error(`InboundPipeline failed conv=${conversation.id}`, err?.message ?? err));
   }
 
   private async triggerPusher(tenantId: string, data: Record<string, unknown>): Promise<void> {
