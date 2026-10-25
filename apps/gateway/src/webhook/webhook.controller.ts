@@ -49,7 +49,6 @@ export class GatewayWebhookController {
     @Req() req: Request & { rawBody?: Buffer },
     @Headers('x-hub-signature-256') signature: string,
   ) {
-    this.logger.log(`POST /webhook/whatsapp received sig=${signature ? 'present' : 'MISSING'}`);
     const rawBody = req.rawBody ?? Buffer.from(JSON.stringify(req.body));
     const rawText = rawBody.toString('utf8');
 
