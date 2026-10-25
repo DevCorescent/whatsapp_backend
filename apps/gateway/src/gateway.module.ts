@@ -44,6 +44,7 @@ import { QuickRepliesModule } from './quick-replies/quick-replies.module';
 import { ResellerModule }     from './reseller/reseller.module';
 import { SearchModule }       from './search/search.module';
 import { SegmentsModule }     from './segments/segments.module';
+import { TagsModule }         from './tags/tags.module';
 import { TicketsModule }      from './tickets/tickets.module';
 import { WebhooksModule }     from './webhooks/webhooks.module';
 import { EventsModule }       from './events/events.module';
@@ -106,6 +107,7 @@ import { EventsModule }       from './events/events.module';
 
     // Contacts & CRM
     SegmentsModule,
+    TagsModule,
     BlacklistModule,
     LeadsModule,
 
