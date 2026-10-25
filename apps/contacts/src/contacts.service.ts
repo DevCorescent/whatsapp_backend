@@ -253,6 +253,64 @@ export class ContactsService {
     return { created, skipped, total: mapped.length };
   }
 
+  async importContactsV2(
+    scope: TenantScope,
+    contacts: Array<{
+      name?: string; phone: string; email?: string; company?: string;
+      designation?: string; location?: string; source?: string; notes?: string;
+      tags?: string[];
+    }>,
+    importTags: string[] = [],
+    dryRun = false,
+  ) {
+    const valid = contacts.filter(c => c.phone?.trim());
+    if (dryRun) {
+      return {
+        total:   valid.length,
+        created: valid.length,
+        skipped: contacts.length - valid.length,
+        sample:  valid.slice(0, 3).map(c => ({ name: c.name, phone: c.phone })),
+      };
+    }
+
+    let created = 0, updated = 0, skipped = 0, failed = 0;
+    const errors: { ref?: string; reason: string }[] = [];
+    for (const item of valid) {
+      try {
+        const allTags = [...new Set([...(item.tags ?? []), ...importTags])];
+        const existing = await this.prisma.contact.findUnique({
+          where: { phone_businessId: { phone: item.phone, businessId: scope.businessId } },
+          select: { id: true },
+        });
+        const contact = await this.prisma.contact.upsert({
+          where:  { phone_businessId: { phone: item.phone, businessId: scope.businessId } },
+          create: {
+            name:        item.name ?? item.phone,
+            phone:       item.phone,
+            email:       item.email,
+            company:     item.company,
+            designation: item.designation,
+            location:    item.location,
+            source:      item.source ?? 'import',
+            notes:       item.notes,
+            tenantId:    scope.tenantId,
+            businessId:  scope.businessId,
+          },
+          update: {
+            ...(item.name  && { name: item.name }),
+            ...(item.email && { email: item.email }),
+          },
+        });
+        if (allTags.length) await this.syncTagsAdd(scope, contact.id, allTags);
+        if (existing) updated++; else created++;
+      } catch (err: any) {
+        failed++;
+        errors.push({ ref: item.phone, reason: String(err.message).slice(0, 200) });
+      }
+    }
+    return { total: valid.length, created, updated, skipped, failed, errors };
+  }
+
   // ── Sources ────────────────────────────────────────────────────────────────
 
   async getSources(scope: TenantScope) {

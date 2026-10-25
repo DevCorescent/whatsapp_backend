@@ -38,4 +38,28 @@ export class AnalyticsController {
 
     return this.svc.getOverview(scope, fromDate, toDate);
   }
+
+  @Get('per-mobile')
+  @ApiOperation({ summary: 'Message counts per WhatsApp phone number (per-mobile report)' })
+  getPerMobile(
+    @CurrentTenant() scope: TenantScope,
+    @Query('period') period?: string,
+    @Query('from')   from?: string,
+    @Query('to')     to?: string,
+  ) {
+    const now = new Date();
+    let fromDate: Date;
+    const toDate = to ? new Date(to) : now;
+    if (period) {
+      switch (period) {
+        case 'today': fromDate = new Date(now.getFullYear(), now.getMonth(), now.getDate()); break;
+        case '7d':    fromDate = new Date(now.getTime() - 7  * 86400000); break;
+        case '30d':   fromDate = new Date(now.getTime() - 30 * 86400000); break;
+        default:      fromDate = new Date(now.getTime() - 30 * 86400000);
+      }
+    } else {
+      fromDate = from ? new Date(from) : new Date(now.getTime() - 30 * 86400000);
+    }
+    return this.svc.getPerMobileReport(scope, fromDate, toDate);
+  }
 }

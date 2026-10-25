@@ -155,4 +155,56 @@ export class AnalyticsService {
       },
     };
   }
+
+  async getPerMobileReport(scope: TenantScope, from: Date, to: Date) {
+    const dateFilter = { gte: from, lte: to };
+
+    const integrations = await this.prisma.whatsAppIntegration.findMany({
+      where:  { businessId: scope.businessId, tenantId: scope.tenantId },
+      select: { id: true, phoneNumber: true, displayName: true, isDefault: true },
+    });
+
+    const rows = await Promise.all(
+      integrations.map(async (integ) => {
+        const [sent, delivered, read, failed, campaignsSent] = await Promise.all([
+          this.prisma.message.count({
+            where: { businessId: scope.businessId, direction: 'OUTBOUND', createdAt: dateFilter,
+              conversation: { whatsappIntegrationId: integ.id } },
+          }),
+          this.prisma.message.count({
+            where: { businessId: scope.businessId, direction: 'OUTBOUND', status: 'DELIVERED',
+              createdAt: dateFilter, conversation: { whatsappIntegrationId: integ.id } },
+          }),
+          this.prisma.message.count({
+            where: { businessId: scope.businessId, direction: 'OUTBOUND', status: 'READ',
+              createdAt: dateFilter, conversation: { whatsappIntegrationId: integ.id } },
+          }),
+          this.prisma.message.count({
+            where: { businessId: scope.businessId, direction: 'OUTBOUND', status: 'FAILED',
+              createdAt: dateFilter, conversation: { whatsappIntegrationId: integ.id } },
+          }),
+          this.prisma.campaignContact.count({
+            where: {
+              sentAt: dateFilter,
+              status: { in: ['SENT', 'DELIVERED', 'READ'] },
+              campaign: { businessId: scope.businessId, whatsappIntegrationId: integ.id },
+            },
+          }),
+        ]);
+        return {
+          integrationId: integ.id,
+          phone:         integ.phoneNumber ?? integ.id,
+          displayName:   integ.displayName ?? null,
+          isDefault:     integ.isDefault,
+          sent,
+          delivered,
+          read,
+          failed,
+          campaignsSent,
+        };
+      }),
+    );
+
+    return { rows };
+  }
 }

@@ -71,10 +71,13 @@ export class ContactsController {
   @ApiOperation({ summary: 'Import contacts from parsed CSV rows with optional tags' })
   import(
     @CurrentTenant() scope: TenantScope,
-    @Body('rows')       rows:       any[],
-    @Body('importTags') importTags: string[] | undefined,
+    @Body() body: any,
   ) {
-    return this.svc.importContacts(scope, rows ?? [], importTags ?? []);
+    // Support both legacy { rows, importTags } and new { contacts, mode, dryRun } shapes
+    const contacts: any[] = body.contacts ?? body.rows ?? [];
+    const importTags: string[] = body.importTags ?? [];
+    const dryRun: boolean = body.dryRun === true;
+    return this.svc.importContactsV2(scope, contacts, importTags, dryRun);
   }
 
   @Patch(':id')

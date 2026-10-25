@@ -37,9 +37,9 @@ export class CampaignsController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get a campaign by ID' })
+  @ApiOperation({ summary: 'Get a campaign by ID with full recipient list' })
   findOne(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
-    return this.svc.findOne(scope, id);
+    return this.svc.getDetail(scope, id);
   }
 
   @Get(':id/stats')

@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Patch, Delete,
+  Controller, Get, Post, Patch, Delete, Put,
   Body, Param, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
@@ -25,6 +25,21 @@ export class SettingsController {
   @ApiOperation({ summary: 'Update settings for the current business' })
   updateSettings(@CurrentTenant() scope: TenantScope, @Body() body: any) {
     return this.svc.updateSettings(scope, body);
+  }
+
+  // ── Message Rates ──────────────────────────────────────────────────────────
+
+  @Get('message-rates')
+  @ApiOperation({ summary: 'Get platform-level message rates per category' })
+  getMessageRates(@CurrentTenant() scope: TenantScope) {
+    return this.svc.getMessageRates(scope);
+  }
+
+  @Put('message-rates')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Update platform-level message rates' })
+  updateMessageRates(@CurrentTenant() scope: TenantScope, @Body('rates') rates: any[]) {
+    return this.svc.updateMessageRates(scope, rates ?? []);
   }
 
   // ── Business / AI ──────────────────────────────────────────────────────────

@@ -20,6 +20,12 @@ export class SettingsService {
         select: { timezone: true, businessHoursStart: true, businessHoursEnd: true, businessDays: true },
       }),
     ]);
+
+    // Social links are stored inside aiInstructions under a socialLinks key
+    // (no dedicated metadata field exists on Business or TenantSettings).
+    const aiInstr = (biz as any).aiInstructions as Record<string, unknown> | null | undefined;
+    const sl      = (aiInstr?.socialLinks ?? {}) as Record<string, string>;
+
     return {
       name:               biz.name,
       timezone:           (ts as any)?.timezone ?? (biz as any).timezone,
@@ -37,6 +43,13 @@ export class SettingsService {
       aiResponseTone:     (biz as any).aiResponseTone,
       aiTemperature:      (biz as any).aiTemperature,
       aiMaxTokens:        (biz as any).aiMaxTokens,
+      socialLinks: {
+        facebook:  sl.facebook  ?? '',
+        instagram: sl.instagram ?? '',
+        twitter:   sl.twitter   ?? '',
+        linkedin:  sl.linkedin  ?? '',
+        website:   sl.website   ?? '',
+      },
     };
   }
 
@@ -46,18 +59,31 @@ export class SettingsService {
     // Route each field to the correct table:
     // - businessHoursStart/End/Days, timezone, wa*, smtp* → tenant_settings
     // - tenantName, logo, domain → tenant
+    // - socialLinks → business.aiInstructions (stored under socialLinks key)
     // - everything else → business
     const {
       businessHoursStart, businessHoursEnd, businessDays, timezone,
       waPhoneNumberId, waBusinessAccountId, waApiKey, waAppSecret, waWebhookVerifyToken,
       smtpHost, smtpPort, smtpUser, smtpPass, smtpFrom,
       tenantName, logo, domain,
+      socialLinks,
       ...bizData
     } = data as any;
 
+    // If socialLinks is provided, merge it into the existing aiInstructions JSON.
+    // This must happen before the parallel writes so we can read the current value.
+    if (socialLinks !== undefined) {
+      const current = await this.prisma.business.findUnique({
+        where:  { id: scope.businessId },
+        select: { aiInstructions: true },
+      });
+      const existing = (current?.aiInstructions as Record<string, unknown>) ?? {};
+      bizData.aiInstructions = { ...existing, socialLinks };
+    }
+
     const writes: Promise<unknown>[] = [];
 
-    // Business fields (offHoursMessage, autoReply, etc.)
+    // Business fields (offHoursMessage, autoReply, aiInstructions with socialLinks, etc.)
     if (Object.keys(bizData).length > 0) {
       writes.push(this.prisma.business.update({ where: { id: scope.businessId }, data: bizData }));
     }
@@ -115,6 +141,46 @@ export class SettingsService {
 
     const [result] = await Promise.all(writes);
     return result ?? {};
+  }
+
+  // ── Message Rates ──────────────────────────────────────────────────────────
+
+  async getMessageRates(_scope: TenantScope) {
+    const categories = ['WA_MARKETING', 'WA_UTILITY', 'WA_AUTHENTICATION'] as const;
+    const rows = await this.prisma.messageRate.findMany({
+      where: { resellerId: null },
+    });
+    return categories.map(category => {
+      const row = rows.find(r => r.category === category);
+      return { category, priceMinor: row?.priceMinor ?? 0, id: row?.id ?? null };
+    });
+  }
+
+  async updateMessageRates(
+    _scope: TenantScope,
+    rates: Array<{ category: string; priceMinor: number }>,
+  ) {
+    const results = [];
+    for (const rate of rates) {
+      const existing = await this.prisma.messageRate.findFirst({
+        where: { category: rate.category as any, resellerId: null },
+      });
+      if (existing) {
+        results.push(
+          await this.prisma.messageRate.update({
+            where: { id: existing.id },
+            data:  { priceMinor: rate.priceMinor },
+          }),
+        );
+      } else {
+        results.push(
+          await this.prisma.messageRate.create({
+            data: { category: rate.category as any, priceMinor: rate.priceMinor },
+          }),
+        );
+      }
+    }
+    return results;
   }
 
   // ── Business / AI settings ─────────────────────────────────────────────────
