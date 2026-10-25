@@ -382,8 +382,8 @@ export class InboundPipelineService {
       }),
     ]);
 
-    const aiEnabled  = Boolean((business as any)?.aiEnabled ?? (tenant as any)?.aiEnabled);
-    const autoReply  = Boolean((business as any)?.autoReply ?? (tenant as any)?.autoReply);
+    const aiEnabled  = Boolean((business as any)?.aiEnabled  || (tenant as any)?.aiEnabled);
+    const autoReply  = Boolean((business as any)?.autoReply  || (tenant as any)?.autoReply);
 
     return {
       aiEnabled,
