@@ -13,29 +13,63 @@ export class SettingsService {
   // ── Combined settings (matches Next.js /api/settings GET/PATCH) ──────────────
 
   async getSettings(scope: TenantScope) {
-    const biz = await this.getBusiness(scope);
+    const [biz, ts] = await Promise.all([
+      this.getBusiness(scope),
+      this.prisma.tenantSettings.findUnique({
+        where:  { tenantId: scope.tenantId },
+        select: { timezone: true, businessHoursStart: true, businessHoursEnd: true, businessDays: true },
+      }),
+    ]);
     return {
-      name:            biz.name,
-      timezone:        (biz as any).timezone,
-      logo:            (biz as any).logoUrl,
-      autoReply:       (biz as any).autoReply,
-      autoReplyDelay:  (biz as any).autoReplyDelay,
-      offHoursMessage: (biz as any).offHoursMessage,
-      aiEnabled:       (biz as any).aiEnabled,
-      aiModel:         (biz as any).aiModel,
-      aiSystemPrompt:  (biz as any).aiSystemPrompt,
-      aiPersonality:   (biz as any).aiPersonality,
-      aiResponseTone:  (biz as any).aiResponseTone,
-      aiTemperature:   (biz as any).aiTemperature,
-      aiMaxTokens:     (biz as any).aiMaxTokens,
+      name:               biz.name,
+      timezone:           (ts as any)?.timezone ?? (biz as any).timezone,
+      businessHoursStart: (ts as any)?.businessHoursStart ?? null,
+      businessHoursEnd:   (ts as any)?.businessHoursEnd ?? null,
+      businessDays:       (ts as any)?.businessDays ?? null,
+      logo:               (biz as any).logoUrl,
+      autoReply:          (biz as any).autoReply,
+      autoReplyDelay:     (biz as any).autoReplyDelay,
+      offHoursMessage:    (biz as any).offHoursMessage,
+      aiEnabled:          (biz as any).aiEnabled,
+      aiModel:            (biz as any).aiModel,
+      aiSystemPrompt:     (biz as any).aiSystemPrompt,
+      aiPersonality:      (biz as any).aiPersonality,
+      aiResponseTone:     (biz as any).aiResponseTone,
+      aiTemperature:      (biz as any).aiTemperature,
+      aiMaxTokens:        (biz as any).aiMaxTokens,
     };
   }
 
   async updateSettings(scope: TenantScope, data: Record<string, unknown>) {
     await this.getBusiness(scope);
-    // Strip fields not yet in the deployed Prisma client (schema migration pending)
-    const { businessHoursStart: _bhs, businessHoursEnd: _bhe, businessDays: _bd, ...safeData } = data as any;
-    return this.prisma.business.update({ where: { id: scope.businessId }, data: safeData });
+
+    // businessHoursStart/End/Days and timezone belong on tenant_settings, not business
+    const { businessHoursStart, businessHoursEnd, businessDays, timezone, ...bizData } = data as any;
+
+    const writes: Promise<unknown>[] = [];
+
+    if (Object.keys(bizData).length > 0) {
+      writes.push(this.prisma.business.update({ where: { id: scope.businessId }, data: bizData }));
+    }
+
+    const tsData: Record<string, unknown> = {};
+    if (businessHoursStart !== undefined) tsData.businessHoursStart = businessHoursStart;
+    if (businessHoursEnd   !== undefined) tsData.businessHoursEnd   = businessHoursEnd;
+    if (businessDays        !== undefined) tsData.businessDays        = businessDays;
+    if (timezone            !== undefined) tsData.timezone            = timezone;
+
+    if (Object.keys(tsData).length > 0) {
+      writes.push(
+        this.prisma.tenantSettings.upsert({
+          where:  { tenantId: scope.tenantId },
+          create: { tenantId: scope.tenantId, ...tsData },
+          update: tsData,
+        }),
+      );
+    }
+
+    const [result] = await Promise.all(writes);
+    return result ?? {};
   }
 
   // ── Business / AI settings ─────────────────────────────────────────────────
