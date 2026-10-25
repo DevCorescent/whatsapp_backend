@@ -33,7 +33,9 @@ export class SettingsService {
 
   async updateSettings(scope: TenantScope, data: Record<string, unknown>) {
     await this.getBusiness(scope);
-    return this.prisma.business.update({ where: { id: scope.businessId }, data: data as any });
+    // Strip fields not yet in the deployed Prisma client (schema migration pending)
+    const { businessHoursStart: _bhs, businessHoursEnd: _bhe, businessDays: _bd, ...safeData } = data as any;
+    return this.prisma.business.update({ where: { id: scope.businessId }, data: safeData });
   }
 
   // ── Business / AI settings ─────────────────────────────────────────────────
