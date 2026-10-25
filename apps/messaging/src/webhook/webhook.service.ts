@@ -28,7 +28,6 @@ export class WebhookService {
 
   constructor(
     private readonly prisma:       PrismaService,
-    private readonly cfg:          ConfigService,
     private readonly webhooks:     WebhookDispatchService,
     private readonly statusBuffer: StatusBufferService,
     private readonly pipeline:     InboundPipelineService,
