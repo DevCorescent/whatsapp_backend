@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '@lib/prisma';
 import { WebhookDispatchService, RedisPubSubService, decryptSecret } from '@lib/common';
 import { StatusBufferService } from './status-buffer.service';
@@ -32,6 +33,7 @@ export class WebhookService {
     private readonly statusBuffer: StatusBufferService,
     private readonly pipeline:     InboundPipelineService,
     private readonly pubSub:       RedisPubSubService,
+    private readonly cfg:          ConfigService,
   ) {}
 
   // ── Integration cache — one DB read per phone number per 5 min ───────────
