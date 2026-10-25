@@ -71,17 +71,24 @@ export class WebhooksService {
 
   async getApiKey(scope: TenantScope) {
     const settings = await this.prisma.tenantSettings.findUnique({ where: { tenantId: scope.tenantId } });
-    return { apiKey: settings?.apiKey ?? null };
+    const key = settings?.apiKey ?? null;
+    // Return success:true so TransformInterceptor passes through without double-wrapping
+    return {
+      success:   true,
+      hasKey:    !!key,
+      maskedKey: key ? `${'•'.repeat(Math.max(0, key.length - 8))}${key.slice(-8)}` : null,
+    };
   }
 
   async generateApiKey(scope: TenantScope) {
     const apiKey = crypto.randomBytes(32).toString('hex');
-    const settings = await this.prisma.tenantSettings.upsert({
+    await this.prisma.tenantSettings.upsert({
       where:  { tenantId: scope.tenantId },
       create: { tenantId: scope.tenantId, apiKey },
       update: { apiKey },
     });
-    return { apiKey: settings.apiKey };
+    // success:true → TransformInterceptor passthrough; apiKey at top level for frontend
+    return { success: true, apiKey };
   }
 
   async deleteApiKey(scope: TenantScope) {
