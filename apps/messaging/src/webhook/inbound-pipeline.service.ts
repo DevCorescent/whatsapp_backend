@@ -367,7 +367,19 @@ export class InboundPipelineService {
     });
     const isFirstReply = priorOutbound === 0;
 
-    // Retrieve relevant knowledge base content to ground the AI reply.
+    // ── First reply: always send the KB FAQ menu instead of an AI response ──────
+    if (isFirstReply) {
+      const faqs = await this.getKnowledgeBaseFaqs(conversation.businessId);
+      if (faqs.length > 0) {
+        this.logger.log(`AutoReply first-reply FAQ menu: ${faqs.length} FAQs conv=${conversation.id}`);
+        const greeting = this.buildFaqGreeting(cfg.businessName, faqs);
+        await this.sendAndPersistReply(greeting, conversation, contact, creds);
+        return;
+      }
+      // No FAQs in KB → fall through to AI with context
+    }
+
+    // ── Subsequent replies (or first reply with no FAQs): AI with KB context ────
     const lastUserMsg = [...history].reverse().find(m => m.role === 'user')?.content ?? '';
     const kbContext   = await this.searchKnowledgeBase(conversation.businessId, lastUserMsg);
 
@@ -391,12 +403,21 @@ export class InboundPipelineService {
     );
     if (!reply?.trim()) return;
 
+    await this.sendAndPersistReply(reply, conversation, contact, creds);
+  }
+
+  private async sendAndPersistReply(
+    text:         string,
+    conversation: any,
+    contact:      any,
+    creds:        WACreds,
+  ): Promise<void> {
     let waMessageId: string | null = null;
     try {
-      const sent = await this.sendText(creds, contact.phone, reply);
+      const sent = await this.sendText(creds, contact.phone, text);
       waMessageId = sent?.messages?.[0]?.id ?? null;
     } catch (err) {
-      this.logger.error(`Failed to send AI reply to ${contact.phone}`, err);
+      this.logger.error(`Failed to send reply to ${contact.phone}`, err);
       return;
     }
 
@@ -408,7 +429,7 @@ export class InboundPipelineService {
         direction:      'OUTBOUND',
         status:         'SENT',
         type:           'TEXT',
-        content:        reply,
+        content:        text,
         waMessageId,
         isAiGenerated:  true,
         isNote:         false,
@@ -416,11 +437,34 @@ export class InboundPipelineService {
     });
     await this.prisma.conversation.update({
       where: { id: conversation.id },
-      data:  { lastMessageAt: new Date(), lastMessagePreview: reply.slice(0, 100) },
+      data:  { lastMessageAt: new Date(), lastMessagePreview: text.slice(0, 100) },
     });
-
-    // Notify real-time inbox via Redis pub/sub → SSE.
     this.pubSub.publish(conversation.tenantId, { event: 'new-message', conversationId: conversation.id }).catch(() => {});
+  }
+
+  private async getKnowledgeBaseFaqs(businessId: string): Promise<{ question: string; answer: string }[]> {
+    try {
+      const docs = await this.prisma.knowledgeDoc.findMany({
+        where:  { businessId, isIndexed: true },
+        take:   5,
+        select: { metadata: true },
+      });
+      const faqs: { question: string; answer: string }[] = [];
+      for (const doc of docs) {
+        const meta = doc.metadata as { faqs?: { question: string; answer: string }[] } | null;
+        if (meta?.faqs?.length) faqs.push(...meta.faqs);
+      }
+      return faqs.slice(0, 8); // max 8 to keep message readable
+    } catch {
+      return [];
+    }
+  }
+
+  private buildFaqGreeting(businessName: string | null, faqs: { question: string; answer: string }[]): string {
+    const name = businessName ?? 'us';
+    const nums = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣'];
+    const lines = faqs.map((f, i) => `${nums[i] ?? `${i + 1}.`} ${f.question}`).join('\n');
+    return `Hello! 👋 Welcome to ${name}.\n\nHere are some topics I can help you with:\n\n${lines}\n\nReply with a number or type your question!`;
   }
 
   // ── Config resolution ───────────────────────────────────────────────────────
