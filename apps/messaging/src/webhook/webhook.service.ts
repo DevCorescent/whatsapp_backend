@@ -136,23 +136,25 @@ export class WebhookService {
 
   async processChangeValue(value: WAChangeValue): Promise<void> {
     const phoneNumberId = value.metadata?.phone_number_id;
-    if (!phoneNumberId) return;
-
-    this.logger.log(
-      `Webhook change: phoneNumberId=${phoneNumberId} msgs=${value.messages?.length ?? 0} statuses=${value.statuses?.length ?? 0}`,
-    );
+    this.logger.log(`[SVC-1] processChangeValue phoneNumberId=${phoneNumberId ?? 'null'} msgs=${value.messages?.length ?? 0} statuses=${value.statuses?.length ?? 0}`);
+    if (!phoneNumberId) {
+      this.logger.warn(`[SVC-1] no phone_number_id in metadata — aborting`);
+      return;
+    }
 
     const identity = await this.resolveTenant(phoneNumberId);
+    this.logger.log(`[SVC-2] resolveTenant result=${identity ? `tenantId=${identity.tenantId} bizId=${identity.businessId}` : 'NULL'}`);
     if (!identity) {
-      this.logger.warn(`No tenant for phone_number_id=${phoneNumberId}`);
+      this.logger.warn(`[SVC-2] No tenant for phone_number_id=${phoneNumberId} — message will NOT be saved`);
       return;
     }
 
     const contacts = value.contacts ?? [];
 
     for (const message of value.messages ?? []) {
+      this.logger.log(`[SVC-3] processing message id=${message.id} type=${message.type} from=${message.from}`);
       await this.saveInboundMessage(identity, message, contacts).catch(err =>
-        this.logger.error(`Failed to save inbound message ${message.id}`, err),
+        this.logger.error(`[SVC-3] Failed to save inbound message ${message.id}: ${err?.message}`, err?.stack),
       );
     }
 
@@ -174,6 +176,8 @@ export class WebhookService {
     const phone       = message.from;
     const content     = this.extractContent(message);
 
+    this.logger.log(`[SVC-4] saveInboundMessage start phone=${phone} bizId=${identity.businessId}`);
+
     // 1. Upsert contact
     const contactRow = await this.prisma.contact.upsert({
       where:  { phone_businessId: { phone, businessId: identity.businessId } },
@@ -189,6 +193,8 @@ export class WebhookService {
         ...(contactWaId ? { waId: contactWaId } : {}),
       },
     });
+
+    this.logger.log(`[SVC-5] contact upserted id=${contactRow.id}`);
 
     // 2. Find or create conversation
     let conversation = await this.prisma.conversation.findFirst({
@@ -207,6 +213,8 @@ export class WebhookService {
         },
       });
     }
+
+    this.logger.log(`[SVC-6] conversation id=${conversation.id} (${conversation ? 'existing' : 'created'})`);
 
     // 3. Save message + update conversation (idempotent via waMessageId unique)
     try {
@@ -234,7 +242,7 @@ export class WebhookService {
           },
         }),
       ]);
-      this.logger.log(`Saved inbound ${message.id} → conversation ${conversation.id}`);
+      this.logger.log(`[SVC-7] ✓ Saved inbound ${message.id} → conversation ${conversation.id}`);
     } catch (err: any) {
       if (err?.code === 'P2002') {
         this.logger.debug(`Duplicate inbound ${message.id}, skipping`);
