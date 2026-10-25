@@ -49,53 +49,39 @@ export class GatewayWebhookController {
     @Req() req: Request & { rawBody?: Buffer },
     @Headers('x-hub-signature-256') signature: string,
   ) {
-    // ── Step 1: confirm request reached NestJS ──────────────────────────────
-    this.logger.log(`[WH-1] POST /webhook/whatsapp hit. sig=${signature ? 'present' : 'MISSING'} rawBody=${req.rawBody ? 'buffer' : 'no-buffer-using-json'}`);
-
+    this.logger.log(`POST /webhook/whatsapp received sig=${signature ? 'present' : 'MISSING'}`);
     const rawBody = req.rawBody ?? Buffer.from(JSON.stringify(req.body));
     const rawText = rawBody.toString('utf8');
-    this.logger.log(`[WH-2] rawText.length=${rawText.length} preview=${rawText.slice(0, 80)}`);
 
-    // ── Step 2: extract phone number ────────────────────────────────────────
     const phoneNumberId = this.webhook.extractPhoneNumberId(rawText);
-    this.logger.log(`[WH-3] phoneNumberId=${phoneNumberId ?? 'null'}`);
+    const appSecret     = await this.webhook.resolveAppSecret(phoneNumberId);
 
-    // ── Step 3: resolve app secret + verify signature ───────────────────────
-    const appSecret = await this.webhook.resolveAppSecret(phoneNumberId);
-    this.logger.log(`[WH-4] appSecret.length=${appSecret?.length ?? 0}`);
-
-    const sigOk = this.webhook.verifySignature(rawBody, signature, appSecret);
-    this.logger.log(`[WH-5] signature valid=${sigOk}`);
-    // TEMP: log but don't block — lets us see downstream logs even if sig wrong
-    if (!sigOk) {
-      this.logger.warn(`[WH-5] ⚠ Signature FAILED but continuing (debug mode) phoneNumberId=${phoneNumberId ?? 'null'}`);
+    if (!this.webhook.verifySignature(rawBody, signature, appSecret)) {
+      this.logger.warn(`Signature verification failed for phoneNumberId=${phoneNumberId ?? 'null'}`);
+      throw new ForbiddenException('Invalid signature');
     }
 
-    // ── Step 4: parse and dispatch ──────────────────────────────────────────
     try {
       const payload = JSON.parse(rawText) as WAWebhookPayload;
-      this.logger.log(`[WH-6] object=${payload?.object} entries=${payload?.entry?.length ?? 0}`);
 
       if (payload?.object !== 'whatsapp_business_account') {
-        this.logger.warn(`[WH-6] unexpected object=${payload?.object} — skipping`);
         return { success: true };
       }
 
       for (const entry of payload.entry ?? []) {
         for (const change of entry.changes ?? []) {
-          this.logger.log(`[WH-7] change.field=${change.field} msgs=${(change.value as any)?.messages?.length ?? 0} statuses=${(change.value as any)?.statuses?.length ?? 0}`);
           if (change.field === 'messages') {
             await this.webhook.processChangeValue(change.value).catch(err =>
-              this.logger.error(`[WH-7] Entry ${entry.id} error: ${err?.message}`, err?.stack),
+              this.logger.error(`Entry ${entry.id} processing error`, err),
             );
           }
         }
       }
-    } catch (err: any) {
-      this.logger.error(`[WH-ERR] ${err?.message}`, err?.stack);
+    } catch (err) {
+      this.logger.error('Unrecoverable webhook error', err);
     }
 
-    this.logger.log(`[WH-8] done — returning 200`);
+    // Always return 200 — Meta will retry on anything else
     return { success: true };
   }
 
