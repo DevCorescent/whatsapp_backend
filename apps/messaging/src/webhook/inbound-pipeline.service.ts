@@ -289,6 +289,38 @@ export class InboundPipelineService {
 
   // ── AI auto-reply ───────────────────────────────────────────────────────────
 
+  private async searchKnowledgeBase(businessId: string, query: string): Promise<string> {
+    if (!query.trim()) return '';
+    try {
+      const docs = await this.prisma.knowledgeDoc.findMany({
+        where: { businessId, isIndexed: true, content: { contains: query, mode: 'insensitive' } },
+        take: 3,
+        select: { name: true, content: true, metadata: true },
+      });
+      if (!docs.length) return '';
+
+      const snippets: string[] = [];
+      for (const doc of docs) {
+        const text = (doc.content ?? '').slice(0, 600);
+        if (text) snippets.push(`[${doc.name}]\n${text}`);
+        // Include FAQs from metadata
+        const meta = doc.metadata as { faqs?: { question: string; answer: string }[] } | null;
+        if (meta?.faqs?.length) {
+          const relevant = meta.faqs.filter(f =>
+            f.question.toLowerCase().includes(query.toLowerCase().slice(0, 20)) ||
+            query.toLowerCase().includes(f.question.toLowerCase().slice(0, 20))
+          ).slice(0, 3);
+          for (const faq of relevant) {
+            snippets.push(`Q: ${faq.question}\nA: ${faq.answer}`);
+          }
+        }
+      }
+      return snippets.join('\n\n');
+    } catch {
+      return '';
+    }
+  }
+
   private async handleAutoReply(
     cfg:          Awaited<ReturnType<typeof this.resolveAutoReplyConfig>>,
     conversation: any,
@@ -315,13 +347,20 @@ export class InboundPipelineService {
     });
     const isFirstReply = priorOutbound === 0;
 
-    const systemPrompt = buildSystemPromptSimple({
+    // Retrieve relevant knowledge base content to ground the AI reply.
+    const lastUserMsg = [...history].reverse().find(m => m.role === 'user')?.content ?? '';
+    const kbContext   = await this.searchKnowledgeBase(conversation.businessId, lastUserMsg);
+
+    const basePrompt  = buildSystemPromptSimple({
       aiSystemPrompt: cfg.aiSystemPrompt,
       aiPersonality:  cfg.aiPersonality,
       aiInstructions: cfg.aiInstructions,
       businessName:   cfg.businessName,
       isFirstReply,
     });
+    const systemPrompt = kbContext
+      ? `${basePrompt}\n\n# KNOWLEDGE BASE\nUse the following information to answer the customer. Only use facts from this section — do not invent details.\n\n${kbContext}`
+      : basePrompt;
 
     const reply = await this.generateReply(
       history,
