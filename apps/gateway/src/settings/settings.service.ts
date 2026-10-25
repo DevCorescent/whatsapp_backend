@@ -483,7 +483,7 @@ export class SettingsService {
   }
 
   async inviteTeamMember(scope: TenantScope, data: { name: string; email: string; role?: string }) {
-    if (!['OWNER', 'ADMIN'].includes(scope.role)) {
+    if (!['SUPER_ADMIN', 'TENANT_OWNER', 'OWNER', 'ADMIN'].includes(scope.role)) {
       throw new ForbiddenException('Only OWNER or ADMIN can invite team members');
     }
 
@@ -514,7 +514,7 @@ export class SettingsService {
   async updateTeamMember(scope: TenantScope, userId: string, data: {
     name?: string; role?: string; isActive?: boolean;
   }) {
-    if (!['OWNER', 'ADMIN'].includes(scope.role)) {
+    if (!['SUPER_ADMIN', 'TENANT_OWNER', 'OWNER', 'ADMIN'].includes(scope.role)) {
       throw new ForbiddenException('Only OWNER or ADMIN can update team members');
     }
     const user = await this.prisma.user.findFirst({ where: { id: userId, tenantId: scope.tenantId } });
@@ -528,7 +528,7 @@ export class SettingsService {
 
   async removeTeamMember(scope: TenantScope, userId: string) {
     if (scope.userId === userId) throw new ForbiddenException('Cannot remove yourself');
-    if (!['OWNER', 'ADMIN'].includes(scope.role)) {
+    if (!['SUPER_ADMIN', 'TENANT_OWNER', 'OWNER', 'ADMIN'].includes(scope.role)) {
       throw new ForbiddenException('Only OWNER or ADMIN can remove team members');
     }
     const user = await this.prisma.user.findFirst({ where: { id: userId, tenantId: scope.tenantId } });
