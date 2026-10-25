@@ -292,11 +292,31 @@ export class InboundPipelineService {
   private async searchKnowledgeBase(businessId: string, query: string): Promise<string> {
     if (!query.trim()) return '';
     try {
-      const docs = await this.prisma.knowledgeDoc.findMany({
-        where: { businessId, isIndexed: true, content: { contains: query, mode: 'insensitive' } },
+      const trimmed = query.trim();
+      const isShortQuery = trimmed.split(/\s+/).length <= 3;
+
+      // For short/greeting messages ("Hi", "Hello", "test") there's nothing to ILIKE-match,
+      // so we load all indexed docs to give the AI business context regardless.
+      // For longer messages we try a content match first, then fall back to all docs.
+      let docs = await this.prisma.knowledgeDoc.findMany({
+        where: isShortQuery
+          ? { businessId, isIndexed: true }
+          : { businessId, isIndexed: true, content: { contains: trimmed, mode: 'insensitive' } },
         take: 3,
         select: { name: true, content: true, metadata: true },
       });
+
+      // Fallback: long query had no ILIKE hits → still inject top docs for context
+      if (!docs.length && !isShortQuery) {
+        docs = await this.prisma.knowledgeDoc.findMany({
+          where: { businessId, isIndexed: true },
+          take:  3,
+          select: { name: true, content: true, metadata: true },
+        });
+      }
+
+      this.logger.log(`KB search businessId=${businessId} query="${trimmed.slice(0, 40)}" found=${docs.length} docs isShort=${isShortQuery}`);
+
       if (!docs.length) return '';
 
       const snippets: string[] = [];
@@ -307,8 +327,8 @@ export class InboundPipelineService {
         const meta = doc.metadata as { faqs?: { question: string; answer: string }[] } | null;
         if (meta?.faqs?.length) {
           const relevant = meta.faqs.filter(f =>
-            f.question.toLowerCase().includes(query.toLowerCase().slice(0, 20)) ||
-            query.toLowerCase().includes(f.question.toLowerCase().slice(0, 20))
+            f.question.toLowerCase().includes(trimmed.toLowerCase().slice(0, 30)) ||
+            trimmed.toLowerCase().includes(f.question.toLowerCase().slice(0, 30))
           ).slice(0, 3);
           for (const faq of relevant) {
             snippets.push(`Q: ${faq.question}\nA: ${faq.answer}`);
