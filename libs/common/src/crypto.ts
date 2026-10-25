@@ -1,7 +1,8 @@
-import { createDecipheriv, createHash } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 
 const ENVELOPE_PREFIX = 'enc:v1:';
 const ALGORITHM       = 'aes-256-gcm';
+const IV_LENGTH       = 12;
 
 function getKey(): Buffer | null {
   const secret = process.env.ENCRYPTION_KEY;
@@ -36,4 +37,53 @@ export function decryptSecret(value: string | null | undefined): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Encrypt a secret for storage. Returns the value unchanged when no key is
+ * configured, so an unconfigured deployment stores plaintext rather than failing.
+ */
+export function encryptSecret(plaintext: string): string {
+  if (!plaintext?.trim()) return plaintext;
+  const key = getKey();
+  if (!key) return plaintext;
+
+  const iv = randomBytes(IV_LENGTH);
+  const cipher = createCipheriv(ALGORITHM, key, iv);
+  const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+
+  return (
+    ENVELOPE_PREFIX +
+    [iv.toString('base64'), tag.toString('base64'), ciphertext.toString('base64')].join(':')
+  );
+}
+
+/**
+ * Strip wrapping quotes, "Bearer " prefix, the enc:v1: envelope, and whitespace
+ * from a pasted WhatsApp access token.
+ */
+export function sanitizeWhatsAppToken(raw: string | null | undefined): string | null {
+  if (raw == null) return null;
+  let t = raw.trim();
+  if (!t) return null;
+
+  if (
+    (t.startsWith('"') && t.endsWith('"') && t.length > 1) ||
+    (t.startsWith("'") && t.endsWith("'") && t.length > 1)
+  ) {
+    t = t.slice(1, -1).trim();
+  }
+
+  if (/^bearer\s+/i.test(t)) t = t.replace(/^bearer\s+/i, '').trim();
+  if (t.startsWith(ENVELOPE_PREFIX)) return null;
+
+  t = t.replace(/\s+/g, '');
+  return t || null;
+}
+
+/** Meta Graph API tokens start with EAA and are long. */
+export function isMetaAccessToken(value: string | null | undefined): boolean {
+  if (!value) return false;
+  return /^EAA[A-Za-z0-9]{20,}$/.test(value);
 }

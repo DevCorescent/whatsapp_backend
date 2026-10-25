@@ -2,7 +2,7 @@ import {
   Injectable, NotFoundException, ForbiddenException, ConflictException, Logger,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope, decryptSecret } from '@lib/common';
+import { TenantScope, decryptSecret, encryptSecret, sanitizeWhatsAppToken, isMetaAccessToken } from '@lib/common';
 
 @Injectable()
 export class SettingsService {
@@ -43,20 +43,56 @@ export class SettingsService {
   async updateSettings(scope: TenantScope, data: Record<string, unknown>) {
     await this.getBusiness(scope);
 
-    // businessHoursStart/End/Days and timezone belong on tenant_settings, not business
-    const { businessHoursStart, businessHoursEnd, businessDays, timezone, ...bizData } = data as any;
+    // Route each field to the correct table:
+    // - businessHoursStart/End/Days, timezone, wa*, smtp* → tenant_settings
+    // - tenantName, logo, domain → tenant
+    // - everything else → business
+    const {
+      businessHoursStart, businessHoursEnd, businessDays, timezone,
+      waPhoneNumberId, waBusinessAccountId, waApiKey, waAppSecret, waWebhookVerifyToken,
+      smtpHost, smtpPort, smtpUser, smtpPass, smtpFrom,
+      tenantName, logo, domain,
+      ...bizData
+    } = data as any;
 
     const writes: Promise<unknown>[] = [];
 
+    // Business fields (offHoursMessage, autoReply, etc.)
     if (Object.keys(bizData).length > 0) {
       writes.push(this.prisma.business.update({ where: { id: scope.businessId }, data: bizData }));
     }
 
+    // TenantSettings fields
     const tsData: Record<string, unknown> = {};
     if (businessHoursStart !== undefined) tsData.businessHoursStart = businessHoursStart;
     if (businessHoursEnd   !== undefined) tsData.businessHoursEnd   = businessHoursEnd;
     if (businessDays        !== undefined) tsData.businessDays        = businessDays;
     if (timezone            !== undefined) tsData.timezone            = timezone;
+
+    // WhatsApp credentials — blank values mean "leave as-is", not "erase"
+    if (waPhoneNumberId    !== undefined) tsData.waPhoneNumberId    = waPhoneNumberId;
+    if (waBusinessAccountId !== undefined) tsData.waBusinessAccountId = waBusinessAccountId;
+    if (waWebhookVerifyToken && (waWebhookVerifyToken as string).trim()) {
+      tsData.waWebhookVerifyToken = encryptSecret((waWebhookVerifyToken as string).trim());
+    }
+    if (waApiKey && (waApiKey as string).trim()) {
+      const cleaned = sanitizeWhatsAppToken(waApiKey as string);
+      if (cleaned && isMetaAccessToken(cleaned)) {
+        tsData.waApiKey = encryptSecret(cleaned);
+      }
+    }
+    if (waAppSecret && (waAppSecret as string).trim()) {
+      tsData.waAppSecret = encryptSecret((waAppSecret as string).trim());
+    }
+
+    // SMTP credentials
+    if (smtpHost !== undefined) tsData.smtpHost = smtpHost;
+    if (smtpPort !== undefined) tsData.smtpPort = smtpPort;
+    if (smtpUser !== undefined) tsData.smtpUser = smtpUser;
+    if (smtpFrom !== undefined) tsData.smtpFrom = smtpFrom;
+    if (smtpPass && (smtpPass as string).trim()) {
+      tsData.smtpPass = encryptSecret((smtpPass as string).trim());
+    }
 
     if (Object.keys(tsData).length > 0) {
       writes.push(
@@ -66,6 +102,15 @@ export class SettingsService {
           update: tsData,
         }),
       );
+    }
+
+    // Tenant-level fields (name, logo, custom domain)
+    if (tenantName || logo || domain) {
+      const tenantData: Record<string, unknown> = {};
+      if (tenantName) tenantData.name   = String(tenantName);
+      if (logo)       tenantData.logo   = String(logo);
+      if (domain)     tenantData.domain = String(domain);
+      writes.push(this.prisma.tenant.update({ where: { id: scope.tenantId }, data: tenantData }));
     }
 
     const [result] = await Promise.all(writes);
