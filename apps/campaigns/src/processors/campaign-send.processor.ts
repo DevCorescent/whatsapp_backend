@@ -11,7 +11,8 @@ interface CampaignData {
   status:               string;
   tenantId:             string;
   totalCount:           number;
-  template:             { name: string; language: string; variables: any; headerType: string | null; headerContent: string | null; headerVariables: any[] } | null;
+  metadata:             any;
+  template:             { name: string; language: string; category: string; variables: any; headerType: string | null; headerContent: string | null; headerVariables: any[] } | null;
   whatsappIntegration:  { phoneNumberId: string; accessToken: string | null } | null;
   businessId:           string;
 }
@@ -38,9 +39,10 @@ export class CampaignSendProcessor {
       where:   { id: campaignId },
       select: {
         id: true, status: true, tenantId: true, totalCount: true, businessId: true,
+        metadata: true,
         template: {
           select: {
-            name: true, language: true, variables: true,
+            name: true, language: true, category: true, variables: true,
             headerType: true, headerContent: true, headerVariables: true,
           },
         },
@@ -97,8 +99,21 @@ export class CampaignSendProcessor {
 
       const variables = (recipient.variables as Record<string, string>) ?? {};
 
+      const meta: Record<string, any> = (campaign.metadata as any) ?? {};
       const components: unknown[] = [];
-      if (template.headerType === 'TEXT' && template.headerContent) {
+
+      // Header component: media (IMAGE/VIDEO/DOCUMENT) or text variables
+      if (template.headerType === 'IMAGE' || template.headerType === 'VIDEO' || template.headerType === 'DOCUMENT') {
+        const mediaId  = meta.headerMediaId  ?? variables['header_media_id']  ?? null;
+        const mediaUrl = meta.headerMediaUrl ?? variables['header_media_url'] ?? null;
+        if (mediaId || mediaUrl) {
+          const mediaType = template.headerType.toLowerCase() as 'image' | 'video' | 'document';
+          components.push({
+            type:       'header',
+            parameters: [{ type: mediaType, [mediaType]: mediaId ? { id: mediaId } : { link: mediaUrl } }],
+          });
+        }
+      } else if (template.headerType === 'TEXT' && template.headerContent) {
         const headerVars = (template.headerVariables ?? []).map((_, i) =>
           ({ type: 'text', text: variables[`header_${i + 1}`] ?? '' })
         );
@@ -110,10 +125,13 @@ export class CampaignSendProcessor {
       );
       if (bodyVars.length) components.push({ type: 'body', parameters: bodyVars });
 
+      const ttlSeconds: number | undefined = meta.ttlSeconds ? Number(meta.ttlSeconds) : undefined;
+
       const msgBody: Record<string, unknown> = {
         messaging_product: 'whatsapp',
         to:                recipient.phone,
         type:              'template',
+        ...(ttlSeconds && ttlSeconds > 0 && { validity_period: ttlSeconds }),
         template: {
           name:       template.name,
           language:   { code: template.language },
@@ -150,6 +168,62 @@ export class CampaignSendProcessor {
         where: { id: campaignId },
         data:  { sentCount: { increment: 1 } },
       });
+
+      // Debit wallet per message sent — failure is non-fatal (logged, not re-thrown)
+      try {
+        const tmplCategory = campaign.template?.category ?? '';
+        const upper        = tmplCategory.toUpperCase();
+        const rateCategory = upper.includes('MARKETING')   ? 'WA_MARKETING'
+                           : upper.includes('UTILITY')     ? 'WA_UTILITY'
+                           : upper.includes('AUTH')        ? 'WA_AUTHENTICATION'
+                           : null;
+
+        if (rateCategory) {
+          const rate = await this.prisma.messageRate.findFirst({
+            where:  { category: rateCategory as any, resellerId: null },
+            select: { priceMinor: true },
+          });
+          const priceMinor = rate?.priceMinor ?? 0;
+
+          if (priceMinor > 0) {
+            await this.prisma.$transaction(async (tx) => {
+              const wallet       = await tx.wallet.findUnique({
+                where:  { tenantId: campaign.tenantId },
+                select: { balanceMinor: true },
+              });
+              const newBalance = (wallet?.balanceMinor ?? 0) - priceMinor;
+
+              await tx.walletTransaction.create({
+                data: {
+                  tenantId:         campaign.tenantId,
+                  type:             'DEBIT',
+                  amountMinor:      priceMinor,
+                  balanceAfterMinor: newBalance,
+                  description:      `Campaign message: ${campaignId}`,
+                  idempotencyKey:   `campaign-debit:${recipientId}`,
+                },
+              });
+
+              await tx.wallet.update({
+                where: { tenantId: campaign.tenantId },
+                data:  { balanceMinor: { decrement: priceMinor } },
+              });
+
+              await tx.campaignContact.update({
+                where: { id: recipientId },
+                data:  { costMinor: priceMinor },
+              });
+
+              await tx.campaign.update({
+                where: { id: campaignId },
+                data:  { costMinor: { increment: priceMinor } },
+              });
+            });
+          }
+        }
+      } catch (walletErr: any) {
+        this.logger.warn(`Wallet debit skipped for ${recipientId}: ${walletErr.message}`);
+      }
 
       this.logger.debug(`Sent campaign ${campaignId} to ${recipient.phone} (${waMessageId})`);
       await this.tryComplete(campaignId, tenantId);
