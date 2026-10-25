@@ -3,12 +3,12 @@ import { BullModule } from '@nestjs/bull';
 import { PrismaModule } from '@lib/prisma';
 import { WebhookDispatchService } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, QUEUE_TEMPLATE_SYNC } from '@lib/queue';
-import { CampaignsController }      from '../../../../apps/campaigns/src/campaigns.controller';
-import { CampaignsService }         from '../../../../apps/campaigns/src/campaigns.service';
-import { TemplatesController }      from '../../../../apps/campaigns/src/templates/templates.controller';
-import { TemplatesService }         from '../../../../apps/campaigns/src/templates/templates.service';
-import { CampaignSendProcessor }    from '../../../../apps/campaigns/src/processors/campaign-send.processor';
-import { TemplateSyncProcessor }    from '../../../../apps/campaigns/src/processors/template-sync.processor';
+import { CampaignsController }  from '../../../../apps/campaigns/src/campaigns.controller';
+import { CampaignsService }     from '../../../../apps/campaigns/src/campaigns.service';
+import { TemplatesController }  from '../../../../apps/campaigns/src/templates/templates.controller';
+import { TemplatesService }     from '../../../../apps/campaigns/src/templates/templates.service';
+// Processors (queue consumers) are intentionally excluded here — they run only
+// in the campaigns worker app to avoid double-processing queued jobs.
 
 @Module({
   imports: [
@@ -17,6 +17,6 @@ import { TemplateSyncProcessor }    from '../../../../apps/campaigns/src/process
     BullModule.registerQueue({ name: QUEUE_TEMPLATE_SYNC }),
   ],
   controllers: [CampaignsController, TemplatesController],
-  providers:   [CampaignsService, TemplatesService, CampaignSendProcessor, TemplateSyncProcessor, WebhookDispatchService],
+  providers:   [CampaignsService, TemplatesService, WebhookDispatchService],
 })
 export class CampaignsModule {}

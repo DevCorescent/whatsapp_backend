@@ -5,6 +5,22 @@ import helmet from 'helmet';
 import { GatewayModule } from './gateway.module';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 
+// Prevent ioredis retry errors from crashing the process when Redis is
+// temporarily or permanently unreachable (e.g. TCP blocked on free-tier Upstash).
+// The gateway runs fine without Redis — only campaign queueing is affected.
+process.on('uncaughtException', (err: Error) => {
+  if (
+    err.message?.includes('ETIMEDOUT') ||
+    err.message?.includes('ECONNREFUSED') ||
+    err.message?.includes('ENOTFOUND')
+  ) {
+    console.error('[Redis] Uncaught connection error (campaigns unavailable):', err.message);
+    return; // do not crash
+  }
+  console.error('Uncaught exception:', err);
+  process.exit(1);
+});
+
 async function bootstrap() {
   // ── Redis config audit (Render log shows this on every deploy) ─────────────
   const redisHost = process.env.REDIS_HOST ?? '(not set)';
