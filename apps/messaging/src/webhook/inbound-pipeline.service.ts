@@ -8,7 +8,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '@lib/prisma';
 import { Prisma } from '@prisma/client';
-import { decryptSecret } from '@lib/common';
+import { decryptSecret, RedisPubSubService } from '@lib/common';
 import { runFlowStep } from './chatbot/engine';
 import { toFlowDocument } from './chatbot/types';
 import type { FlowVariables } from './chatbot/engine';
@@ -68,6 +68,7 @@ export class InboundPipelineService {
   constructor(
     private readonly prisma:  PrismaService,
     private readonly config:  ConfigService,
+    private readonly pubSub:  RedisPubSubService,
   ) {}
 
   // ── Entry point ─────────────────────────────────────────────────────────────
@@ -359,8 +360,8 @@ export class InboundPipelineService {
       data:  { lastMessageAt: new Date(), lastMessagePreview: reply.slice(0, 100) },
     });
 
-    // Notify real-time inbox.
-    this.triggerPusher(conversation.tenantId, { conversationId: conversation.id }).catch(() => {});
+    // Notify real-time inbox via Redis pub/sub → SSE.
+    this.pubSub.publish(conversation.tenantId, { event: 'new-message', conversationId: conversation.id }).catch(() => {});
   }
 
   // ── Config resolution ───────────────────────────────────────────────────────
@@ -575,26 +576,4 @@ export class InboundPipelineService {
     });
   }
 
-  // ── Pusher notification ─────────────────────────────────────────────────────
-
-  private async triggerPusher(tenantId: string, data: Record<string, unknown>): Promise<void> {
-    const { createHash, createHmac } = await import('crypto');
-    const appId   = this.config.get<string>('PUSHER_APP_ID', '');
-    const key     = this.config.get<string>('PUSHER_KEY', '');
-    const secret  = this.config.get<string>('PUSHER_SECRET', '');
-    const cluster = this.config.get<string>('PUSHER_CLUSTER', 'mt1');
-    if (!appId || !key || !secret) return;
-
-    const body      = JSON.stringify({ channel: `tenant-${tenantId}`, name: 'new-message', data: JSON.stringify(data) });
-    const bodyMd5   = createHash('md5').update(body).digest('hex');
-    const timestamp = Math.floor(Date.now() / 1000).toString();
-    const params    = new URLSearchParams({ auth_key: key, auth_timestamp: timestamp, auth_version: '1.0', body_md5: bodyMd5 });
-    params.sort();
-    const sig = createHmac('sha256', secret).update(`POST\n/apps/${appId}/events\n${params.toString()}`).digest('hex');
-    params.append('auth_signature', sig);
-
-    await fetch(`https://api-${cluster}.pusher.com/apps/${appId}/events?${params.toString()}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
-    });
-  }
 }

@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { BullModule } from '@nestjs/bull';
 import { QUEUE_INBOUND_MESSAGE } from '@lib/queue';
-import { WebhookDispatchService } from '@lib/common';
+import { WebhookDispatchService, RedisPubSubService } from '@lib/common';
 import { PrismaModule } from '@lib/prisma';
 import { WebhookController } from './webhook.controller';
 import { WebhookService } from './webhook.service';
@@ -16,7 +16,7 @@ import { InboundPipelineService } from './inbound-pipeline.service';
     ConfigModule,
   ],
   controllers: [WebhookController],
-  providers: [WebhookService, WebhookDispatchService, StatusBufferService, InboundPipelineService],
+  providers: [WebhookService, WebhookDispatchService, StatusBufferService, InboundPipelineService, RedisPubSubService],
   exports: [StatusBufferService],
 })
 export class WebhookModule {}

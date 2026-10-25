@@ -1,8 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import * as crypto from 'crypto';
 import { PrismaService } from '@lib/prisma';
-import { WebhookDispatchService, decryptSecret } from '@lib/common';
+import { WebhookDispatchService, RedisPubSubService, decryptSecret } from '@lib/common';
 import { StatusBufferService } from './status-buffer.service';
 import { InboundPipelineService } from './inbound-pipeline.service';
 import type { WAChangeValue, WAMessage, WAStatus, WAContact } from './webhook.types';
@@ -34,6 +32,7 @@ export class WebhookService {
     private readonly webhooks:     WebhookDispatchService,
     private readonly statusBuffer: StatusBufferService,
     private readonly pipeline:     InboundPipelineService,
+    private readonly pubSub:       RedisPubSubService,
   ) {}
 
   // ── Integration cache — one DB read per phone number per 5 min ───────────
@@ -254,8 +253,8 @@ export class WebhookService {
       phoneNumberId: identity.phoneNumberId,
     });
 
-    // 5. Pusher real-time notification — fire-and-forget
-    this.triggerPusher(identity.tenantId, { conversationId: conversation.id }).catch(() => {});
+    // 5. Real-time notification via Redis pub/sub → SSE
+    this.pubSub.publish(identity.tenantId, { event: 'new-message', conversationId: conversation.id }).catch(() => {});
 
     // 6. Chatbot flow + AI auto-reply pipeline — fire-and-forget
     this.pipeline.process({
@@ -268,30 +267,6 @@ export class WebhookService {
                        ?? (message as any).interactive?.button_reply?.id
                        ?? null,
     }).catch((err) => this.logger.error(`InboundPipeline failed conv=${conversation.id}`, err?.message ?? err));
-  }
-
-  private async triggerPusher(tenantId: string, data: Record<string, unknown>): Promise<void> {
-    const appId   = this.cfg.get<string>('PUSHER_APP_ID', '');
-    const key     = this.cfg.get<string>('PUSHER_KEY', '');
-    const secret  = this.cfg.get<string>('PUSHER_SECRET', '');
-    const cluster = this.cfg.get<string>('PUSHER_CLUSTER', 'mt1');
-    if (!appId || !key || !secret) return;
-
-    const body      = JSON.stringify({ channel: `tenant-${tenantId}`, name: 'new-message', data: JSON.stringify(data) });
-    const bodyMd5   = crypto.createHash('md5').update(body).digest('hex');
-    const timestamp = Math.floor(Date.now() / 1000).toString();
-
-    // Params must be sorted alphabetically for Pusher's HMAC signature
-    const params = new URLSearchParams({ auth_key: key, auth_timestamp: timestamp, auth_version: '1.0', body_md5: bodyMd5 });
-    params.sort();
-    const signature = crypto.createHmac('sha256', secret).update(`POST\n/apps/${appId}/events\n${params.toString()}`).digest('hex');
-    params.append('auth_signature', signature);
-
-    await fetch(`https://api-${cluster}.pusher.com/apps/${appId}/events?${params.toString()}`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-    });
   }
 
   private extractContent(message: WAMessage): string {

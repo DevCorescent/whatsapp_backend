@@ -46,6 +46,7 @@ import { SearchModule }       from './search/search.module';
 import { SegmentsModule }     from './segments/segments.module';
 import { TicketsModule }      from './tickets/tickets.module';
 import { WebhooksModule }     from './webhooks/webhooks.module';
+import { EventsModule }       from './events/events.module';
 
 @Module({
   controllers: [GatewayController],
@@ -143,6 +144,9 @@ import { WebhooksModule }     from './webhooks/webhooks.module';
     NewsletterModule,
     NotificationsModule,
     OnboardingModule,
+
+    // Real-time SSE
+    EventsModule,
   ],
 })
 export class GatewayModule {}

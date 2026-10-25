@@ -1126,19 +1126,16 @@ export class AdminService {
     }
     const apiLatencyMs = Date.now() - t0;
 
-    const pusherConfigured = Boolean(
-      process.env['PUSHER_APP_ID'] && process.env['PUSHER_KEY'] &&
-      process.env['PUSHER_SECRET'] && process.env['PUSHER_CLUSTER'],
-    );
-    const waConfigured = Boolean(process.env['WHATSAPP_APP_SECRET']);
+    const realtimeConfigured = Boolean(process.env['REDIS_HOST']);
+    const waConfigured       = Boolean(process.env['WHATSAPP_APP_SECRET']);
 
     return {
       success: true,
       data: {
         api:      { latencyMs: apiLatencyMs, status: 'healthy' },
         database: { latencyMs: dbLatencyMs, status: dbStatus },
-        pusher:   { configured: pusherConfigured, status: pusherConfigured ? 'configured' : 'unconfigured' },
-        whatsapp: { configured: waConfigured,     status: waConfigured     ? 'configured' : 'unconfigured' },
+        realtime: { configured: realtimeConfigured, status: realtimeConfigured ? 'configured' : 'unconfigured' },
+        whatsapp: { configured: waConfigured,        status: waConfigured       ? 'configured' : 'unconfigured' },
         checkedAt: new Date().toISOString(),
       },
     };
