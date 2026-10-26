@@ -2,7 +2,7 @@ import { Processor, Process } from '@nestjs/bull';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bull';
 import { PrismaService } from '@lib/prisma';
-import { WebhookDispatchService } from '@lib/common';
+import { WebhookDispatchService, decryptSecret } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
 
 // Shape cached per campaign — only immutable fields (template, integration credentials)
@@ -93,6 +93,8 @@ export class CampaignSendProcessor {
             select: { phoneNumberId: true, accessToken: true },
           });
       if (!integration?.accessToken) throw new Error('No active WhatsApp integration');
+      const accessToken = decryptSecret(integration.accessToken);
+      if (!accessToken) throw new Error('WhatsApp integration token could not be decrypted');
 
       const recipient = await this.prisma.campaignContact.findUnique({
         where: { id: recipientId },
@@ -148,7 +150,7 @@ export class CampaignSendProcessor {
         {
           method:  'POST',
           headers: {
-            Authorization:  `Bearer ${integration.accessToken}`,
+            Authorization:  `Bearer ${accessToken}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(msgBody),
