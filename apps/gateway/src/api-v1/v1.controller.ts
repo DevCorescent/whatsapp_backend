@@ -2,7 +2,7 @@ import {
   Controller, Get, Post, Body, Param, Query, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiSecurity, ApiOperation } from '@nestjs/swagger';
-import { CurrentTenant, TenantScope } from '@lib/common';
+import { CurrentTenant, TenantScope, decryptSecret } from '@lib/common';
 import { PrismaService } from '@lib/prisma';
 import { ApiKeyGuard } from './api-key.guard';
 
@@ -94,6 +94,9 @@ export class V1Controller {
     });
     if (!integration?.accessToken) return { error: 'No active WhatsApp integration configured' };
 
+    const accessToken = decryptSecret(integration.accessToken);
+    if (!accessToken) return { error: 'WhatsApp integration token could not be decrypted' };
+
     let msgBody: Record<string, unknown>;
     if (templateName) {
       const tpl = await this.prisma.messageTemplate.findFirst({
@@ -118,7 +121,7 @@ export class V1Controller {
       `https://graph.facebook.com/v20.0/${integration.phoneNumberId}/messages`,
       {
         method:  'POST',
-        headers: { Authorization: `Bearer ${integration.accessToken}`, 'Content-Type': 'application/json' },
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
         body:    JSON.stringify(msgBody),
       },
     );

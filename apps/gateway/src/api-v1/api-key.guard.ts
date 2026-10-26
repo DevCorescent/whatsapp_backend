@@ -1,5 +1,5 @@
 import {
-  Injectable, CanActivate, ExecutionContext, UnauthorizedException,
+  Injectable, CanActivate, ExecutionContext, UnauthorizedException, ForbiddenException,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
 
@@ -20,9 +20,26 @@ export class ApiKeyGuard implements CanActivate {
     if (!apiKey) throw new UnauthorizedException('Missing X-Api-Key header');
 
     const settings = await this.prisma.tenantSettings.findUnique({
-      where: { apiKey },
+      where:   { apiKey },
+      include: {
+        tenant: {
+          include: {
+            subscriptions: {
+              where:   { status: { in: ['ACTIVE', 'TRIALING'] } },
+              include: { plan: { select: { features: true } } },
+              take:    1,
+            },
+          },
+        },
+      },
     });
     if (!settings) throw new UnauthorizedException('Invalid API key');
+
+    // Plan-gating: plan must include 'api_access' feature
+    const planFeatures: string[] = settings.tenant?.subscriptions?.[0]?.plan?.features ?? [];
+    if (!planFeatures.includes('api_access')) {
+      throw new ForbiddenException('API access is not enabled on your current plan. Please upgrade.');
+    }
 
     // Resolve default business for this tenant
     const business = await this.prisma.business.findFirst({

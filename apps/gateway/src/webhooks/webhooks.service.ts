@@ -70,13 +70,21 @@ export class WebhooksService {
   // ── API Key ────────────────────────────────────────────────────────────────
 
   async getApiKey(scope: TenantScope) {
-    const settings = await this.prisma.tenantSettings.findUnique({ where: { tenantId: scope.tenantId } });
-    const key = settings?.apiKey ?? null;
-    // Return success:true so TransformInterceptor passes through without double-wrapping
+    const [settings, subscription] = await Promise.all([
+      this.prisma.tenantSettings.findUnique({ where: { tenantId: scope.tenantId } }),
+      this.prisma.subscription.findUnique({
+        where:   { tenantId: scope.tenantId },
+        include: { plan: { select: { features: true } } },
+      }),
+    ]);
+    const key         = settings?.apiKey ?? null;
+    const planFeatures: string[] = subscription?.plan?.features ?? [];
+    const planAllows  = planFeatures.includes('api_access');
     return {
-      success:   true,
-      hasKey:    !!key,
-      maskedKey: key ? `${'•'.repeat(Math.max(0, key.length - 8))}${key.slice(-8)}` : null,
+      success:    true,
+      hasKey:     !!key,
+      maskedKey:  key ? `${'•'.repeat(Math.max(0, key.length - 8))}${key.slice(-8)}` : null,
+      planAllows,
     };
   }
 
