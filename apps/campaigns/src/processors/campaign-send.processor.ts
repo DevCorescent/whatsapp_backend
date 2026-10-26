@@ -118,13 +118,13 @@ export class CampaignSendProcessor {
           });
         }
       } else if (template.headerType === 'TEXT' && template.headerContent) {
-        const headerVars = (template.headerVariables ?? []).map((_, i) =>
+        const headerVars = (template.headerVariables ?? []).map((_: unknown, i: number) =>
           ({ type: 'text', text: variables[`header_${i + 1}`] ?? '' })
         );
         if (headerVars.length) components.push({ type: 'header', parameters: headerVars });
       }
 
-      const bodyVars = (template.variables ?? []).map((_, i) =>
+      const bodyVars = (template.variables ?? []).map((_: unknown, i: number) =>
         ({ type: 'text', text: variables[`${i + 1}`] ?? '' })
       );
       if (bodyVars.length) components.push({ type: 'body', parameters: bodyVars });

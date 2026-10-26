@@ -816,17 +816,45 @@ export class AdminService {
         orderBy: { name: 'asc' },
       }),
     ]);
-    const rows = resellers.map((r: any) => ({
-      id:          r.id,
-      name:        r.name,
-      isActive:    r.isActive,
-      clients:     r._count.children,
-      brand:       r.whiteLabel,
-      walletMinor: r.wallet?.balanceMinor ?? 0,
-    }));
+
+    const tenantIds = resellers.map((r: any) => r.id);
+    const wlcList = tenantIds.length
+      ? await (this.prisma as any).whiteLabelConfig.findMany({
+          where:  { tenantId: { in: tenantIds } },
+          select: { tenantId: true, feeOverrideMinor: true, feeDueSince: true, suspendedAt: true, suspendedReason: true },
+        })
+      : [];
+    const wlcMap = new Map((wlcList as any[]).map((w: any) => [w.tenantId, w]));
+
+    const platFeeMinor = config?.whiteLabelFeeMinor ?? 0;
+
+    const rows = resellers.map((r: any) => {
+      const wlc = wlcMap.get(r.id) ?? null;
+      const feeMinor = wlc?.feeOverrideMinor !== null && wlc?.feeOverrideMinor !== undefined
+        ? wlc.feeOverrideMinor
+        : platFeeMinor;
+      return {
+        id:          r.id,
+        name:        r.name,
+        isActive:    r.isActive,
+        clients:     r._count.children,
+        brand:       r.whiteLabel ?? null,
+        walletMinor: r.wallet?.balanceMinor ?? 0,
+        fee: wlc ? {
+          feeMinor,
+          isOverride:      wlc.feeOverrideMinor !== null && wlc.feeOverrideMinor !== undefined,
+          paid:            wlc.feeDueSince === null,
+          dueSince:        wlc.feeDueSince ? (wlc.feeDueSince as Date).toISOString() : null,
+          suspended:       wlc.suspendedAt !== null,
+          suspendedReason: wlc.suspendedReason ?? null,
+        } : null,
+      };
+    });
+
     return {
       success: true,
       data: {
+        rootDomain: process.env.PLATFORM_ROOT_DOMAIN ?? null,
         config: {
           whiteLabelFeeMinor:  config?.whiteLabelFeeMinor  ?? 0,
           whiteLabelGraceDays: config?.whiteLabelGraceDays ?? 7,

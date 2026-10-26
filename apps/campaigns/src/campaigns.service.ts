@@ -74,7 +74,7 @@ export class CampaignsService {
 
     const recipients = await this.prisma.campaignContact.findMany({
       where:   { campaignId: id },
-      orderBy: { createdAt: 'asc' },
+      orderBy: { id: 'asc' },
       include: { contact: { select: { id: true, name: true, phone: true } } },
     });
 
