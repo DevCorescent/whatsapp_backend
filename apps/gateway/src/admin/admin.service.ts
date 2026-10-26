@@ -623,11 +623,11 @@ export class AdminService {
       this.prisma.contact.count(),
       this.prisma.contact.count({ where: { createdAt: { gte: from, lte: to } } }),
       this.prisma.walletTransaction.aggregate({
-        where: { createdAt: { gte: from, lte: to }, type: 'CREDIT' },
+        where: { createdAt: { gte: from, lte: to }, type: { in: ['TOPUP', 'TRANSFER_IN', 'ADJUSTMENT', 'REFUND'] } },
         _sum:  { amountMinor: true },
       }),
       this.prisma.walletTransaction.aggregate({
-        where: { createdAt: { gte: from, lte: to }, type: 'DEBIT' },
+        where: { createdAt: { gte: from, lte: to }, type: { in: ['DEBIT', 'TRANSFER_OUT'] } },
         _sum:  { amountMinor: true },
       }),
       this.prisma.message.groupBy({
