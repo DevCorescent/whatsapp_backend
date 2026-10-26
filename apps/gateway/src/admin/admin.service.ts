@@ -133,12 +133,39 @@ export class AdminService {
       where:   { id: tenantId },
       include: {
         subscription: { include: { plan: true } },
-        users:        { select: { id: true, name: true, email: true, role: true } },
-        businesses:   { select: { id: true, name: true, slug: true } },
+        users: {
+          select: {
+            id: true, name: true, email: true, phone: true,
+            role: true, isActive: true, lastLoginAt: true, createdAt: true,
+          },
+          orderBy: { createdAt: 'asc' },
+        },
+        businesses:  { select: { id: true, name: true, slug: true } },
+        category:    { select: { id: true, name: true } },
+        parent:      { select: { id: true, name: true, resellerType: true } },
+        referredBy:  { select: { id: true, name: true } },
+        whiteLabel:  { select: { brandName: true, domain: true, isActive: true } },
+        settings:    { select: { waPhoneNumberId: true, timezone: true } },
+        _count: {
+          select: {
+            users: true,
+            contacts: true,
+            leads: true,
+            conversations: true,
+            children: true,
+          },
+        },
       },
     });
     if (!tenant) throw new NotFoundException('Tenant not found');
-    return tenant;
+    // Mask the WA token — expose only whether one is set
+    const hasWaApiKey = !!(tenant.settings as any)?.waAccessToken;
+    return {
+      ...tenant,
+      settings: tenant.settings
+        ? { waPhoneNumberId: (tenant.settings as any).waPhoneNumberId, hasWaApiKey, timezone: (tenant.settings as any).timezone }
+        : null,
+    };
   }
 
   async updateTenant(scope: TenantScope, id: string, data: { isActive?: boolean; name?: string; categoryId?: string }) {
