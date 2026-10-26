@@ -10,7 +10,7 @@ export class TagsService {
     const tags = await this.prisma.tag.findMany({
       where: { tenantId: scope.tenantId, businessId: scope.businessId },
       orderBy: { name: 'asc' },
-      include: { _count: { select: { contactTags: true } } },
+      include: { _count: { select: { contacts: true } } },
     });
     return { tags };
   }
