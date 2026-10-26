@@ -84,8 +84,8 @@ export class CampaignsService {
   // ── Create ─────────────────────────────────────────────────────────────────
 
   async create(scope: TenantScope, data: any) {
-    // Route to broadcast handler when caller supplies a recipient list or segment
-    if (Array.isArray(data.numbers) || data.segmentId) {
+    // Route to broadcast handler for any audience-based creation
+    if (Array.isArray(data.numbers) || data.segmentId || data.all || Array.isArray(data.contactIds)) {
       return this.createBroadcast(scope, data);
     }
 
@@ -123,6 +123,9 @@ export class CampaignsService {
       urlButtonMapping  = [] as string[],
       numbers,
       segmentId,
+      all               = false,
+      contactIds,
+      excludeContactIds = [] as string[],
       recipientFields   = {} as Record<string, Record<string, string>>,
       scheduledAt,
       headerMediaId,
@@ -137,7 +140,13 @@ export class CampaignsService {
 
     if (Array.isArray(numbers) && numbers.length > 0) {
       rawNumbers = numbers;
-    } else if (segmentId) {
+    } else if (Array.isArray(contactIds) && contactIds.length > 0) {
+      const contacts = await this.prisma.contact.findMany({
+        where:  { id: { in: contactIds }, businessId: scope.businessId, tenantId: scope.tenantId },
+        select: { phone: true },
+      });
+      rawNumbers = contacts.map(c => c.phone);
+    } else if (segmentId || all) {
       // Segment rows hold dynamic filters evaluated by lib/segments.ts.
       // Without importing that evaluator here we fall back to all non-opted-out
       // contacts for the business; a proper implementation would resolve filters.
@@ -223,6 +232,12 @@ export class CampaignsService {
         sampleFields[`slot_${i + 1}`] ?? val ?? ''
       );
 
+      const recipients = validNumbers.map(phone => ({
+        contactId: contactMap.get(phone)?.id ?? null,
+        phone,
+        name: contactMap.get(phone)?.name ?? null,
+      }));
+
       return {
         total,
         matched,
@@ -231,6 +246,7 @@ export class CampaignsService {
         excludedCount,
         excludedByReason,
         excluded,
+        recipients,
         sample: samplePhone ? { phone: samplePhone, bodyParams } : null,
         cost: {
           units:              matched,
@@ -241,7 +257,14 @@ export class CampaignsService {
       };
     }
 
-    // ── 6. Create Campaign record ───────────────────────────────────────────
+    // ── 6. Apply excludeContactIds from review step ─────────────────────────
+    const excludedContactIdSet = new Set<string>(excludeContactIds ?? []);
+    const finalNumbers = validNumbers.filter(phone => {
+      const cid = contactMap.get(phone)?.id;
+      return !cid || !excludedContactIdSet.has(cid);
+    });
+
+    // ── 7. Create Campaign record ───────────────────────────────────────────
     const campaign = await this.prisma.campaign.create({
       data: {
         name,
@@ -251,7 +274,7 @@ export class CampaignsService {
         scheduledAt:           scheduledAt ? new Date(scheduledAt) : undefined,
         whatsappIntegrationId,
         status:                scheduledAt ? 'SCHEDULED' : 'DRAFT',
-        totalCount:            validNumbers.length,
+        totalCount:            finalNumbers.length,
         metadata: {
           bodyVarMapping,
           urlButtonMapping,
@@ -262,9 +285,9 @@ export class CampaignsService {
       },
     });
 
-    // ── 7. Create CampaignContact rows ──────────────────────────────────────
-    if (validNumbers.length > 0) {
-      const contactRows = validNumbers.map(phone => {
+    // ── 8. Create CampaignContact rows ──────────────────────────────────────
+    if (finalNumbers.length > 0) {
+      const contactRows = finalNumbers.map(phone => {
         const contact = contactMap.get(phone);
         const fields  = (recipientFields[phone] ?? {}) as Record<string, string>;
         const variables: Record<string, string> = {};
@@ -288,7 +311,7 @@ export class CampaignsService {
       await this.prisma.campaignContact.createMany({ data: contactRows, skipDuplicates: true });
     }
 
-    // ── 8. Launch immediately if not scheduled ──────────────────────────────
+    // ── 9. Launch immediately if not scheduled ──────────────────────────────
     if (!scheduledAt) {
       await this.launch(scope, campaign.id);
     }
