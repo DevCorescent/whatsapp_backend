@@ -13,8 +13,8 @@ import { runFlowStep } from './chatbot/engine';
 import { toFlowDocument } from './chatbot/types';
 import type { FlowVariables } from './chatbot/engine';
 
-const OPT_OUT = new Set(['STOP', 'UNSUBSCRIBE', 'CANCEL', 'END', 'QUIT', 'OPTOUT']);
-const OPT_IN  = new Set(['START', 'SUBSCRIBE', 'YES', 'HELLO', 'HELP']);
+const DEFAULT_OPT_OUT = ['STOP', 'UNSUBSCRIBE', 'CANCEL', 'END', 'QUIT', 'OPTOUT'];
+const DEFAULT_OPT_IN  = ['START', 'SUBSCRIBE', 'YES', 'HELLO', 'HELP'];
 const AI_HISTORY_LIMIT = 20;
 const WA_API_VERSION = 'v20.0';
 
@@ -94,22 +94,30 @@ export class InboundPipelineService {
     );
 
     // ── 1. Opt-out / opt-in ─────────────────────────────────────────────────
+    // Load tenant-specific keywords (falls back to defaults if not configured)
+    const bizData = await this.prisma.business.findFirst({
+      where:  { id: opts.businessId },
+      select: { aiInstructions: true },
+    });
+    const optCfg   = ((bizData?.aiInstructions as any)?.optOutConfig ?? {}) as Record<string, any>;
+    const normalize = (arr: string[]) => arr.map(k => k.trim().toUpperCase().replace(/[^A-Z]/g, ''));
+    const OPT_OUT  = new Set([...normalize(DEFAULT_OPT_OUT), ...normalize(optCfg.optOutKeywords ?? [])]);
+    const OPT_IN   = new Set([...normalize(DEFAULT_OPT_IN),  ...normalize(optCfg.optInKeywords  ?? [])]);
+    const optOutReply = optCfg.optOutReply ?? 'You have been unsubscribed and will no longer receive messages from us. Reply START to re-subscribe.';
+    const optInReply  = optCfg.optInReply  ?? 'You have been re-subscribed and will receive messages from us again. Reply STOP to unsubscribe.';
+
     const keyword = opts.content.trim().toUpperCase().replace(/[^A-Z]/g, '');
 
     if (OPT_OUT.has(keyword)) {
       await this.prisma.contact.update({ where: { id: contact.id }, data: { optedOut: true } });
-      if (creds) await this.sendText(creds, contact.phone,
-        'You have been unsubscribed and will no longer receive messages from us. Reply START to re-subscribe.',
-      ).catch(() => {});
+      if (creds) await this.sendText(creds, contact.phone, optOutReply).catch(() => {});
       return;
     }
 
     if (contact.optedOut) {
       if (OPT_IN.has(keyword)) {
         await this.prisma.contact.update({ where: { id: contact.id }, data: { optedOut: false } });
-        if (creds) await this.sendText(creds, contact.phone,
-          'You have been re-subscribed and will receive messages from us again. Reply STOP to unsubscribe.',
-        ).catch(() => {});
+        if (creds) await this.sendText(creds, contact.phone, optInReply).catch(() => {});
       }
       return;
     }

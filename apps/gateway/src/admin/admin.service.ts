@@ -590,6 +590,137 @@ export class AdminService {
     return [header, ...rows].join('\n');
   }
 
+  // ── Reports ─────────────────────────────────────────────────────────────────
+
+  async getReports(scope: TenantScope, query: { from?: string; to?: string }) {
+    this.guard(scope);
+
+    const from = query.from ? new Date(query.from) : new Date(Date.now() - 30 * 86_400_000);
+    const to   = query.to   ? new Date(query.to)   : new Date();
+    to.setHours(23, 59, 59, 999);
+
+    const [
+      totalTenants,
+      newTenants,
+      totalMessages,
+      inboundMessages,
+      outboundMessages,
+      totalCampaigns,
+      completedCampaigns,
+      totalContacts,
+      newContacts,
+      walletCredits,
+      walletDebits,
+      topTenantsByMessages,
+    ] = await Promise.all([
+      this.prisma.tenant.count(),
+      this.prisma.tenant.count({ where: { createdAt: { gte: from, lte: to } } }),
+      this.prisma.message.count({ where: { createdAt: { gte: from, lte: to } } }),
+      this.prisma.message.count({ where: { createdAt: { gte: from, lte: to }, direction: 'INBOUND' } }),
+      this.prisma.message.count({ where: { createdAt: { gte: from, lte: to }, direction: 'OUTBOUND' } }),
+      this.prisma.campaign.count({ where: { createdAt: { gte: from, lte: to } } }),
+      this.prisma.campaign.count({ where: { createdAt: { gte: from, lte: to }, status: 'COMPLETED' } }),
+      this.prisma.contact.count(),
+      this.prisma.contact.count({ where: { createdAt: { gte: from, lte: to } } }),
+      this.prisma.walletTransaction.aggregate({
+        where: { createdAt: { gte: from, lte: to }, type: 'CREDIT' },
+        _sum:  { amountMinor: true },
+      }),
+      this.prisma.walletTransaction.aggregate({
+        where: { createdAt: { gte: from, lte: to }, type: 'DEBIT' },
+        _sum:  { amountMinor: true },
+      }),
+      this.prisma.message.groupBy({
+        by:    ['tenantId'],
+        where: { createdAt: { gte: from, lte: to } },
+        _count: { _all: true },
+        orderBy: { _count: { tenantId: 'desc' } },
+        take:  10,
+      }),
+    ]);
+
+    // Resolve tenant names for top list
+    const topTenantIds   = topTenantsByMessages.map(r => r.tenantId).filter(Boolean) as string[];
+    const tenantNameRows = await this.prisma.tenant.findMany({
+      where:  { id: { in: topTenantIds } },
+      select: { id: true, name: true, slug: true },
+    });
+    const tenantNameMap = new Map(tenantNameRows.map(t => [t.id, t]));
+
+    const topTenants = topTenantsByMessages.map(r => ({
+      tenantId:   r.tenantId,
+      tenantName: tenantNameMap.get(r.tenantId ?? '')?.name ?? r.tenantId,
+      slug:       tenantNameMap.get(r.tenantId ?? '')?.slug ?? '',
+      messages:   r._count._all,
+    }));
+
+    // Daily message breakdown for the period
+    const dailyRows = await this.prisma.$queryRaw<Array<{ date: string; count: bigint }>>`
+      SELECT DATE("createdAt") AS date, COUNT(*) AS count
+      FROM messages
+      WHERE "createdAt" >= ${from} AND "createdAt" <= ${to}
+      GROUP BY DATE("createdAt")
+      ORDER BY date ASC
+    `;
+    const daily = dailyRows.map(r => ({ date: String(r.date).slice(0, 10), count: Number(r.count) }));
+
+    return {
+      success: true,
+      data: {
+        period: { from: from.toISOString(), to: to.toISOString() },
+        tenants: { total: totalTenants, new: newTenants },
+        messages: {
+          total: totalMessages,
+          inbound: inboundMessages,
+          outbound: outboundMessages,
+          daily,
+        },
+        campaigns: { total: totalCampaigns, completed: completedCampaigns },
+        contacts:  { total: totalContacts, new: newContacts },
+        wallet: {
+          creditsMinor: walletCredits._sum.amountMinor ?? 0,
+          debitsMinor:  walletDebits._sum.amountMinor  ?? 0,
+        },
+        topTenants,
+      },
+    };
+  }
+
+  async getReportsCsv(scope: TenantScope, query: { from?: string; to?: string }) {
+    this.guard(scope);
+    const result = await this.getReports(scope, query);
+    const { data } = result;
+
+    const rows: string[] = [
+      '# Platform Report',
+      `# Period: ${data.period.from.slice(0, 10)} to ${data.period.to.slice(0, 10)}`,
+      '',
+      '## Summary',
+      'Metric,Value',
+      `Total Tenants,${data.tenants.total}`,
+      `New Tenants,${data.tenants.new}`,
+      `Total Messages,${data.messages.total}`,
+      `Inbound Messages,${data.messages.inbound}`,
+      `Outbound Messages,${data.messages.outbound}`,
+      `Total Campaigns,${data.campaigns.total}`,
+      `Completed Campaigns,${data.campaigns.completed}`,
+      `Total Contacts,${data.contacts.total}`,
+      `New Contacts,${data.contacts.new}`,
+      `Wallet Credits (paise),${data.wallet.creditsMinor}`,
+      `Wallet Debits (paise),${data.wallet.debitsMinor}`,
+      '',
+      '## Daily Messages',
+      'Date,Messages',
+      ...data.messages.daily.map(d => `${d.date},${d.count}`),
+      '',
+      '## Top Tenants by Messages',
+      'Tenant Name,Slug,Messages',
+      ...data.topTenants.map(t => `"${t.tenantName}",${t.slug},${t.messages}`),
+    ];
+
+    return rows.join('\n');
+  }
+
   // ── View-as ─────────────────────────────────────────────────────────────────
 
   async startViewAs(scope: TenantScope, tenantId: string) {

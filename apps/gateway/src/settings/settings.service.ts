@@ -10,6 +10,40 @@ export class SettingsService {
 
   constructor(private readonly prisma: PrismaService) {}
 
+  // ── Opt-out / Opt-in Manager ──────────────────────────────────────────────────
+
+  async getOptOutConfig(scope: TenantScope) {
+    const biz = await this.prisma.business.findFirst({
+      where:  { id: scope.businessId },
+      select: { aiInstructions: true },
+    });
+    const cfg = ((biz?.aiInstructions as any)?.optOutConfig ?? {}) as Record<string, any>;
+    return {
+      optOutKeywords: cfg.optOutKeywords ?? ['STOP', 'UNSUBSCRIBE', 'CANCEL', 'END', 'QUIT', 'OPTOUT'],
+      optInKeywords:  cfg.optInKeywords  ?? ['START', 'SUBSCRIBE', 'YES'],
+      optOutReply:    cfg.optOutReply    ?? 'You have been unsubscribed and will no longer receive marketing messages from us. Reply START to re-subscribe.',
+      optInReply:     cfg.optInReply     ?? 'You have been re-subscribed and will receive messages from us again. Reply STOP to unsubscribe.',
+    };
+  }
+
+  async updateOptOutConfig(scope: TenantScope, data: {
+    optOutKeywords?: string[];
+    optInKeywords?:  string[];
+    optOutReply?:    string;
+    optInReply?:     string;
+  }) {
+    const biz = await this.prisma.business.findFirst({
+      where:  { id: scope.businessId },
+      select: { aiInstructions: true },
+    });
+    const existing = ((biz?.aiInstructions as any) ?? {}) as Record<string, unknown>;
+    await this.prisma.business.update({
+      where: { id: scope.businessId },
+      data:  { aiInstructions: { ...existing, optOutConfig: data } },
+    });
+    return { success: true };
+  }
+
   // ── Combined settings (matches Next.js /api/settings GET/PATCH) ──────────────
 
   async getSettings(scope: TenantScope) {

@@ -25,6 +25,31 @@ export class AdminController {
     return this.svc.getRevenue(scope, { range });
   }
 
+  @Get('reports')
+  @ApiOperation({ summary: 'Detailed platform reports with date range (super admin)' })
+  reports(
+    @CurrentTenant() scope: TenantScope,
+    @Query('from') from?: string,
+    @Query('to')   to?: string,
+  ) {
+    return this.svc.getReports(scope, { from, to });
+  }
+
+  @Get('reports/export')
+  @ApiOperation({ summary: 'Download platform report as CSV' })
+  async reportsExport(
+    @CurrentTenant() scope: TenantScope,
+    @Res() res: Response,
+    @Query('from') from?: string,
+    @Query('to')   to?: string,
+  ) {
+    const csv = await this.svc.getReportsCsv(scope, { from, to });
+    const filename = `platform-report-${new Date().toISOString().slice(0, 10)}.csv`;
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(csv);
+  }
+
   @Get('revenue/export')
   @ApiOperation({ summary: 'Revenue CSV export (super admin)' })
   async revenueExport(

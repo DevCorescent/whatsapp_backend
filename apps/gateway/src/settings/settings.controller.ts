@@ -13,6 +13,21 @@ import { SettingsService } from './settings.service';
 export class SettingsController {
   constructor(private readonly svc: SettingsService) {}
 
+  // ── Opt-out / Opt-in Manager ──────────────────────────────────────────────
+
+  @Get('opt-out')
+  @ApiOperation({ summary: 'Get opt-out / opt-in keyword config' })
+  getOptOutConfig(@CurrentTenant() scope: TenantScope) {
+    return this.svc.getOptOutConfig(scope);
+  }
+
+  @Put('opt-out')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Update opt-out / opt-in keyword config' })
+  updateOptOutConfig(@CurrentTenant() scope: TenantScope, @Body() body: any) {
+    return this.svc.updateOptOutConfig(scope, body);
+  }
+
   // ── Combined settings endpoint (matches Next.js /api/settings) ────────────
 
   @Get()
