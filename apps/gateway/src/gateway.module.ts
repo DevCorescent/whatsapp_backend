@@ -3,6 +3,7 @@ import { GatewayController } from './gateway.controller';
 import { GatewayService } from './gateway.service';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bull';
+import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from '@lib/prisma';
 
 // Core
@@ -54,6 +55,7 @@ import { EventsModule }       from './events/events.module';
   providers:   [GatewayService],
   imports: [
     ConfigModule.forRoot({ isGlobal: true, envFilePath: '.env' }),
+    ScheduleModule.forRoot(),
 
     BullModule.forRootAsync({
       imports: [ConfigModule],

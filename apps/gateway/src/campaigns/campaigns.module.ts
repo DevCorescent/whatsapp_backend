@@ -3,12 +3,13 @@ import { BullModule } from '@nestjs/bull';
 import { PrismaModule } from '@lib/prisma';
 import { WebhookDispatchService } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, QUEUE_TEMPLATE_SYNC } from '@lib/queue';
-import { CampaignsController }  from '../../../../apps/campaigns/src/campaigns.controller';
-import { CampaignsService }     from '../../../../apps/campaigns/src/campaigns.service';
-import { TemplatesController }  from '../../../../apps/campaigns/src/templates/templates.controller';
-import { TemplatesService }     from '../../../../apps/campaigns/src/templates/templates.service';
-// Processors (queue consumers) are intentionally excluded here — they run only
-// in the campaigns worker app to avoid double-processing queued jobs.
+import { CampaignsController }      from '../../../../apps/campaigns/src/campaigns.controller';
+import { CampaignsService }         from '../../../../apps/campaigns/src/campaigns.service';
+import { TemplatesController }      from '../../../../apps/campaigns/src/templates/templates.controller';
+import { TemplatesService }         from '../../../../apps/campaigns/src/templates/templates.service';
+import { CampaignSendProcessor }    from '../../../../apps/campaigns/src/processors/campaign-send.processor';
+import { CampaignSchedulerService } from './campaign-scheduler.service';
+import { CampaignDebugController }  from './campaign-debug.controller';
 
 @Module({
   imports: [
@@ -16,7 +17,7 @@ import { TemplatesService }     from '../../../../apps/campaigns/src/templates/t
     BullModule.registerQueue({ name: QUEUE_CAMPAIGN_SEND }),
     BullModule.registerQueue({ name: QUEUE_TEMPLATE_SYNC }),
   ],
-  controllers: [CampaignsController, TemplatesController],
-  providers:   [CampaignsService, TemplatesService, WebhookDispatchService],
+  controllers: [CampaignsController, TemplatesController, CampaignDebugController],
+  providers:   [CampaignsService, TemplatesService, WebhookDispatchService, CampaignSendProcessor, CampaignSchedulerService],
 })
 export class CampaignsModule {}

@@ -61,6 +61,8 @@ export class CampaignSendProcessor {
   async handle(job: Job<CampaignSendJob>) {
     const { campaignId, recipientId, tenantId, businessId } = job.data;
 
+    this.logger.log(`Processing job id=${job.id} campaign=${campaignId} recipient=${recipientId}`);
+
     // Claim the recipient row atomically (prevent double-send)
     const claimed = await this.prisma.campaignContact.updateMany({
       where:  { id: recipientId, status: 'PENDING', claimedAt: null },
@@ -139,6 +141,8 @@ export class CampaignSendProcessor {
         },
       };
 
+      this.logger.log(`Meta API send → campaign=${campaignId} phone=${recipient.phone} template=${template.name}`);
+
       const res = await fetch(
         `https://graph.facebook.com/v20.0/${integration.phoneNumberId}/messages`,
         {
@@ -152,8 +156,9 @@ export class CampaignSendProcessor {
       );
 
       if (!res.ok) {
-        const err = await res.text();
-        throw new Error(`Meta API error: ${err}`);
+        const errText = await res.text();
+        this.logger.error(`Meta API ${res.status} for campaign=${campaignId} recipient=${recipientId}: ${errText}`);
+        throw new Error(`Meta API error ${res.status}: ${errText}`);
       }
 
       const json = await res.json() as any;
@@ -225,7 +230,7 @@ export class CampaignSendProcessor {
         this.logger.warn(`Wallet debit skipped for ${recipientId}: ${walletErr.message}`);
       }
 
-      this.logger.debug(`Sent campaign ${campaignId} to ${recipient.phone} (${waMessageId})`);
+      this.logger.log(`Sent campaign=${campaignId} phone=${recipient.phone} waMessageId=${waMessageId}`);
       await this.tryComplete(campaignId, tenantId);
 
     } catch (err: any) {
