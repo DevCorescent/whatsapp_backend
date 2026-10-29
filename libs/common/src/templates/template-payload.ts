@@ -543,6 +543,9 @@ export function validateTemplate(spec: TemplateSpec): string[] {
   // ── Body ──
   if (!spec.body?.trim()) errors.push('Message body is required.');
   else if (spec.body.length > LIMITS.bodyChars) errors.push(`Body is ${spec.body.length} characters — the limit is ${LIMITS.bodyChars}.`);
+  // Meta refuses a body that opens or closes on a placeholder (error 2388299).
+  if (/^\s*\{\{/.test(spec.body ?? '')) errors.push('A body cannot open with a variable. Put at least one character before it.');
+  if (/\}\}\s*$/.test(spec.body ?? '')) errors.push('A body cannot end with a variable. Put at least one character after it.');
 
   const bodyVars = paramCount(spec.body ?? '', format);
   const bodyExamples = (spec.variables ?? []).filter((v) => v?.trim()).length;
