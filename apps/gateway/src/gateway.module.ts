@@ -5,7 +5,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bull';
 import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from '@lib/prisma';
-import { RealtimeModule } from '@lib/common';
+import { RealtimeModule, StorageModule } from '@lib/common';
 
 // Core
 import { AuthModule }         from './auth/auth.module';
@@ -92,6 +92,7 @@ import { WebhooksModule }     from './webhooks/webhooks.module';
 
     PrismaModule,
     RealtimeModule,
+    StorageModule,
 
     // Auth & API access
     AuthModule,

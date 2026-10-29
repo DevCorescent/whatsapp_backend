@@ -6,12 +6,14 @@ import { Queue } from 'bull';
 import { PrismaService } from '@lib/prisma';
 import { TenantScope } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
+import { CampaignProgressService } from './campaign-progress.service';
 
 @Injectable()
 export class CampaignsService {
   constructor(
     private readonly prisma: PrismaService,
     @InjectQueue(QUEUE_CAMPAIGN_SEND) private readonly sendQueue: Queue,
+    private readonly progress: CampaignProgressService,
   ) {}
 
   // ── List ───────────────────────────────────────────────────────────────────
@@ -524,6 +526,7 @@ export class CampaignsService {
     }));
 
     if (jobs.length) await this.sendQueue.addBulk(jobs);
+    void this.progress.emitNow(id);
     return { enqueued: jobs.length };
   }
 
@@ -543,6 +546,7 @@ export class CampaignsService {
       where:  { campaignId: id, status: 'PENDING' },
       data:   { status: 'CANCELLED' },
     });
+    void this.progress.emitNow(id);
     return { cancelled: true };
   }
 

@@ -7,6 +7,7 @@ import { QUEUE_CAMPAIGN_SEND, QUEUE_TEMPLATE_SYNC } from '@lib/queue';
 import { CampaignsController } from './campaigns.controller';
 import { CampaignsService } from './campaigns.service';
 import { CampaignSendProcessor } from './processors/campaign-send.processor';
+import { CampaignProgressService } from './campaign-progress.service';
 import { TemplatesModule } from './templates/templates.module';
 
 @Module({
@@ -30,6 +31,6 @@ import { TemplatesModule } from './templates/templates.module';
     TemplatesModule,
   ],
   controllers: [CampaignsController],
-  providers:   [CampaignsService, CampaignSendProcessor, WebhookDispatchService],
+  providers:   [CampaignsService, CampaignSendProcessor, WebhookDispatchService, CampaignProgressService],
 })
 export class CampaignsModule {}

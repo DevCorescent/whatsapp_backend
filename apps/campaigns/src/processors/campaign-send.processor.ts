@@ -4,6 +4,9 @@ import { Job } from 'bull';
 import { PrismaService } from '@lib/prisma';
 import { WebhookDispatchService, decryptSecret } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
+import { CampaignProgressService } from '../campaign-progress.service';
+
+const WA_API_VERSION = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
 
 // Shape cached per campaign — only immutable fields (template, integration credentials)
 interface CampaignData {
@@ -29,6 +32,7 @@ export class CampaignSendProcessor {
   constructor(
     private readonly prisma:    PrismaService,
     private readonly webhooks:  WebhookDispatchService,
+    private readonly progress:  CampaignProgressService,
   ) {}
 
   private async getCampaignData(campaignId: string): Promise<CampaignData | null> {
@@ -146,7 +150,7 @@ export class CampaignSendProcessor {
       this.logger.log(`Meta API send → campaign=${campaignId} phone=${recipient.phone} template=${template.name}`);
 
       const res = await fetch(
-        `https://graph.facebook.com/v20.0/${integration.phoneNumberId}/messages`,
+        `https://graph.facebook.com/${WA_API_VERSION}/${integration.phoneNumberId}/messages`,
         {
           method:  'POST',
           headers: {
@@ -233,14 +237,15 @@ export class CampaignSendProcessor {
       }
 
       this.logger.log(`Sent campaign=${campaignId} phone=${recipient.phone} waMessageId=${waMessageId}`);
-      await this.tryComplete(campaignId, tenantId);
+      const completed = await this.tryComplete(campaignId, tenantId);
+      if (completed) await this.progress.emitNow(campaignId); else this.progress.touch(campaignId);
 
     } catch (err: any) {
       this.logger.error(`Campaign send failed for recipient ${recipientId}: ${err.message}`);
 
       await this.prisma.campaignContact.update({
         where: { id: recipientId },
-        data:  { status: 'FAILED', failedReason: String(err.message).slice(0, 500) },
+        data:  { status: 'FAILED', failedAt: new Date(), failedReason: String(err.message).slice(0, 500) },
       });
 
       await this.prisma.campaign.update({
@@ -248,7 +253,8 @@ export class CampaignSendProcessor {
         data:  { failedCount: { increment: 1 } },
       });
 
-      await this.tryComplete(campaignId, tenantId);
+      const completed = await this.tryComplete(campaignId, tenantId);
+      if (completed) await this.progress.emitNow(campaignId); else this.progress.touch(campaignId);
       throw err;
     }
   }
@@ -258,7 +264,7 @@ export class CampaignSendProcessor {
   //   - the race condition (concurrent workers both seeing "done" and firing the webhook twice)
   // Postgres guarantees only ONE concurrent UPDATE matches the WHERE clause
   // on the transition from RUNNING → COMPLETED, so the webhook fires exactly once.
-  private async tryComplete(campaignId: string, tenantId: string): Promise<void> {
+  private async tryComplete(campaignId: string, tenantId: string): Promise<boolean> {
     // Prisma maps camelCase fields to quoted camelCase columns in Postgres (confirmed by migration SQL).
     const rows = await this.prisma.$queryRaw<Array<{
       tenantId: string; sentCount: bigint; failedCount: bigint;
@@ -273,7 +279,7 @@ export class CampaignSendProcessor {
       RETURNING "tenantId", "sentCount", "failedCount", "deliveredCount", "readCount", "totalCount", "completedAt"
     `;
 
-    if (!rows.length) return;
+    if (!rows.length) return false;
 
     this.campaignCache.delete(campaignId);
 
@@ -287,5 +293,6 @@ export class CampaignSendProcessor {
       totalCount:     Number(c.totalCount),
       completedAt:    c.completedAt?.toISOString(),
     });
+    return true;
   }
 }

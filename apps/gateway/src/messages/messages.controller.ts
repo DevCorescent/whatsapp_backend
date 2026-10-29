@@ -35,6 +35,7 @@ export class MessagesController {
       mediaMimeType?: string;
       mediaSize?:     number;
       fileName?:      string;
+      storageKey?:    string;
       clientId?:      string;
     },
   ) {

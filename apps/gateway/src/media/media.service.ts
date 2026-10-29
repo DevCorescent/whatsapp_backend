@@ -1,150 +1,150 @@
 import 'multer';
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { ConfigService } from '@nestjs/config';
-import { TenantScope } from '@lib/common';
+import {
+  TenantScope, StorageService, decryptSecret, downloadMetaMedia, lookupMetaMedia, WA_API_VERSION,
+} from '@lib/common';
+
+export interface UploadedMedia {
+  /** Public storage URL when storage is configured with a public base; otherwise null. */
+  url: string | null;
+  storageKey: string | null;
+  filename: string;
+  mimeType: string;
+  size: number;
+  category: 'image' | 'video' | 'audio' | 'document';
+  /** Meta media id — what the send call references. */
+  mediaId: string;
+}
+
+export type MediaSource =
+  | { kind: 'redirect'; url: string }
+  | { kind: 'bytes'; buffer: Buffer; contentType: string; filename?: string | null };
 
 @Injectable()
 export class MediaService {
+  private readonly logger = new Logger(MediaService.name);
+
   constructor(
-    private readonly prisma: PrismaService,
-    private readonly config: ConfigService,
+    private readonly prisma:  PrismaService,
+    private readonly storage: StorageService,
   ) {}
 
-  private get apiVersion(): string {
-    return this.config.get<string>('WHATSAPP_API_VERSION') ?? 'v18.0';
+  private async integrationFor(businessId: string, integrationId?: string | null) {
+    const integration = integrationId
+      ? await this.prisma.whatsAppIntegration.findFirst({ where: { id: integrationId, businessId } })
+      : await this.prisma.whatsAppIntegration.findFirst({
+          where: { businessId, isActive: true }, orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+        });
+    if (!integration) throw new NotFoundException('No active WhatsApp integration found');
+    const accessToken = integration.accessToken ? decryptSecret(integration.accessToken) : null;
+    if (!accessToken) throw new BadRequestException('WhatsApp integration access token is missing or cannot be decrypted');
+    return { integration, accessToken };
   }
 
-  private async getIntegration(businessId: string) {
-    const integration = await this.prisma.whatsAppIntegration.findFirst({
-      where: { businessId, isDefault: true, isActive: true },
-    });
-    if (!integration) throw new NotFoundException('No active default WhatsApp integration found');
-    return integration;
-  }
-
-  private getCategory(mimeType: string): string {
+  private category(mimeType: string): UploadedMedia['category'] {
     if (mimeType.startsWith('image/')) return 'image';
     if (mimeType.startsWith('video/')) return 'video';
     if (mimeType.startsWith('audio/')) return 'audio';
     return 'document';
   }
 
-  private async uploadOneFile(
-    phoneNumberId: string,
-    accessToken: string,
-    buffer: Buffer,
-    filename: string,
-    mimeType: string,
-  ) {
+  private async uploadToMeta(phoneNumberId: string, accessToken: string, buffer: Buffer, filename: string, mimeType: string) {
     const formData = new FormData();
-    const blob = new Blob([new Uint8Array(buffer)], { type: mimeType });
-    formData.append('file', blob, filename);
+    formData.append('file', new Blob([new Uint8Array(buffer)], { type: mimeType }), filename);
     formData.append('type', mimeType);
     formData.append('messaging_product', 'whatsapp');
 
-    const response = await fetch(
-      `https://graph.facebook.com/${this.apiVersion}/${phoneNumberId}/media`,
-      {
-        method:  'POST',
-        headers: { Authorization: `Bearer ${accessToken}` },
-        body:    formData,
-      },
-    );
-
+    const response = await fetch(`https://graph.facebook.com/${WA_API_VERSION}/${phoneNumberId}/media`, {
+      method:  'POST',
+      headers: { Authorization: `Bearer ${accessToken}` },
+      body:    formData,
+    });
     if (!response.ok) {
       const err = await response.text();
-      throw new BadRequestException(`Meta upload failed: ${err}`);
+      this.logger.error(`Meta upload failed ${response.status}: ${err.slice(0, 300)}`);
+      throw new BadRequestException(`Meta upload failed: ${err.slice(0, 200)}`);
+    }
+    return ((await response.json()) as { id: string }).id;
+  }
+
+  /** Uploads to Meta (for sending) and, when configured, to our storage (for viewing later). */
+  private async storeOne(scope: TenantScope, phoneNumberId: string, accessToken: string, buffer: Buffer, filename: string, mimeType: string): Promise<UploadedMedia> {
+    const mediaId = await this.uploadToMeta(phoneNumberId, accessToken, buffer, filename, mimeType);
+
+    let url: string | null = null;
+    let storageKey: string | null = null;
+    if (this.storage.isConfigured()) {
+      try {
+        const key = this.storage.mediaKey({ tenantId: scope.tenantId, businessId: scope.businessId, id: `out-${mediaId}`, mimeType, filename });
+        const stored = await this.storage.put(key, buffer, mimeType);
+        url = stored.url;
+        storageKey = stored.key;
+      } catch (err: any) {
+        this.logger.warn(`Storage put failed for upload ${filename}: ${err?.message ?? err}`);
+      }
     }
 
-    const data = (await response.json()) as { id: string };
-    return data.id;
+    return { url, storageKey, filename, mimeType, size: buffer.byteLength, category: this.category(mimeType), mediaId };
   }
 
-  // JSON upload (single file as base64)
   async uploadMedia(scope: TenantScope, body: { base64: string; filename: string; mimeType: string }) {
-    const integration = await this.getIntegration(scope.businessId);
-    if (!integration.accessToken) throw new BadRequestException('Integration has no access token');
-
-    const { phoneNumberId, accessToken } = integration;
+    const { integration, accessToken } = await this.integrationFor(scope.businessId);
     const buffer = Buffer.from(body.base64, 'base64');
-
-    const mediaId = await this.uploadOneFile(phoneNumberId, accessToken, buffer, body.filename, body.mimeType);
-    const url = `https://graph.facebook.com/${this.apiVersion}/${mediaId}`;
-
-    return {
-      success: true,
-      data: [{
-        url,
-        filename: body.filename,
-        mimeType: body.mimeType,
-        size:     buffer.byteLength,
-        category: this.getCategory(body.mimeType),
-        mediaId,
-      }],
-    };
+    const item = await this.storeOne(scope, integration.phoneNumberId, accessToken, buffer, body.filename, body.mimeType);
+    return { success: true, data: [item] };
   }
 
-  // Multipart upload (multiple files)
-  async uploadFiles(
-    scope: TenantScope,
-    files: Express.Multer.File[],
-  ) {
-    const integration = await this.getIntegration(scope.businessId);
-    if (!integration.accessToken) throw new BadRequestException('Integration has no access token');
-
-    const { phoneNumberId, accessToken } = integration;
+  async uploadFiles(scope: TenantScope, files: Express.Multer.File[]) {
+    const { integration, accessToken } = await this.integrationFor(scope.businessId);
     const results = await Promise.allSettled(
-      files.map(async (f) => {
-        const mediaId = await this.uploadOneFile(
-          phoneNumberId, accessToken, f.buffer, f.originalname, f.mimetype,
-        );
-        const url = `https://graph.facebook.com/${this.apiVersion}/${mediaId}`;
-        return {
-          url,
-          filename: f.originalname,
-          mimeType: f.mimetype,
-          size:     f.size,
-          category: this.getCategory(f.mimetype),
-          mediaId,
-        };
-      }),
+      files.map(f => this.storeOne(scope, integration.phoneNumberId, accessToken, f.buffer, f.originalname, f.mimetype)),
     );
-
-    const data = results
-      .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled')
-      .map((r) => r.value);
-
+    const data = results.filter((r): r is PromiseFulfilledResult<UploadedMedia> => r.status === 'fulfilled').map(r => r.value);
+    const failed = results.filter(r => r.status === 'rejected') as PromiseRejectedResult[];
+    if (data.length === 0 && failed.length) {
+      throw failed[0].reason instanceof Error ? failed[0].reason : new BadRequestException('Upload failed');
+    }
     return { success: true, data };
   }
 
-  async proxyMedia(scope: TenantScope, mediaId: string): Promise<{ buffer: Buffer; contentType: string }> {
-    const integration = await this.getIntegration(scope.businessId);
-    if (!integration.accessToken) throw new BadRequestException('Integration has no access token');
-
-    const { accessToken } = integration;
-
-    // Step 1: get CDN URL from Meta
-    const metaRes = await fetch(
-      `https://graph.facebook.com/${this.apiVersion}/${mediaId}`,
-      { headers: { Authorization: `Bearer ${accessToken}` } },
-    );
-    if (!metaRes.ok) throw new NotFoundException('Media not found on Meta');
-    const meta = (await metaRes.json()) as { url: string; mime_type: string };
-
-    // Step 2: download actual bytes from CDN URL
-    const fileRes = await fetch(meta.url, {
-      headers: { Authorization: `Bearer ${accessToken}` },
+  /**
+   * Where the bytes for a message's attachment live right now: our storage (public URL or a
+   * presigned one) when the copy exists, otherwise a live stream from Meta by media id.
+   */
+  async sourceForMessage(scope: TenantScope, messageId: string): Promise<MediaSource> {
+    const message = await this.prisma.message.findFirst({
+      where:   { id: messageId, tenantId: scope.tenantId, businessId: scope.businessId },
+      select:  { mediaUrl: true, mediaMimeType: true, metadata: true, conversation: { select: { whatsappIntegrationId: true } } },
     });
-    if (!fileRes.ok) throw new NotFoundException('Failed to fetch media bytes');
+    if (!message) throw new NotFoundException('Message not found');
 
-    const arrayBuffer = await fileRes.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    const contentType = meta.mime_type ?? 'application/octet-stream';
-    return { buffer, contentType };
+    const meta = (message.metadata as Record<string, unknown> | null) ?? {};
+    const storageKey = typeof meta.storageKey === 'string' ? meta.storageKey : null;
+    if (message.mediaUrl && /^https?:\/\//.test(message.mediaUrl) && !message.mediaUrl.includes('graph.facebook.com')) {
+      return { kind: 'redirect', url: message.mediaUrl };
+    }
+    if (storageKey && this.storage.isConfigured()) {
+      return { kind: 'redirect', url: await this.storage.presignGet(storageKey) };
+    }
+
+    const mediaId = typeof meta.mediaId === 'string' ? meta.mediaId : null;
+    if (!mediaId) throw new NotFoundException('This message has no media');
+
+    const { accessToken } = await this.integrationFor(scope.businessId, message.conversation?.whatsappIntegrationId);
+    const { buffer, info } = await downloadMetaMedia(mediaId, accessToken);
+    return {
+      kind: 'bytes', buffer,
+      contentType: info.mimeType || message.mediaMimeType || 'application/octet-stream',
+      filename: typeof meta.filename === 'string' ? meta.filename : null,
+    };
   }
 
-  serveMedia() {
-    return { message: 'Use S3 presigned URLs for file serving' };
+  /** Raw Meta media by id (legacy proxy); scoped to the business's default integration. */
+  async proxyMedia(scope: TenantScope, mediaId: string): Promise<{ buffer: Buffer; contentType: string }> {
+    const { accessToken } = await this.integrationFor(scope.businessId);
+    await lookupMetaMedia(mediaId, accessToken).catch(() => { throw new NotFoundException('Media not found on Meta'); });
+    const { buffer, info } = await downloadMetaMedia(mediaId, accessToken);
+    return { buffer, contentType: info.mimeType };
   }
 }

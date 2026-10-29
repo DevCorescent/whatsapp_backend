@@ -146,7 +146,7 @@ export class ConversationsService {
 
   async sendMessage(scope: TenantScope, conversationId: string, payload: {
     text?: string; mediaUrl?: string; mediaId?: string; mediaType?: string;
-    mediaMimeType?: string; mediaSize?: number; fileName?: string; type?: string; isNote?: boolean;
+    mediaMimeType?: string; mediaSize?: number; fileName?: string; storageKey?: string; type?: string; isNote?: boolean;
     interactive?: Record<string, unknown>; replyToId?: string; clientId?: string;
   }) {
     this.logger.log(`sendMessage start — conversationId=${conversationId} tenantId=${scope.tenantId} businessId=${scope.businessId} type=${payload.type ?? 'TEXT'} isNote=${payload.isNote}`);
@@ -194,6 +194,7 @@ export class ConversationsService {
     const metadata: Record<string, unknown> = {};
     if (payload.interactive) metadata.interactive = payload.interactive;
     if (payload.mediaId)     metadata.mediaId = payload.mediaId;
+    if (payload.storageKey)  metadata.storageKey = payload.storageKey;
     if (payload.fileName)    metadata.filename = payload.fileName;
     if (payload.clientId)    metadata.clientId = payload.clientId;
 

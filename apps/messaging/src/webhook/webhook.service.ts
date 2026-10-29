@@ -1,11 +1,15 @@
 import * as crypto from 'crypto';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { InjectQueue } from '@nestjs/bull';
+import type { Queue } from 'bull';
 import { PrismaService } from '@lib/prisma';
-import { WebhookDispatchService, MessageEventsService, decryptSecret } from '@lib/common';
+import { WebhookDispatchService, MessageEventsService, StorageService, decryptSecret } from '@lib/common';
+import { QUEUE_MEDIA_FETCH } from '@lib/queue';
 import { StatusBufferService } from './status-buffer.service';
 import { InboundPipelineService } from './inbound-pipeline.service';
-import type { WAChangeValue, WAMessage, WAStatus, WAContact } from './webhook.types';
+import { mediaOf, type WAChangeValue, type WAMessage, type WAStatus, type WAContact } from './webhook.types';
+import type { MediaFetchJob } from '../media/media-fetch.processor';
 
 interface IntegrationRow {
   id:       string;
@@ -34,7 +38,9 @@ export class WebhookService {
     private readonly statusBuffer: StatusBufferService,
     private readonly pipeline:     InboundPipelineService,
     private readonly events:       MessageEventsService,
+    private readonly storage:      StorageService,
     private readonly cfg:          ConfigService,
+    @InjectQueue(QUEUE_MEDIA_FETCH) private readonly mediaQueue: Queue<MediaFetchJob>,
   ) {}
 
   // ── Integration cache — one DB read per phone number per 5 min ───────────
@@ -175,6 +181,7 @@ export class WebhookService {
     const phone       = message.from;
     const content     = this.extractCaption(message);
     const preview     = this.extractPreview(message);
+    const media       = mediaOf(message);
 
     // 1. Upsert contact
     const contactRow = await this.prisma.contact.upsert({
@@ -224,7 +231,12 @@ export class WebhookService {
             status:         'DELIVERED',
             type:           (TYPE_MAP[message.type] ?? 'TEXT') as any,
             content,
-            metadata:       message as any,
+            mediaType:      media ? message.type : null,
+            mediaMimeType:  media?.mimeType ?? null,
+            metadata:       {
+              ...message,
+              ...(media ? { mediaId: media.mediaId, filename: media.filename } : {}),
+            } as any,
           },
         }),
         this.prisma.conversation.update({
@@ -260,6 +272,18 @@ export class WebhookService {
 
     // 5. Real-time push to every agent in this business
     void this.events.messageNew(savedId);
+
+    // 6. Copy media into our storage before Meta's URL expires (bubble streams from Meta meanwhile)
+    if (media && this.storage.isConfigured()) {
+      this.mediaQueue.add(
+        {
+          messageId: savedId, tenantId: identity.tenantId, businessId: identity.businessId,
+          integrationId: identity.whatsappIntegrationId, mediaId: media.mediaId,
+          mimeType: media.mimeType, filename: media.filename,
+        },
+        { attempts: 3, backoff: { type: 'exponential', delay: 2_000 }, removeOnComplete: true, removeOnFail: 50 },
+      ).catch(err => this.logger.warn(`media-fetch enqueue failed for ${savedId}: ${err?.message ?? err}`));
+    }
 
     // 6. Chatbot flow + AI auto-reply pipeline — fire-and-forget
     this.pipeline.process({

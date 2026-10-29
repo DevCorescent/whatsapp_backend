@@ -9,3 +9,6 @@ export * from './realtime/realtime.module';
 export * from './realtime/realtime.service';
 export * from './realtime/message-events.service';
 export * from './realtime/redis-io.adapter';
+export * from './storage/storage.service';
+export * from './storage/storage.module';
+export * from './whatsapp/meta-media';

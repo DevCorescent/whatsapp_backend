@@ -4,6 +4,7 @@ import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { PrismaService } from '@lib/prisma';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
+import { CampaignProgressService } from '../../../../apps/campaigns/src/campaign-progress.service';
 
 @Injectable()
 export class CampaignSchedulerService {
@@ -12,6 +13,7 @@ export class CampaignSchedulerService {
   constructor(
     private readonly prisma: PrismaService,
     @InjectQueue(QUEUE_CAMPAIGN_SEND) private readonly sendQueue: Queue,
+    private readonly progress: CampaignProgressService,
   ) {}
 
   // ── Manual trigger (called from controller for debugging) ─────────────────
@@ -72,6 +74,7 @@ export class CampaignSchedulerService {
             where: { id: c.id },
             data:  { status: 'COMPLETED', completedAt: new Date() },
           });
+          void this.progress.emitNow(c.id);
           launched++;
           continue;
         }
@@ -104,6 +107,7 @@ export class CampaignSchedulerService {
 
         await this.sendQueue.addBulk(jobs);
         this.logger.log(`Campaign ${c.id}: enqueued ${jobs.length} jobs (Redis: ${queueReady})`);
+        void this.progress.emitNow(c.id);
         launched++;
       } catch (err: any) {
         this.logger.error(`Failed to launch campaign ${c.id}: ${err.message}`, err.stack);
