@@ -563,7 +563,7 @@ export class SettingsService {
 
   async listTeam(scope: TenantScope) {
     return this.prisma.user.findMany({
-      where:   { tenantId: scope.tenantId },
+      where:   { tenantId: scope.tenantId, role: { not: 'SUPER_ADMIN' as any } },
       select:  {
         id:           true,
         name:         true,
@@ -587,6 +587,9 @@ export class SettingsService {
       throw new ForbiddenException('Only OWNER or ADMIN can invite team members');
     }
 
+    const ALLOWED_ROLES = ['TENANT_OWNER', 'OWNER', 'ADMIN', 'MANAGER', 'MARKETING_USER', 'AGENT'];
+    const role = data.role && ALLOWED_ROLES.includes(data.role) ? data.role : 'AGENT';
+
     const existing = await this.prisma.user.findFirst({
       where: { tenantId: scope.tenantId, email: data.email },
     });
@@ -602,7 +605,7 @@ export class SettingsService {
         name:     data.name,
         email:    data.email,
         password: hash,
-        role:     (data.role ?? 'AGENT') as any,
+        role:     role as any,
       },
       select: { id: true, name: true, email: true, role: true },
     });
