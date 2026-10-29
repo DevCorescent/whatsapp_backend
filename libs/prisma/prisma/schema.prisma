@@ -469,6 +469,13 @@ model User {
   /// Null means the defaults in libs/common notification-prefs.ts.
   notificationPrefs Json?
 
+  /// When this membership was revoked. The row is kept rather than deleted so the
+  /// messages, conversations and calls this person handled stay attributed to them —
+  /// `Message.sentById` is nullable, so deleting the user would blank its whole history.
+  /// A revoked membership is excluded from the team list and from the workspace switcher,
+  /// and re-inviting the same person clears it (restoring their permission overrides).
+  removedAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

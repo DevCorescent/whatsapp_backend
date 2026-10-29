@@ -2,13 +2,14 @@ import {
   Controller, Get, Post, Put, Body, Param, Query, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, PlanFeatureGuard, RequiresPlanFeature, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, PlanFeatureGuard, RequiresPlanFeature, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { CallsService } from './calls.service';
 
 @ApiTags('calls')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, PlanFeatureGuard)
+@UseGuards(JwtAuthGuard, PlanFeatureGuard, PermissionGuard)
 @RequiresPlanFeature('callingEnabled')
+@RequiresPermission('conversations.view')
 @Controller('calls')
 export class CallsController {
   constructor(private readonly svc: CallsService) {}
@@ -43,6 +44,7 @@ export class CallsController {
   }
 
   @Put('settings/:integrationId')
+  @RequiresPermission('settings.manage')
   @ApiOperation({ summary: 'Enable or disable calling on a WhatsApp number' })
   setSettings(
     @CurrentTenant() scope: TenantScope,

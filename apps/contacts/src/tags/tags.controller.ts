@@ -2,12 +2,13 @@ import {
   Controller, Get, Post, Body, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { ContactsService } from '../contacts.service';
 
 @ApiTags('tags')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
+@RequiresPermission('contacts.view')
 @Controller('contacts/tags')
 export class TagsController {
   constructor(private readonly svc: ContactsService) {}
@@ -19,6 +20,7 @@ export class TagsController {
   }
 
   @Post()
+  @RequiresPermission('contacts.manage')
   @ApiOperation({ summary: 'Create a new tag' })
   create(
     @CurrentTenant() scope: TenantScope,

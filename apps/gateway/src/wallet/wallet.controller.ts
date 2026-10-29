@@ -2,7 +2,7 @@ import {
   Controller, Get, Patch, Post, Body, Query, UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { BillingService } from '../../../../apps/billing/src/billing.service';
 
 /**
@@ -12,7 +12,8 @@ import { BillingService } from '../../../../apps/billing/src/billing.service';
  */
 @ApiTags('wallet')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
+@RequiresPermission('billing.manage')
 @Controller('wallet')
 export class WalletController {
   constructor(private readonly svc: BillingService) {}

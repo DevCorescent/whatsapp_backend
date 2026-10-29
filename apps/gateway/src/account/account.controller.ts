@@ -2,17 +2,19 @@ import {
   Controller, Get, Put, Body, Query, UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission, AllowAnyMember } from '@lib/common';
 import { AccountService } from './account.service';
 
 @ApiTags('account')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
+@RequiresPermission('settings.manage')
 @Controller('account')
 export class AccountController {
   constructor(private readonly svc: AccountService) {}
 
   @Get('category')
+  @AllowAnyMember()
   @ApiOperation({ summary: "Get tenant's business category" })
   getCategory(@CurrentTenant() scope: TenantScope) {
     return this.svc.getCategory(scope);
@@ -28,12 +30,14 @@ export class AccountController {
   }
 
   @Get('invite-code')
+  @AllowAnyMember()
   @ApiOperation({ summary: "Get or generate the current user's invite code" })
   getInviteCode(@CurrentTenant() scope: TenantScope) {
     return this.svc.getInviteCode(scope);
   }
 
   @Get('audit-logs')
+  @RequiresPermission('reports.view')
   @ApiOperation({ summary: "List this tenant's own audit log" })
   listAuditLogs(
     @CurrentTenant() scope: TenantScope,

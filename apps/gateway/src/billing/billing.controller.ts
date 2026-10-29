@@ -3,7 +3,7 @@ import {
   UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { BillingService } from '../../../../apps/billing/src/billing.service';
 
 /**
@@ -11,6 +11,7 @@ import { BillingService } from '../../../../apps/billing/src/billing.service';
  * so the frontend can reach billing without switching ports.
  */
 @ApiTags('billing')
+@RequiresPermission('billing.manage')
 @Controller('billing')
 export class GatewayBillingController {
   constructor(private readonly svc: BillingService) {}
@@ -23,7 +24,7 @@ export class GatewayBillingController {
 
   @Get('plans')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionGuard)
   @ApiOperation({ summary: 'List available plans' })
   getPlans(@CurrentTenant() scope: TenantScope) {
     return this.svc.getPlans(scope);
@@ -31,7 +32,7 @@ export class GatewayBillingController {
 
   @Get()
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionGuard)
   @ApiOperation({ summary: 'Get billing status (plan, usage, invoices)' })
   getBilling(@CurrentTenant() scope: TenantScope) {
     return this.svc.getBillingStatus(scope);
@@ -39,7 +40,7 @@ export class GatewayBillingController {
 
   @Get('subscription')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionGuard)
   @ApiOperation({ summary: 'Get current subscription' })
   getSubscription(@CurrentTenant() scope: TenantScope) {
     return this.svc.getSubscription(scope);
@@ -47,7 +48,7 @@ export class GatewayBillingController {
 
   @Post('checkout')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionGuard)
   @ApiOperation({ summary: 'Checkout a plan' })
   checkout(@CurrentTenant() scope: TenantScope, @Body('planId') planId: string) {
     return this.svc.checkout(scope, planId);
@@ -55,7 +56,7 @@ export class GatewayBillingController {
 
   @Post('verify-payment')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionGuard)
   @ApiOperation({ summary: 'Verify Razorpay payment' })
   verifyPayment(
     @CurrentTenant() scope: TenantScope,
@@ -72,21 +73,21 @@ export class GatewayBillingController {
 
   @Post('cancel')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionGuard)
   cancelSubscription(@CurrentTenant() scope: TenantScope, @Body('reason') reason?: string) {
     return this.svc.cancelSubscription(scope, reason);
   }
 
   @Post('resume')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionGuard)
   resumeSubscription(@CurrentTenant() scope: TenantScope) {
     return this.svc.resumeSubscription(scope);
   }
 
   @Get('change')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionGuard)
   getPlanChangeQuote(
     @CurrentTenant() scope: TenantScope,
     @Query('planId') planId: string,
@@ -97,14 +98,14 @@ export class GatewayBillingController {
 
   @Post('change')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionGuard)
   checkoutPlanChange(@CurrentTenant() scope: TenantScope, @Body('planChangeId') id: string) {
     return this.svc.checkoutPlanChange(scope, id);
   }
 
   @Post('razorpay/order')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionGuard)
   createRazorpayOrder(
     @CurrentTenant() scope: TenantScope,
     @Body('amountMinor') amountMinor: number,
@@ -115,7 +116,7 @@ export class GatewayBillingController {
 
   @Post('stripe/checkout')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionGuard)
   createStripeCheckout(
     @CurrentTenant() scope: TenantScope,
     @Body('planId') planId: string,
@@ -126,7 +127,7 @@ export class GatewayBillingController {
 
   @Post('portal')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, PermissionGuard)
   @ApiOperation({ summary: 'Get billing portal URL' })
   getBillingPortal(@CurrentTenant() scope: TenantScope) {
     return this.svc.getBillingPortal(scope);

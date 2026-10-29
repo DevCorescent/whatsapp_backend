@@ -3,12 +3,13 @@ import {
   Body, Param, Query, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { SegmentsService } from './segments.service';
 
 @ApiTags('segments')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
+@RequiresPermission('contacts.view')
 @Controller('segments')
 export class SegmentsController {
   constructor(private readonly svc: SegmentsService) {}
@@ -41,6 +42,7 @@ export class SegmentsController {
   }
 
   @Post()
+  @RequiresPermission('contacts.manage')
   @ApiOperation({ summary: 'Create a segment' })
   create(
     @CurrentTenant() scope: TenantScope,
@@ -50,6 +52,7 @@ export class SegmentsController {
   }
 
   @Patch(':id')
+  @RequiresPermission('contacts.manage')
   @ApiOperation({ summary: 'Update a segment' })
   update(
     @CurrentTenant() scope: TenantScope,
@@ -60,6 +63,7 @@ export class SegmentsController {
   }
 
   @Delete(':id')
+  @RequiresPermission('contacts.manage')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete a segment' })
   remove(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {

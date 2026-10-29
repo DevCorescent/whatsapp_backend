@@ -3,7 +3,7 @@ import {
   Body, Param, Query, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { ChatbotService } from './chatbot.service';
 import { KnowledgeService } from '../knowledge/knowledge.service';
 
@@ -15,7 +15,8 @@ import { KnowledgeService } from '../knowledge/knowledge.service';
  */
 @ApiTags('chatbot')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
+@RequiresPermission('settings.manage')
 @Controller('chatbot')
 export class ChatbotController {
   constructor(

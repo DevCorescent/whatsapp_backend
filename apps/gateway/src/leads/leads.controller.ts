@@ -3,12 +3,13 @@ import {
   Body, Param, Query, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { LeadsService } from './leads.service';
 
 @ApiTags('leads')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
+@RequiresPermission('contacts.view')
 @Controller()
 export class LeadsController {
   constructor(private readonly svc: LeadsService) {}
@@ -22,6 +23,7 @@ export class LeadsController {
   }
 
   @Patch('lead-stages')
+  @RequiresPermission('settings.manage')
   @ApiOperation({ summary: 'Bulk upsert pipeline stages' })
   bulkUpdateStages(@CurrentTenant() scope: TenantScope, @Body() body: any) {
     return this.svc.bulkUpdateStages(scope, body);
@@ -51,12 +53,14 @@ export class LeadsController {
   }
 
   @Post('leads/import')
+  @RequiresPermission('contacts.import')
   @ApiOperation({ summary: 'Bulk import leads' })
   importLeads(@CurrentTenant() scope: TenantScope, @Body() body: any) {
     return this.svc.importLeads(scope, body);
   }
 
   @Post('leads')
+  @RequiresPermission('contacts.manage')
   @ApiOperation({ summary: 'Create a lead' })
   createLead(@CurrentTenant() scope: TenantScope, @Body() body: any) {
     return this.svc.createLead(scope, body);
@@ -69,12 +73,14 @@ export class LeadsController {
   }
 
   @Patch('leads/:id')
+  @RequiresPermission('contacts.manage')
   @ApiOperation({ summary: 'Update a lead' })
   updateLead(@CurrentTenant() scope: TenantScope, @Param('id') id: string, @Body() body: any) {
     return this.svc.updateLead(scope, id, body);
   }
 
   @Delete('leads/:id')
+  @RequiresPermission('contacts.delete')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete a lead' })
   deleteLead(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
@@ -82,6 +88,7 @@ export class LeadsController {
   }
 
   @Post('leads/:id/activities')
+  @RequiresPermission('contacts.manage')
   @ApiOperation({ summary: 'Add activity to a lead' })
   addActivity(@CurrentTenant() scope: TenantScope, @Param('id') id: string, @Body() body: any) {
     return this.svc.addActivity(scope, id, body);

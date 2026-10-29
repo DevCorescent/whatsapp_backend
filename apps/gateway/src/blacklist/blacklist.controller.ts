@@ -3,12 +3,13 @@ import {
   Body, Param, Query, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { BlacklistService } from './blacklist.service';
 
 @ApiTags('blacklist')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
+@RequiresPermission('blacklist.view')
 @Controller('blacklist')
 export class BlacklistController {
   constructor(private readonly svc: BlacklistService) {}
@@ -42,12 +43,14 @@ export class BlacklistController {
   }
 
   @Post()
+  @RequiresPermission('blacklist.manage')
   @ApiOperation({ summary: 'Bulk-add phones to the blacklist' })
   create(@CurrentTenant() scope: TenantScope, @Body() body: { phones: string[]; reason?: string; scope?: string }) {
     return this.svc.create(scope, body);
   }
 
   @Delete(':id')
+  @RequiresPermission('blacklist.manage')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Remove a tenant blacklist entry' })
   remove(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {

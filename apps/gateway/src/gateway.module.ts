@@ -7,7 +7,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from '@lib/prisma';
 import {
   RealtimeModule, StorageModule, NotificationsCoreModule, MessageRatesModule,
-  WalletModule as WalletCoreModule,
+  WalletModule as WalletCoreModule, PermissionsModule,
 } from '@lib/common';
 
 // Core
@@ -100,6 +100,7 @@ import { CallsModule }        from './calls/calls.module';
     NotificationsCoreModule,
     MessageRatesModule,
     WalletCoreModule,
+    PermissionsModule,
 
     // Auth & API access
     AuthModule,

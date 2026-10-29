@@ -61,17 +61,45 @@ export function roleDefaults(role: string): readonly Permission[] {
   return ROLE_DEFAULTS[role] ?? [];
 }
 
+/**
+ * Whether a principal holds a permission, resolved through all four layers in order:
+ *
+ *   1. account ceiling — what this kind of account can ever do (a reseller has no
+ *      contacts or chats, so no override can grant them)
+ *   2. role default    — ROLE_DEFAULTS for their role
+ *   3. role override   — a RolePermission row, keyed `accountType:role:permission`
+ *   4. user override   — a UserPermission row for this one person, keyed by permission
+ *
+ * Later layers win. The per-user layer used to be merged by hand in one service only,
+ * so every other caller silently ignored it; it belongs here.
+ */
 export function resolvePermission(
   principal: { role: string; accountType?: string | null; resellerType?: string | null } | null,
   permission: Permission,
-  overrideMap: Map<string, boolean> = new Map(),
+  roleOverrides: Map<string, boolean> = new Map(),
+  userOverrides: Map<string, boolean> = new Map(),
 ): boolean {
   if (!principal?.role) return false;
   if (principal.role === 'SUPER_ADMIN') return true;
+
   const accountType = principal.accountType ?? 'CLIENT';
   if (!(accountCeiling(accountType, principal.resellerType) as readonly string[]).includes(permission)) return false;
-  const key = `${accountType}:${principal.role}:${permission}`;
-  const override = overrideMap.get(key);
-  if (override !== undefined) return override;
+
+  const userOverride = userOverrides.get(permission);
+  if (userOverride !== undefined) return userOverride;
+
+  const roleOverride = roleOverrides.get(`${accountType}:${principal.role}:${permission}`);
+  if (roleOverride !== undefined) return roleOverride;
+
   return (roleDefaults(principal.role) as readonly string[]).includes(permission);
+}
+
+/** Roles an owner or admin may hand out. TENANT_OWNER is never one of them — an account has exactly one owner. */
+export const INVITABLE_ROLES = ['ADMIN', 'MANAGER', 'MARKETING_USER', 'AGENT'] as const;
+
+/** Roles that may manage team members and their permissions. */
+export const TEAM_ADMIN_ROLES = ['SUPER_ADMIN', 'TENANT_OWNER', 'ADMIN'] as const;
+
+export function isInvitableRole(role: string | null | undefined): boolean {
+  return (INVITABLE_ROLES as readonly string[]).includes(role ?? '');
 }

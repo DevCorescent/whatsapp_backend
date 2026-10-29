@@ -2,12 +2,13 @@ import {
   Controller, Get, Post, Patch, Body, Param, Query, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { ConversationsService } from './conversations.service';
 
 @ApiTags('conversations')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
+@RequiresPermission('conversations.view')
 @Controller('conversations')
 export class ConversationsController {
   constructor(private readonly svc: ConversationsService) {}
@@ -64,6 +65,7 @@ export class ConversationsController {
   }
 
   @Post(':id/messages')
+  @RequiresPermission('messages.send')
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: 'Send an outbound message (or internal note)' })
   sendMessage(

@@ -3,14 +3,15 @@ import {
   Body, Param, Query, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiConsumes } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { UseInterceptors, UploadedFile } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { TemplatesService } from './templates.service';
 
 @ApiTags('templates')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
+@RequiresPermission('campaigns.view')
 @Controller('templates')
 export class TemplatesController {
   constructor(private readonly svc: TemplatesService) {}
@@ -41,12 +42,14 @@ export class TemplatesController {
   }
 
   @Post()
+  @RequiresPermission('templates.manage')
   @ApiOperation({ summary: 'Create a new message template' })
   create(@CurrentTenant() scope: TenantScope, @Body() body: any) {
     return this.svc.create(scope, body);
   }
 
   @Post('import')
+  @RequiresPermission('templates.manage')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Import all templates from Meta into DB' })
   importFromMeta(@CurrentTenant() scope: TenantScope) {
@@ -54,6 +57,7 @@ export class TemplatesController {
   }
 
   @Post('sync')
+  @RequiresPermission('templates.manage')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Enqueue all PENDING templates (no waTemplateId) to sync queue' })
   syncAll(@CurrentTenant() scope: TenantScope) {
@@ -61,6 +65,7 @@ export class TemplatesController {
   }
 
   @Post(':id/submit')
+  @RequiresPermission('templates.manage')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Submit template to Meta for approval' })
   submit(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
@@ -68,6 +73,7 @@ export class TemplatesController {
   }
 
   @Post(':id/duplicate')
+  @RequiresPermission('templates.manage')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Duplicate a template as a new PENDING copy' })
   duplicate(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
@@ -75,6 +81,7 @@ export class TemplatesController {
   }
 
   @Post(':id/refresh')
+  @RequiresPermission('templates.manage')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Refresh template status from Meta' })
   refreshStatus(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
@@ -82,12 +89,14 @@ export class TemplatesController {
   }
 
   @Patch(':id')
+  @RequiresPermission('templates.manage')
   @ApiOperation({ summary: 'Update a template' })
   update(@CurrentTenant() scope: TenantScope, @Param('id') id: string, @Body() body: any) {
     return this.svc.update(scope, id, body);
   }
 
   @Delete(':id')
+  @RequiresPermission('templates.manage')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete a template' })
   remove(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
@@ -95,6 +104,7 @@ export class TemplatesController {
   }
 
   @Post('upload-media')
+  @RequiresPermission('templates.manage')
   @HttpCode(HttpStatus.OK)
   @ApiConsumes('multipart/form-data')
   @ApiOperation({ summary: 'Upload template header sample media to Meta' })

@@ -1,6 +1,6 @@
 import { Controller, Post, Body, UseGuards, Logger } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { ConversationsService } from '../../../../apps/messaging/src/conversations/conversations.service';
 
 /**
@@ -10,7 +10,8 @@ import { ConversationsService } from '../../../../apps/messaging/src/conversatio
  */
 @ApiTags('messages')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
+@RequiresPermission('messages.send')
 @Controller('messages')
 export class MessagesController {
   private readonly logger = new Logger(MessagesController.name);

@@ -3,12 +3,13 @@ import {
   Body, Param, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { SettingsService } from './settings.service';
 
 @ApiTags('settings')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
+@RequiresPermission('settings.manage')
 @Controller('settings')
 export class SettingsController {
   constructor(private readonly svc: SettingsService) {}
@@ -151,24 +152,28 @@ export class SettingsController {
   // ── Team ───────────────────────────────────────────────────────────────────
 
   @Get('team')
+  @RequiresPermission('users.manage')
   @ApiOperation({ summary: 'List team members' })
   listTeam(@CurrentTenant() scope: TenantScope) {
     return this.svc.listTeam(scope);
   }
 
   @Post('team/invite')
+  @RequiresPermission('users.manage')
   @ApiOperation({ summary: 'Invite a new team member' })
   invite(@CurrentTenant() scope: TenantScope, @Body() body: any) {
     return this.svc.inviteTeamMember(scope, body);
   }
 
   @Patch('team/:id')
+  @RequiresPermission('users.manage')
   @ApiOperation({ summary: 'Update a team member role or status' })
   updateMember(@CurrentTenant() scope: TenantScope, @Param('id') id: string, @Body() body: any) {
     return this.svc.updateTeamMember(scope, id, body);
   }
 
   @Delete('team/:id')
+  @RequiresPermission('users.manage')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Remove a team member' })
   removeMember(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {

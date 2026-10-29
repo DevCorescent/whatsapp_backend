@@ -1,15 +1,18 @@
 import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope } from '@lib/common';
+import { TenantScope, TEAM_ADMIN_ROLES, PermissionsService } from '@lib/common';
 
 @Injectable()
 export class SettingsPermissionsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly permissions: PermissionsService,
+  ) {}
 
   async getPermissions(scope: TenantScope, userId: string) {
     // Validate the user belongs to the same tenant
     const user = await this.prisma.user.findFirst({
-      where: { id: userId, tenantId: scope.tenantId },
+      where: { id: userId, tenantId: scope.tenantId, removedAt: null },
       select: { id: true },
     });
     if (!user) throw new NotFoundException('User not found in this workspace');
@@ -25,13 +28,15 @@ export class SettingsPermissionsService {
     userId: string,
     permissions: { permission: string; allowed: boolean }[],
   ) {
-    if (!['OWNER', 'ADMIN'].includes(scope.role)) {
-      throw new ForbiddenException('Only OWNER or ADMIN can set permissions');
+    // Was ['OWNER','ADMIN'] — 'OWNER' is not a UserRole, so the real workspace owner
+    // (TENANT_OWNER) was refused here while only ADMIN could ever pass.
+    if (!(TEAM_ADMIN_ROLES as readonly string[]).includes(scope.role)) {
+      throw new ForbiddenException('Only the workspace owner or an admin can set permissions');
     }
 
     // Validate the target user belongs to the same tenant
     const user = await this.prisma.user.findFirst({
-      where: { id: userId, tenantId: scope.tenantId },
+      where: { id: userId, tenantId: scope.tenantId, removedAt: null },
       select: { id: true },
     });
     if (!user) throw new NotFoundException('User not found in this workspace');
@@ -47,6 +52,7 @@ export class SettingsPermissionsService {
       ),
     );
 
+    this.permissions.invalidate(userId);
     return results;
   }
 }

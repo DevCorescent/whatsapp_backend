@@ -4,13 +4,14 @@ import {
   HttpCode, HttpStatus, UseInterceptors, UploadedFile,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiConsumes } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { CampaignsService } from './campaigns.service';
 
 @ApiTags('campaigns')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
+@RequiresPermission('campaigns.view')
 @Controller('campaigns')
 export class CampaignsController {
   constructor(private readonly svc: CampaignsService) {}
@@ -49,12 +50,14 @@ export class CampaignsController {
   }
 
   @Post()
+  @RequiresPermission('campaigns.send')
   @ApiOperation({ summary: 'Create a campaign' })
   create(@CurrentTenant() scope: TenantScope, @Body() body: any) {
     return this.svc.create(scope, body);
   }
 
   @Post(':id/contacts')
+  @RequiresPermission('campaigns.send')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Add recipients to a campaign' })
   addContacts(@CurrentTenant() scope: TenantScope, @Param('id') id: string, @Body('contacts') contacts: any[]) {
@@ -62,6 +65,7 @@ export class CampaignsController {
   }
 
   @Post(':id/duplicate')
+  @RequiresPermission('campaigns.send')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Duplicate a campaign as a new DRAFT' })
   duplicate(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
@@ -69,6 +73,7 @@ export class CampaignsController {
   }
 
   @Post(':id/launch')
+  @RequiresPermission('campaigns.send')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Launch a campaign (enqueue all pending recipients)' })
   launch(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
@@ -76,6 +81,7 @@ export class CampaignsController {
   }
 
   @Post(':id/cancel')
+  @RequiresPermission('campaigns.send')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Cancel a running or scheduled campaign' })
   cancel(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
@@ -83,12 +89,14 @@ export class CampaignsController {
   }
 
   @Patch(':id')
+  @RequiresPermission('campaigns.send')
   @ApiOperation({ summary: 'Update a campaign (DRAFT/SCHEDULED only)' })
   update(@CurrentTenant() scope: TenantScope, @Param('id') id: string, @Body() body: any) {
     return this.svc.update(scope, id, body);
   }
 
   @Delete(':id')
+  @RequiresPermission('campaigns.send')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete a campaign (DRAFT/SCHEDULED/CANCELLED only)' })
   remove(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
@@ -96,6 +104,7 @@ export class CampaignsController {
   }
 
   @Post('upload-media')
+  @RequiresPermission('campaigns.send')
   @HttpCode(HttpStatus.OK)
   @ApiConsumes('multipart/form-data')
   @ApiOperation({ summary: 'Upload campaign media to Meta and return media ID' })

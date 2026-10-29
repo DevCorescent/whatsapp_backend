@@ -3,12 +3,13 @@ import {
   Body, Param, Query, UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { ResellerService } from './reseller.service';
 
 @ApiTags('reseller')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
+@RequiresPermission('reseller.clients.view')
 @Controller('reseller')
 export class ResellerController {
   constructor(private readonly svc: ResellerService) {}
@@ -30,6 +31,7 @@ export class ResellerController {
   }
 
   @Put('branding')
+  @RequiresPermission('whitelabel.manage')
   @ApiOperation({ summary: 'Upsert white-label branding config' })
   upsertBranding(
     @CurrentTenant() scope: TenantScope,
@@ -51,6 +53,7 @@ export class ResellerController {
   }
 
   @Post('branding/pay')
+  @RequiresPermission('whitelabel.manage')
   @ApiOperation({ summary: 'Charge monthly white-label fee from reseller wallet' })
   payBrandingFee(@CurrentTenant() scope: TenantScope) {
     return this.svc.payBrandingFee(scope);
@@ -74,6 +77,7 @@ export class ResellerController {
   }
 
   @Post('clients')
+  @RequiresPermission('reseller.clients.manage')
   @ApiOperation({ summary: 'Create a new client tenant under this reseller' })
   createClient(
     @CurrentTenant() scope: TenantScope,
@@ -92,6 +96,7 @@ export class ResellerController {
   }
 
   @Patch('clients/:id')
+  @RequiresPermission('reseller.clients.manage')
   @ApiOperation({ summary: 'Update client (toggle active, change plan)' })
   updateClient(
     @CurrentTenant() scope: TenantScope,
@@ -112,6 +117,7 @@ export class ResellerController {
   }
 
   @Post('clients/:id/wallet')
+  @RequiresPermission('reseller.clients.manage')
   @ApiOperation({ summary: 'Transfer credits from reseller wallet to client' })
   transferToClient(
     @CurrentTenant() scope: TenantScope,
@@ -130,6 +136,7 @@ export class ResellerController {
   }
 
   @Post('plans')
+  @RequiresPermission('reseller.plans.manage')
   @ApiOperation({ summary: 'Create a reseller plan from a base plan' })
   createPlan(
     @CurrentTenant() scope: TenantScope,
@@ -142,6 +149,7 @@ export class ResellerController {
   }
 
   @Patch('plans/:id')
+  @RequiresPermission('reseller.plans.manage')
   @ApiOperation({ summary: 'Update a reseller plan' })
   updatePlan(
     @CurrentTenant() scope: TenantScope,
@@ -155,6 +163,7 @@ export class ResellerController {
   }
 
   @Delete('plans/:id')
+  @RequiresPermission('reseller.plans.manage')
   @ApiOperation({ summary: 'Soft-delete a reseller plan' })
   deletePlan(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
     return this.svc.deletePlan(scope, id);
@@ -169,6 +178,7 @@ export class ResellerController {
   }
 
   @Put('rates')
+  @RequiresPermission('reseller.clients.manage')
   @ApiOperation({ summary: 'Set or remove a reseller rate override (null removes it)' })
   upsertRate(
     @CurrentTenant() scope: TenantScope,
@@ -190,6 +200,7 @@ export class ResellerController {
   }
 
   @Put('clients/:id/rates')
+  @RequiresPermission('reseller.clients.manage')
   @ApiOperation({ summary: 'Set or clear one client\'s message price (null clears it)' })
   setClientRate(
     @CurrentTenant() scope: TenantScope,
@@ -202,6 +213,7 @@ export class ResellerController {
   // ── Commissions ───────────────────────────────────────────────────────────
 
   @Get('commissions')
+  @RequiresPermission('reseller.commissions.view')
   @ApiOperation({ summary: 'List reseller commissions with totals by status' })
   listCommissions(
     @CurrentTenant() scope: TenantScope,
@@ -225,6 +237,7 @@ export class ResellerController {
   }
 
   @Put('smtp')
+  @RequiresPermission('whitelabel.manage')
   @ApiOperation({ summary: 'Update reseller SMTP configuration' })
   updateSmtp(
     @CurrentTenant() scope: TenantScope,
@@ -237,6 +250,7 @@ export class ResellerController {
   }
 
   @Delete('smtp')
+  @RequiresPermission('whitelabel.manage')
   @ApiOperation({ summary: 'Clear reseller SMTP configuration' })
   clearSmtp(@CurrentTenant() scope: TenantScope) {
     return this.svc.clearSmtp(scope);

@@ -1,8 +1,12 @@
 import {
-  Injectable, NotFoundException, ForbiddenException, ConflictException, Logger,
+  Injectable, NotFoundException, ForbiddenException, ConflictException, BadRequestException, Logger,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope, decryptSecret, encryptSecret, sanitizeWhatsAppToken, isMetaAccessToken, MessageRatesService } from '@lib/common';
+import {
+  TenantScope, decryptSecret, encryptSecret, sanitizeWhatsAppToken, isMetaAccessToken,
+  MessageRatesService, PermissionsService, PERMISSIONS, INVITABLE_ROLES, TEAM_ADMIN_ROLES,
+  accountCeiling, roleDefaults, resolvePermission, isInvitableRole,
+} from '@lib/common';
 
 @Injectable()
 export class SettingsService {
@@ -11,6 +15,7 @@ export class SettingsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly rates:  MessageRatesService,
+    private readonly permissions: PermissionsService,
   ) {}
 
   // ── Opt-out / Opt-in Manager ──────────────────────────────────────────────────
@@ -561,7 +566,7 @@ export class SettingsService {
 
   async listTeam(scope: TenantScope) {
     return this.prisma.user.findMany({
-      where:   { tenantId: scope.tenantId, role: { not: 'SUPER_ADMIN' as any } },
+      where:   { tenantId: scope.tenantId, role: { not: 'SUPER_ADMIN' as any }, removedAt: null },
       select:  {
         id:           true,
         name:         true,
@@ -580,116 +585,200 @@ export class SettingsService {
     });
   }
 
-  async inviteTeamMember(scope: TenantScope, data: { name: string; email: string; role?: string }) {
-    if (!['SUPER_ADMIN', 'TENANT_OWNER', 'OWNER', 'ADMIN'].includes(scope.role)) {
-      throw new ForbiddenException('Only OWNER or ADMIN can invite team members');
+  /**
+   * Add someone who already has an account to this workspace.
+   *
+   * Membership is a User row per workspace, so joining means creating one here — reusing
+   * the person's existing password hash, never a fresh temp password. That is what makes
+   * one login work everywhere: they sign in with the credentials they already have and
+   * pick this workspace from the switcher.
+   *
+   * They must be registered first. Minting an account here is what produced the old
+   * two-passwords-per-person problem, where `/auth/workspaces` had to try each one.
+   */
+  async inviteTeamMember(scope: TenantScope, data: { name?: string; email: string; role?: string }) {
+    if (!(TEAM_ADMIN_ROLES as readonly string[]).includes(scope.role)) {
+      throw new ForbiddenException('Only the workspace owner or an admin can add team members');
     }
 
-    const ALLOWED_ROLES = ['TENANT_OWNER', 'OWNER', 'ADMIN', 'MANAGER', 'MARKETING_USER', 'AGENT'];
-    const role = data.role && ALLOWED_ROLES.includes(data.role) ? data.role : 'AGENT';
+    const email = (data.email ?? '').trim().toLowerCase();
+    if (!email) throw new BadRequestException('An email address is required');
+
+    const role = isInvitableRole(data.role) ? data.role! : 'AGENT';
+
+    // Their account anywhere on the platform — the identity we attach to this workspace.
+    const identity = await this.prisma.user.findFirst({
+      where:   { email, removedAt: null },
+      orderBy: { createdAt: 'asc' },
+      select:  { id: true, name: true, password: true, avatar: true, emailVerified: true, tenantId: true },
+    });
+    if (!identity) {
+      const appUrl = process.env['APP_URL'] ?? process.env['FRONTEND_URL'] ?? '';
+      throw new ConflictException(
+        `No account found for ${email}. Ask them to sign up${appUrl ? ` at ${appUrl}/sign-up` : ''} first, then add them here — they'll use their own password and find this workspace in their workspace switcher.`,
+      );
+    }
 
     const existing = await this.prisma.user.findFirst({
-      where: { tenantId: scope.tenantId, email: data.email },
-    });
-    if (existing) throw new ConflictException('A user with this email already exists in your workspace');
-
-    const bcrypt = await import('bcryptjs');
-    const tempPassword = Math.random().toString(36).slice(2, 10);
-    const hash = await bcrypt.hash(tempPassword, 12);
-
-    const user = await this.prisma.user.create({
-      data: {
-        tenantId: scope.tenantId,
-        name:     data.name,
-        email:    data.email,
-        password: hash,
-        role:     role as any,
-      },
-      select: { id: true, name: true, email: true, role: true },
+      where:  { tenantId: scope.tenantId, email },
+      select: { id: true, removedAt: true },
     });
 
-    // TODO: send invite email in production
-    return { ...user, tempPassword, emailSent: false, emailError: 'Email not configured' };
+    if (existing && !existing.removedAt) {
+      throw new ConflictException('That person is already in this workspace');
+    }
+
+    // Re-joining restores the row (and with it their previous permission overrides).
+    const member = existing
+      ? await this.prisma.user.update({
+          where:  { id: existing.id },
+          data:   { removedAt: null, isActive: true, role: role as any, ...(data.name ? { name: data.name } : {}) },
+          select: { id: true, name: true, email: true, role: true },
+        })
+      : await this.prisma.user.create({
+          data: {
+            tenantId:      scope.tenantId,
+            name:          data.name?.trim() || identity.name,
+            email,
+            password:      identity.password,
+            avatar:        identity.avatar,
+            emailVerified: identity.emailVerified,
+            role:          role as any,
+          },
+          select: { id: true, name: true, email: true, role: true },
+        });
+
+    this.permissions.invalidate(member.id);
+    return { ...member, rejoined: Boolean(existing), usesExistingPassword: true };
   }
 
   async updateTeamMember(scope: TenantScope, userId: string, data: {
-    name?: string; role?: string; isActive?: boolean;
+    name?: string; role?: string; isActive?: boolean; aiCreditLimit?: number | null;
   }) {
-    if (!['SUPER_ADMIN', 'TENANT_OWNER', 'OWNER', 'ADMIN'].includes(scope.role)) {
-      throw new ForbiddenException('Only OWNER or ADMIN can update team members');
+    if (!(TEAM_ADMIN_ROLES as readonly string[]).includes(scope.role)) {
+      throw new ForbiddenException('Only the workspace owner or an admin can update team members');
     }
-    const user = await this.prisma.user.findFirst({ where: { id: userId, tenantId: scope.tenantId } });
+    const user = await this.prisma.user.findFirst({
+      where:  { id: userId, tenantId: scope.tenantId, removedAt: null },
+      select: { id: true, role: true },
+    });
     if (!user) throw new NotFoundException('User not found');
-    return this.prisma.user.update({
+
+    // An account has exactly one owner. Without this an admin could PATCH themselves —
+    // or anyone — to TENANT_OWNER and take over the workspace.
+    if (user.role === 'TENANT_OWNER' && data.role && data.role !== 'TENANT_OWNER') {
+      throw new ForbiddenException('The workspace owner\'s role cannot be changed');
+    }
+    if (data.role !== undefined && !isInvitableRole(data.role)) {
+      throw new BadRequestException(`Role must be one of: ${INVITABLE_ROLES.join(', ')}`);
+    }
+    if (user.role === 'TENANT_OWNER' && data.isActive === false) {
+      throw new ForbiddenException('The workspace owner cannot be deactivated');
+    }
+
+    const updated = await this.prisma.user.update({
       where:  { id: userId },
-      data:   { name: data.name, role: data.role as any, isActive: data.isActive },
+      data:   {
+        name:     data.name,
+        role:     data.role as any,
+        isActive: data.isActive,
+        ...(data.aiCreditLimit !== undefined ? { aiCreditLimit: data.aiCreditLimit } : {}),
+      },
       select: { id: true, name: true, email: true, role: true, isActive: true },
     });
+    this.permissions.invalidate(userId);
+    return updated;
   }
 
+  /**
+   * Revoke someone's membership of this workspace. The row is stamped rather than deleted:
+   * `Message.sentById` is nullable, so deleting it would blank "sent by" across every
+   * message they ever sent here. They keep their own account and other workspaces.
+   */
   async removeTeamMember(scope: TenantScope, userId: string) {
-    if (scope.userId === userId) throw new ForbiddenException('Cannot remove yourself');
-    if (!['SUPER_ADMIN', 'TENANT_OWNER', 'OWNER', 'ADMIN'].includes(scope.role)) {
-      throw new ForbiddenException('Only OWNER or ADMIN can remove team members');
+    if (scope.userId === userId) throw new ForbiddenException('You cannot remove yourself');
+    if (!(TEAM_ADMIN_ROLES as readonly string[]).includes(scope.role)) {
+      throw new ForbiddenException('Only the workspace owner or an admin can remove team members');
     }
-    const user = await this.prisma.user.findFirst({ where: { id: userId, tenantId: scope.tenantId } });
+    const user = await this.prisma.user.findFirst({
+      where:  { id: userId, tenantId: scope.tenantId, removedAt: null },
+      select: { id: true, role: true },
+    });
     if (!user) throw new NotFoundException('User not found');
-    await this.prisma.user.delete({ where: { id: userId } });
+    if (user.role === 'TENANT_OWNER') throw new ForbiddenException('The workspace owner cannot be removed');
+
+    await this.prisma.user.update({
+      where: { id: userId },
+      data:  { removedAt: new Date(), isActive: false },
+    });
+    this.permissions.invalidate(userId);
     return { removed: true };
   }
 
   // ── Team permissions ───────────────────────────────────────────────────────
 
+  /**
+   * The permission matrix for one member: the role default, any override, and what is
+   * actually in effect.
+   *
+   * The ceiling comes from the workspace's own account type, read from the database. It
+   * used to be read off `scope`, where neither `accountType` nor `resellerType` exists —
+   * both were `undefined`, so the ceiling silently fell back to CLIENT and a reseller's
+   * team member could never be granted a single reseller permission.
+   */
   async getTeamPermissions(scope: TenantScope, memberId: string) {
-    if (!['SUPER_ADMIN', 'TENANT_OWNER', 'ADMIN'].includes(scope.role)) {
-      throw new ForbiddenException('Only owners and admins can view member permissions');
+    if (!(TEAM_ADMIN_ROLES as readonly string[]).includes(scope.role)) {
+      throw new ForbiddenException('Only the workspace owner or an admin can view member permissions');
     }
     const member = await this.prisma.user.findFirst({
-      where:  { id: memberId, tenantId: scope.tenantId, role: { not: 'SUPER_ADMIN' as any } },
+      where:  { id: memberId, tenantId: scope.tenantId, role: { not: 'SUPER_ADMIN' as any }, removedAt: null },
       select: { id: true, role: true, userPermissions: { select: { permission: true, allowed: true } } },
     });
     if (!member) throw new NotFoundException('Member not found');
 
-    const { PERMISSIONS, accountCeiling, roleDefaults } = await import('@lib/common');
-    const overrideMap = new Map((member as any).userPermissions.map((p: any) => [p.permission, p.allowed]));
-    const ceiling = accountCeiling((scope as any).accountType, (scope as any).resellerType);
+    const { accountType, resellerType } = await this.accountKind(scope.tenantId);
+    const userOverrides = new Map(member.userPermissions.map(p => [p.permission, p.allowed]));
+    const roleOverrides = await this.roleOverrides(accountType, member.role);
+    const ceiling = accountCeiling(accountType, resellerType) as readonly string[];
+    const principal = { role: member.role, accountType, resellerType };
 
     const result: Record<string, { roleDefault: boolean; override: boolean | null; effective: boolean }> = {};
     for (const p of PERMISSIONS) {
-      const inCeiling = (ceiling as readonly string[]).includes(p);
-      const roleDefault = inCeiling && (roleDefaults(member.role) as readonly string[]).includes(p);
-      const override = overrideMap.has(p) ? overrideMap.get(p)! : null;
-      const effective = inCeiling ? (override !== null ? (override as boolean) : roleDefault) : false;
-      result[p] = { roleDefault, override: override as boolean | null, effective };
+      if (!ceiling.includes(p)) continue; // outside the ceiling it is not grantable at all
+      result[p] = {
+        roleDefault: (roleDefaults(member.role) as readonly string[]).includes(p),
+        override:    userOverrides.has(p) ? userOverrides.get(p)! : null,
+        effective:   resolvePermission(principal, p, roleOverrides, userOverrides),
+      };
     }
     return result;
   }
 
   async updateTeamPermissions(scope: TenantScope, memberId: string, overrides: Record<string, boolean | null>) {
-    if (!['SUPER_ADMIN', 'TENANT_OWNER', 'ADMIN'].includes(scope.role)) {
-      throw new ForbiddenException('Only owners and admins can edit member permissions');
+    if (!(TEAM_ADMIN_ROLES as readonly string[]).includes(scope.role)) {
+      throw new ForbiddenException('Only the workspace owner or an admin can edit member permissions');
     }
     const member = await this.prisma.user.findFirst({
-      where:  { id: memberId, tenantId: scope.tenantId, role: { not: 'SUPER_ADMIN' as any } },
+      where:  { id: memberId, tenantId: scope.tenantId, role: { not: 'SUPER_ADMIN' as any }, removedAt: null },
       select: { id: true, role: true },
     });
     if (!member) throw new NotFoundException('Member not found');
     if (member.role === 'TENANT_OWNER') {
-      throw new ForbiddenException('Owner permissions cannot be customized');
+      throw new ForbiddenException('The workspace owner always has every permission');
     }
 
-    const { PERMISSIONS, accountCeiling } = await import('@lib/common');
+    const { accountType, resellerType } = await this.accountKind(scope.tenantId);
     const validPerms = new Set<string>(PERMISSIONS);
-    const ceiling = accountCeiling((scope as any).accountType, (scope as any).resellerType);
+    const ceiling = accountCeiling(accountType, resellerType) as readonly string[];
 
     await this.prisma.$transaction(async (tx) => {
       for (const [perm, value] of Object.entries(overrides)) {
         if (!validPerms.has(perm)) continue;
         if (value === null) {
-          await (tx as any).userPermission.deleteMany({ where: { userId: member.id, permission: perm } });
+          await tx.userPermission.deleteMany({ where: { userId: member.id, permission: perm } });
         } else {
-          if (!(ceiling as readonly string[]).includes(perm)) continue;
-          await (tx as any).userPermission.upsert({
+          if (!ceiling.includes(perm)) continue;
+          await tx.userPermission.upsert({
             where:  { userId_permission: { userId: member.id, permission: perm } },
             create: { userId: member.id, permission: perm, allowed: value },
             update: { allowed: value },
@@ -697,6 +786,29 @@ export class SettingsService {
         }
       }
     });
+
+    // So the change bites on the member's very next request rather than after the cache TTL.
+    this.permissions.invalidate(member.id);
     return { success: true };
+  }
+
+  /** The workspace's account kind, which sets the permission ceiling. */
+  private async accountKind(tenantId: string) {
+    const tenant = await this.prisma.tenant.findUnique({
+      where:  { id: tenantId },
+      select: { accountType: true, resellerType: true },
+    });
+    return {
+      accountType:  (tenant?.accountType as string | undefined) ?? 'CLIENT',
+      resellerType: (tenant?.resellerType as string | null | undefined) ?? null,
+    };
+  }
+
+  private async roleOverrides(accountType: string, role: string) {
+    const rows = await this.prisma.rolePermission.findMany({
+      where:  { accountType: accountType as any, role: role as any },
+      select: { accountType: true, role: true, permission: true, allowed: true },
+    }).catch(() => []);
+    return new Map(rows.map(r => [`${r.accountType}:${r.role}:${r.permission}`, r.allowed]));
   }
 }

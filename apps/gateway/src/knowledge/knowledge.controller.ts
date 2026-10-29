@@ -3,7 +3,7 @@ import {
   Body, Param, Query, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { KnowledgeService } from './knowledge.service';
 
 /**
@@ -24,7 +24,8 @@ import { KnowledgeService } from './knowledge.service';
  */
 @ApiTags('knowledge')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
+@RequiresPermission('settings.manage')
 @Controller('knowledge')
 export class KnowledgeController {
   constructor(private readonly svc: KnowledgeService) {}
@@ -32,6 +33,7 @@ export class KnowledgeController {
   // ── Docs — root paths (Next.js /api/knowledge) ─────────────────────────────
 
   @Get()
+  @RequiresPermission('conversations.view')
   @ApiOperation({ summary: 'List knowledge docs' })
   listDocs(
     @CurrentTenant() scope: TenantScope,
@@ -153,6 +155,7 @@ export class KnowledgeController {
   // ── Search ──────────────────────────────────────────────────────────────────
 
   @Post('search')
+  @RequiresPermission('conversations.view')
   @ApiOperation({ summary: 'Search knowledge docs' })
   search(
     @CurrentTenant() scope: TenantScope,
@@ -176,6 +179,7 @@ export class KnowledgeController {
   }
 
   @Post('faqs/send')
+  @RequiresPermission('messages.send')
   @ApiOperation({ summary: 'Send FAQ list as WhatsApp interactive message' })
   sendFaqs(@CurrentTenant() scope: TenantScope, @Body() body: any) {
     return this.svc.sendFaqList(scope, body);

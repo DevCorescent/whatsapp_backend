@@ -4,12 +4,13 @@ import {
   HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { ContactsService } from './contacts.service';
 
 @ApiTags('contacts')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
+@RequiresPermission('contacts.view')
 @Controller('contacts')
 export class ContactsController {
   constructor(private readonly svc: ContactsService) {}
@@ -60,12 +61,14 @@ export class ContactsController {
   }
 
   @Post()
+  @RequiresPermission('contacts.manage')
   @ApiOperation({ summary: 'Create a contact' })
   create(@CurrentTenant() scope: TenantScope, @Body() body: any) {
     return this.svc.create(scope, body);
   }
 
   @Post('bulk')
+  @RequiresPermission('contacts.import')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Bulk action on contacts (create/delete/block/unblock/addTag/removeTag)' })
   bulk(@CurrentTenant() scope: TenantScope, @Body() body: any) {
@@ -73,6 +76,7 @@ export class ContactsController {
   }
 
   @Post('import')
+  @RequiresPermission('contacts.import')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Import contacts from parsed CSV rows with optional tags' })
   import(
@@ -92,12 +96,14 @@ export class ContactsController {
   }
 
   @Patch(':id')
+  @RequiresPermission('contacts.manage')
   @ApiOperation({ summary: 'Update a contact' })
   update(@CurrentTenant() scope: TenantScope, @Param('id') id: string, @Body() body: any) {
     return this.svc.update(scope, id, body);
   }
 
   @Delete(':id')
+  @RequiresPermission('contacts.delete')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete a contact' })
   remove(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {

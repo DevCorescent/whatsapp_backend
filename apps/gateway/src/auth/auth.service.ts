@@ -1,10 +1,11 @@
 import {
-  Injectable, UnauthorizedException, ConflictException,
+  Injectable, UnauthorizedException, ConflictException, ForbiddenException,
   BadRequestException, Logger,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '@lib/prisma';
+import { PermissionsService } from '@lib/common';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 import type { RegisterDto } from './dto/register.dto';
@@ -34,10 +35,19 @@ export class AuthService {
     private readonly prisma:  PrismaService,
     private readonly jwt:     JwtService,
     private readonly cfg:     ConfigService,
+    private readonly permissions: PermissionsService,
   ) {}
 
   // ── Login ──────────────────────────────────────────────────────────────────
 
+  /**
+   * Sign in, landing in one workspace.
+   *
+   * Without a `tenantSlug` the choice is deterministic rather than whatever `findFirst`
+   * returned: the workspace the person owns, else their oldest membership. Everything else
+   * they belong to is reachable from the in-app switcher, so there is no reason to make
+   * them pick before they are even authenticated.
+   */
   async validateUser(email: string, password: string, tenantSlug: string) {
     let tenantId: string | undefined;
 
@@ -50,16 +60,74 @@ export class AuthService {
       tenantId = tenant.id;
     }
 
-    const user = await this.prisma.user.findFirst({
-      where:  { email, isActive: true, ...(tenantId ? { tenantId } : {}) },
-      select: { id: true, email: true, name: true, password: true, role: true, tenantId: true },
+    const candidates = await this.prisma.user.findFirst({
+      where:   {
+        email, isActive: true, removedAt: null,
+        tenant: { isActive: true },
+        ...(tenantId ? { tenantId } : {}),
+      },
+      // Their own workspace first (TENANT_OWNER sorts before the rest), then oldest.
+      orderBy: [{ role: 'asc' }, { createdAt: 'asc' }],
+      select:  { id: true, email: true, name: true, password: true, role: true, tenantId: true },
     });
-    if (!user) throw new UnauthorizedException('Invalid credentials');
+    if (!candidates) throw new UnauthorizedException('Invalid credentials');
 
-    const valid = await bcrypt.compare(password, user.password);
+    const valid = await bcrypt.compare(password, candidates.password);
     if (!valid) throw new UnauthorizedException('Invalid credentials');
 
-    return user;
+    return candidates;
+  }
+
+  /** Every workspace this person can enter, for the switcher. */
+  async listMemberships(email: string, currentTenantId?: string) {
+    const rows = await this.prisma.user.findMany({
+      where:   { email, isActive: true, removedAt: null, tenant: { isActive: true } },
+      select:  {
+        id: true, role: true, tenantId: true,
+        tenant: { select: { slug: true, name: true, accountType: true, logo: true } },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    return rows.map(r => ({
+      tenantId:    r.tenantId,
+      tenantSlug:  r.tenant.slug,
+      tenantName:  r.tenant.name,
+      accountType: r.tenant.accountType as string,
+      logo:        r.tenant.logo ?? null,
+      role:        r.role as string,
+      isOwner:     r.role === 'TENANT_OWNER',
+      isCurrent:   r.tenantId === currentTenantId,
+    }));
+  }
+
+  async listMembershipsForUser(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where:  { id: userId },
+      select: { email: true, tenantId: true },
+    });
+    if (!user) throw new UnauthorizedException('Not authenticated');
+    return this.listMemberships(user.email, user.tenantId);
+  }
+
+  /**
+   * Move an authenticated session into another workspace the same person belongs to.
+   * Matched on their email — the identity that spans workspaces — so no password is
+   * re-entered and nothing is held in the browser.
+   */
+  async switchWorkspace(userId: string, tenantId: string) {
+    const current = await this.prisma.user.findUnique({
+      where:  { id: userId },
+      select: { email: true },
+    });
+    if (!current) throw new UnauthorizedException('Not authenticated');
+
+    const target = await this.prisma.user.findFirst({
+      where:  { email: current.email, tenantId, isActive: true, removedAt: null, tenant: { isActive: true } },
+      select: { id: true, email: true, role: true, tenantId: true },
+    });
+    if (!target) throw new ForbiddenException('You are not a member of that workspace');
+
+    return this.login(target);
   }
 
   async login(user: { id: string; email: string; role: string; tenantId: string }) {
@@ -138,7 +206,15 @@ export class AuthService {
 
     const plan = user.tenant.subscription?.plan ?? null;
 
+    // The two things the UI needs to show the right workspace and the right actions in it.
+    const [permissions, workspaces] = await Promise.all([
+      this.permissions.list(user.id),
+      this.listMemberships(user.email, user.tenantId),
+    ]);
+
     return {
+      permissions,
+      workspaces,
       plan: plan ? {
         name:        plan.name,
         displayName: plan.displayName,
@@ -280,8 +356,18 @@ export class AuthService {
 
     const hashedPassword = await bcrypt.hash(newPassword, 12);
 
+    // One person, one password — across every workspace they belong to. Membership is a
+    // row per workspace sharing an email, so updating only the row that asked for the
+    // reset would leave their other workspaces on the old password.
+    const owner = await this.prisma.user.findUnique({
+      where:  { id: record.userId },
+      select: { email: true },
+    });
+
     await this.prisma.$transaction([
-      this.prisma.user.update({ where: { id: record.userId }, data: { password: hashedPassword } }),
+      owner
+        ? this.prisma.user.updateMany({ where: { email: owner.email }, data: { password: hashedPassword } })
+        : this.prisma.user.updateMany({ where: { id: record.userId }, data: { password: hashedPassword } }),
       this.prisma.passwordResetToken.update({ where: { id: record.id }, data: { usedAt: new Date() } }),
     ]);
   }

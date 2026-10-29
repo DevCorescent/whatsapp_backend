@@ -2,17 +2,19 @@ import {
   Controller, Get, Post, Patch, Delete, Body, Param, UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission, AllowAnyMember } from '@lib/common';
 import { BusinessesService } from './businesses.service';
 
 @ApiTags('businesses')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
+@RequiresPermission('settings.manage')
 @Controller('businesses')
 export class BusinessesController {
   constructor(private readonly svc: BusinessesService) {}
 
   @Get()
+  @AllowAnyMember()
   @ApiOperation({ summary: 'List all businesses for the tenant' })
   list(@CurrentTenant() scope: TenantScope) {
     return this.svc.list(scope);
@@ -41,6 +43,7 @@ export class BusinessesController {
   }
 
   @Post('switch')
+  @AllowAnyMember()
   @ApiOperation({ summary: 'Switch active business — returns business + JWT hint' })
   switchBusiness(
     @CurrentTenant() scope: TenantScope,

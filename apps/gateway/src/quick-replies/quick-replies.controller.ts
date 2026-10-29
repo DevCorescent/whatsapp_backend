@@ -3,12 +3,13 @@ import {
   Body, Param, Query, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { QuickRepliesService } from './quick-replies.service';
 
 @ApiTags('quick-replies')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
+@RequiresPermission('conversations.view')
 @Controller('quick-replies')
 export class QuickRepliesController {
   constructor(private readonly svc: QuickRepliesService) {}
@@ -23,6 +24,7 @@ export class QuickRepliesController {
   }
 
   @Post()
+  @RequiresPermission('templates.manage')
   @ApiOperation({ summary: 'Create a quick reply' })
   create(
     @CurrentTenant() scope: TenantScope,
@@ -32,6 +34,7 @@ export class QuickRepliesController {
   }
 
   @Patch(':id')
+  @RequiresPermission('templates.manage')
   @ApiOperation({ summary: 'Update a quick reply' })
   update(
     @CurrentTenant() scope: TenantScope,
@@ -42,6 +45,7 @@ export class QuickRepliesController {
   }
 
   @Delete(':id')
+  @RequiresPermission('templates.manage')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete a quick reply' })
   remove(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {

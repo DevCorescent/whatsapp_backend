@@ -62,6 +62,21 @@ export class AuthController {
     return profile;
   }
 
+  @Get('workspaces/mine')
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Workspaces the signed-in person belongs to' })
+  myWorkspaces(@Request() req: any) {
+    return this.authService.listMembershipsForUser(req.user.userId);
+  }
+
+  @Post('switch-workspace')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Move this session into another workspace the same person belongs to' })
+  switchWorkspace(@Request() req: any, @Body('tenantId') tenantId: string) {
+    return this.authService.switchWorkspace(req.user.userId, tenantId);
+  }
+
   @Post('service-token')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Issue a short-lived JWT for a trusted Next.js proxy call' })

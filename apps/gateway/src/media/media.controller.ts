@@ -5,17 +5,19 @@ import {
 import { FilesInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiConsumes } from '@nestjs/swagger';
 import type { Response } from 'express';
-import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { MediaService } from './media.service';
 
 @ApiTags('media')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard)
+@UseGuards(JwtAuthGuard, PermissionGuard)
+@RequiresPermission('conversations.view')
 @Controller('media')
 export class MediaController {
   constructor(private readonly svc: MediaService) {}
 
   @Post('upload')
+  @RequiresPermission('messages.send')
   @ApiOperation({ summary: 'Upload media files (multipart or base64 JSON) to WhatsApp and storage' })
   @ApiConsumes('multipart/form-data', 'application/json')
   @UseInterceptors(FilesInterceptor('files', 10, { limits: { fileSize: 64 * 1024 * 1024 } }))
