@@ -1,20 +1,32 @@
 import {
-  Injectable, NotFoundException, BadRequestException,
+  Injectable, Logger, NotFoundException, BadRequestException,
 } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope, MessageRatesService } from '@lib/common';
+import {
+  TenantScope, MessageRatesService, RedisService, classifySendError,
+} from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
 import { CampaignProgressService } from './campaign-progress.service';
 
+/**
+ * Shared with the send worker: while this key is set, every queued job for the campaign
+ * returns without sending. The campaign row is cached per worker for half an hour, so the
+ * database status alone cannot stop a run quickly enough.
+ */
+const HALT_KEY = (campaignId: string) => `campaign:halted:${campaignId}`;
+
 @Injectable()
 export class CampaignsService {
+  private readonly logger = new Logger(CampaignsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     @InjectQueue(QUEUE_CAMPAIGN_SEND) private readonly sendQueue: Queue,
     private readonly progress: CampaignProgressService,
     private readonly rates: MessageRatesService,
+    private readonly redis: RedisService,
   ) {}
 
   // ── List ───────────────────────────────────────────────────────────────────
@@ -488,6 +500,11 @@ export class CampaignsService {
       }
     }
 
+    // Recipients were filtered when the campaign was built, but that may have been days
+    // ago. Anyone who has opted out since is dropped here rather than being sent to and
+    // refused, which is what damages a number's quality rating.
+    const skipped = await this.dropSuppressedRecipients(scope.tenantId, id);
+
     // Set to RUNNING
     await this.prisma.campaign.update({
       where: { id },
@@ -499,6 +516,16 @@ export class CampaignsService {
       where: { campaignId: id, status: 'PENDING' },
       select: { id: true },
     });
+
+    // Nothing left to send: finish it now rather than leaving it running forever.
+    if (!recipients.length) {
+      await this.prisma.campaign.update({
+        where: { id },
+        data:  { status: 'COMPLETED', completedAt: new Date() },
+      });
+      void this.progress.emitNow(id);
+      return { enqueued: 0, skipped };
+    }
 
     const jobs = recipients.map(r => ({
       data: {
@@ -512,7 +539,48 @@ export class CampaignsService {
 
     if (jobs.length) await this.sendQueue.addBulk(jobs);
     void this.progress.emitNow(id);
-    return { enqueued: jobs.length };
+    return { enqueued: jobs.length, skipped };
+  }
+
+  /**
+   * Mark every pending recipient who must not be messaged as skipped, and say how many.
+   *
+   * A number lands on the suppression list when WhatsApp tells us the person stopped
+   * marketing messages, by error 131050 on an earlier send or by the user_preferences
+   * webhook. Either way, sending again is both pointless and harmful.
+   */
+  private async dropSuppressedRecipients(tenantId: string, campaignId: string): Promise<number> {
+    const pending = await this.prisma.campaignContact.findMany({
+      where:  { campaignId, status: 'PENDING' },
+      select: { id: true, phone: true },
+    });
+    if (!pending.length) return 0;
+
+    const blocked = await this.prisma.blacklistEntry.findMany({
+      where:  { phone: { in: pending.map((p) => p.phone) }, OR: [{ tenantId }, { tenantId: null }] },
+      select: { phone: true, source: true, reason: true },
+    });
+    if (!blocked.length) return 0;
+
+    const byPhone = new Map(blocked.map((b) => [b.phone, b]));
+    const toSkip = pending.filter((p) => byPhone.has(p.phone));
+    if (!toSkip.length) return 0;
+
+    await this.prisma.campaignContact.updateMany({
+      where: { id: { in: toSkip.map((p) => p.id) } },
+      data:  {
+        status: 'FAILED',
+        failedAt: new Date(),
+        failedReason: 'Not sent: this number is on your do-not-contact list.',
+      },
+    });
+    await this.prisma.campaign.update({
+      where: { id: campaignId },
+      data:  { skippedCount: { increment: toSkip.length } },
+    });
+
+    this.logger.log(`Campaign ${campaignId}: skipped ${toSkip.length} suppressed recipient(s) at launch`);
+    return toSkip.length;
   }
 
   // ── Cancel ─────────────────────────────────────────────────────────────────
@@ -532,7 +600,109 @@ export class CampaignsService {
       data:   { status: 'CANCELLED' },
     });
     void this.progress.emitNow(id);
+    await this.clearHalt(id);
     return { cancelled: true };
+  }
+
+  // ── Pause and resume ───────────────────────────────────────────────────────
+
+  /** Stop sending but keep the pending recipients, so it can be picked up later. */
+  async pause(scope: TenantScope, id: string, reason?: string) {
+    const existing = await this.findOne(scope, id);
+    if (!['RUNNING', 'PROCESSING'].includes(existing.status)) {
+      throw new BadRequestException('Only a running campaign can be paused');
+    }
+    await this.prisma.campaign.update({
+      where: { id },
+      data:  { status: 'PAUSED', haltedAt: new Date(), haltReason: reason ?? 'Paused manually', haltErrorCode: null },
+    });
+    // Workers cache the campaign row for half an hour, so the flag is what stops them.
+    await this.redis.client.set(HALT_KEY(id), reason ?? 'Paused manually', 'EX', 24 * 60 * 60).catch(() => {});
+    void this.progress.emitNow(id);
+    return { paused: true };
+  }
+
+  /**
+   * Send to whoever is still pending.
+   *
+   * A campaign that WhatsApp paused — a restricted account, a disabled template — will
+   * halt again within a message or two unless the cause was fixed. That is the right
+   * behaviour: it is cheaper than a long rejected run, and the reason is recorded each
+   * time so it is clear nothing changed.
+   */
+  async resume(scope: TenantScope, id: string) {
+    const existing = await this.findOne(scope, id);
+    if (existing.status !== 'PAUSED') {
+      throw new BadRequestException('Only a paused campaign can be resumed');
+    }
+
+    const pending = await this.prisma.campaignContact.findMany({
+      where:  { campaignId: id, status: 'PENDING' },
+      select: { id: true },
+    });
+    if (!pending.length) {
+      throw new BadRequestException('Every recipient of this campaign has already been handled');
+    }
+
+    await this.clearHalt(id);
+    await this.prisma.campaign.update({
+      where: { id },
+      data:  { status: 'RUNNING', haltedAt: null, haltReason: null, haltErrorCode: null },
+    });
+
+    await this.sendQueue.addBulk(pending.map((r) => ({
+      data: {
+        tenantId:    scope.tenantId,
+        businessId:  scope.businessId,
+        campaignId:  id,
+        recipientId: r.id,
+      } satisfies CampaignSendJob,
+      opts: { attempts: 3, backoff: { type: 'exponential' as const, delay: 5000 } },
+    })));
+
+    void this.progress.emitNow(id);
+    return { resumed: true, enqueued: pending.length };
+  }
+
+  /** Why a campaign stopped, and what it ran into, for the campaign screen. */
+  async getFailureBreakdown(scope: TenantScope, id: string) {
+    const campaign = await this.findOne(scope, id);
+
+    const grouped = await this.prisma.campaignContact.groupBy({
+      by:      ['errorCode'],
+      where:   { campaignId: id, status: 'FAILED' },
+      _count:  { _all: true },
+    });
+
+    // One recipient per code carries the explanation already written for it.
+    const samples = await Promise.all(
+      grouped.map((g) => this.prisma.campaignContact.findFirst({
+        where:  { campaignId: id, status: 'FAILED', errorCode: g.errorCode },
+        select: { failedReason: true, errorTitle: true },
+      })),
+    );
+
+    return {
+      status:        campaign.status,
+      haltedAt:      campaign.haltedAt,
+      haltReason:    campaign.haltReason,
+      haltErrorCode: campaign.haltErrorCode,
+      skippedCount:  campaign.skippedCount,
+      failedCount:   campaign.failedCount,
+      reasons: grouped
+        .map((g, i) => ({
+          errorCode: g.errorCode,
+          title:     samples[i]?.errorTitle ?? null,
+          reason:    samples[i]?.failedReason ?? 'No reason recorded.',
+          count:     g._count._all,
+          action:    classifySendError(g.errorCode).action,
+        }))
+        .sort((a, b) => b.count - a.count),
+    };
+  }
+
+  private async clearHalt(id: string): Promise<void> {
+    await this.redis.client.del(HALT_KEY(id)).catch(() => {});
   }
 
   // ── Stats ──────────────────────────────────────────────────────────────────

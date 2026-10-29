@@ -4,7 +4,8 @@ import { Job } from 'bull';
 import { PrismaService } from '@lib/prisma';
 import {
   WebhookDispatchService, NotificationsService, MessageRatesService, WalletService, MANAGER_ROLES, decryptSecret,
-  buildSendComponents, toSpec,
+  buildSendComponents, toSpec, RedisService, SuppressionService,
+  classifySendError, describeSendError, parseSendError, type ParsedSendError,
 } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
 import { CampaignProgressService } from '../campaign-progress.service';
@@ -40,6 +41,8 @@ export class CampaignSendProcessor {
     private readonly notifications: NotificationsService,
     private readonly rates:     MessageRatesService,
     private readonly wallet:    WalletService,
+    private readonly suppression: SuppressionService,
+    private readonly redis:     RedisService,
   ) {}
 
   private async getCampaignData(campaignId: string): Promise<CampaignData | null> {
@@ -68,6 +71,14 @@ export class CampaignSendProcessor {
     const { campaignId, recipientId, tenantId, businessId } = job.data;
 
     this.logger.log(`Processing job id=${job.id} campaign=${campaignId} recipient=${recipientId}`);
+
+    // The campaign may have stopped itself since this job was queued — a restricted
+    // account or a disabled template fails identically for every recipient. One Redis
+    // read is worth it to avoid working through the rest of the list.
+    if (await this.isHalted(campaignId)) {
+      this.logger.debug(`Campaign ${campaignId} is halted — leaving ${recipientId} pending`);
+      return;
+    }
 
     // Claim the recipient row atomically (prevent double-send)
     const claimed = await this.prisma.campaignContact.updateMany({
@@ -106,6 +117,23 @@ export class CampaignSendProcessor {
         where: { id: recipientId },
       });
       if (!recipient) throw new Error('Recipient not found');
+
+      // A person can opt out while the campaign is running — the webhook arrives in the
+      // middle of a long send. Launch already filtered the list, so this catches only
+      // those who changed their mind since, which is exactly the case worth catching.
+      const blocked = await this.prisma.blacklistEntry.findFirst({
+        where:  { phone: recipient.phone, OR: [{ tenantId }, { tenantId: null }] },
+        select: { source: true },
+      });
+      if (blocked) {
+        await this.skipRecipient(
+          campaignId, recipientId, tenantId,
+          blocked.source === 'OPT_OUT'
+            ? 'Not sent: they turned off marketing messages before this reached them.'
+            : 'Not sent: this number is on your do-not-contact list.',
+        );
+        return;
+      }
 
       const variables = (recipient.variables as Record<string, string>) ?? {};
 
@@ -152,9 +180,13 @@ export class CampaignSendProcessor {
       );
 
       if (!res.ok) {
-        const errText = await res.text();
-        this.logger.error(`Meta API ${res.status} for campaign=${campaignId} recipient=${recipientId}: ${errText}`);
-        throw new Error(`Meta API error ${res.status}: ${errText}`);
+        const body = await res.json().catch(() => ({}));
+        await this.handleSendFailure({
+          job, campaignId, recipientId, tenantId, businessId,
+          phone: recipient.phone,
+          parsed: parseSendError(res.status, body),
+        });
+        return;
       }
 
       const json = await res.json() as any;
@@ -205,21 +237,204 @@ export class CampaignSendProcessor {
       if (completed) await this.progress.emitNow(campaignId); else this.progress.touch(campaignId);
 
     } catch (err: any) {
+      // Something other than a rejection from Meta: a network blip, a missing
+      // integration, a bug. Retryable until the queue gives up.
       this.logger.error(`Campaign send failed for recipient ${recipientId}: ${err.message}`);
+      await this.failRecipient({
+        campaignId, recipientId, tenantId,
+        reason: String(err.message).slice(0, 500),
+        errorCode: null, errorTitle: null,
+        counter: 'failedCount',
+        retryable: true, job,
+      });
+      if (this.hasAttemptsLeft(job)) throw err;
+    }
+  }
 
+  // ── Failures from Meta ─────────────────────────────────────────────────────
+
+  /**
+   * One rejection from Meta, acted on according to what the code means.
+   *
+   * The old behaviour was to throw for everything, so the queue retried three times and
+   * the recipient was counted failed on each attempt. That meant three more attempts at
+   * someone who had opted out, and three attempts per recipient across the whole list
+   * when the template itself was the problem.
+   */
+  private async handleSendFailure(ctx: {
+    job: Job<CampaignSendJob>;
+    campaignId: string;
+    recipientId: string;
+    tenantId: string;
+    businessId: string;
+    phone: string;
+    parsed: ParsedSendError;
+  }): Promise<void> {
+    const { job, campaignId, recipientId, tenantId, businessId, phone, parsed } = ctx;
+    const rule = classifySendError(parsed.code);
+    const reason = describeSendError(parsed, rule);
+
+    this.logger.warn(
+      `Meta rejected campaign=${campaignId} recipient=${recipientId} ` +
+      `code=${parsed.code ?? 'none'} http=${parsed.httpStatus} action=${rule.action}: ${parsed.message ?? ''}`,
+    );
+
+    if (rule.action === 'SUPPRESS') {
+      // They have told WhatsApp to stop. Record it so no campaign targets them again.
+      await this.suppression.suppress({ tenantId, businessId, phone, errorCode: parsed.code, reason: rule.reason });
+    }
+
+    if (rule.action === 'ABORT') {
+      // Every remaining recipient would fail the same way.
+      await this.haltCampaign(campaignId, tenantId, businessId, reason, parsed.code);
+    }
+
+    // 131049 is WhatsApp's own per-person marketing cap. The recipient did nothing
+    // wrong and the send was never attempted, so it is a skip, not a failure.
+    const isSkip = rule.action === 'SUPPRESS' || parsed.code === 131049;
+
+    await this.failRecipient({
+      campaignId, recipientId, tenantId,
+      reason,
+      errorCode: parsed.code,
+      errorTitle: parsed.title,
+      counter: isSkip ? 'skippedCount' : 'failedCount',
+      retryable: rule.action === 'RETRY',
+      job,
+    });
+
+    // Only a transient error goes back to the queue. Throwing is what triggers a retry.
+    if (rule.action === 'RETRY' && this.hasAttemptsLeft(job)) {
+      throw new Error(`${reason} — retrying`);
+    }
+  }
+
+  /** Deliberately not sent to. Counted apart from a delivery that went wrong. */
+  private async skipRecipient(
+    campaignId: string, recipientId: string, tenantId: string, reason: string,
+  ): Promise<void> {
+    await this.prisma.campaignContact.update({
+      where: { id: recipientId },
+      data:  { status: 'FAILED', failedAt: new Date(), failedReason: reason },
+    }).catch((err) => this.logger.error(`Could not skip ${recipientId}: ${err.message}`));
+
+    await this.prisma.campaign.update({
+      where: { id: campaignId },
+      data:  { skippedCount: { increment: 1 } },
+    }).catch((err) => this.logger.error(`Could not count a skip on ${campaignId}: ${err.message}`));
+
+    const completed = await this.tryComplete(campaignId, tenantId);
+    if (completed) await this.progress.emitNow(campaignId); else this.progress.touch(campaignId);
+  }
+
+  /** Bull retries while attempts remain; the last one has to settle the row. */
+  private hasAttemptsLeft(job: Job<CampaignSendJob>): boolean {
+    const attempts = job.opts?.attempts ?? 1;
+    return job.attemptsMade < attempts - 1;
+  }
+
+  /**
+   * Settle the recipient row and move the campaign's counters once.
+   *
+   * A retryable failure leaves the row claimable again and touches no counter, so a
+   * recipient that succeeds on the second attempt is never counted as failed. Only the
+   * final attempt, or a verdict of no-retry, writes the terminal state.
+   */
+  private async failRecipient(args: {
+    campaignId: string;
+    recipientId: string;
+    tenantId: string;
+    reason: string;
+    errorCode: number | null;
+    errorTitle: string | null;
+    counter: 'failedCount' | 'skippedCount';
+    retryable: boolean;
+    job: Job<CampaignSendJob>;
+  }): Promise<void> {
+    const { campaignId, recipientId, tenantId, reason, errorCode, errorTitle, counter, retryable, job } = args;
+
+    if (retryable && this.hasAttemptsLeft(job)) {
+      // Put it back so the retry can claim it, and record why it is being retried.
       await this.prisma.campaignContact.update({
         where: { id: recipientId },
-        data:  { status: 'FAILED', failedAt: new Date(), failedReason: String(err.message).slice(0, 500) },
-      });
+        data:  { status: 'PENDING', claimedAt: null, failedReason: reason, errorCode, errorTitle },
+      }).catch((err) => this.logger.error(`Could not release ${recipientId}: ${err.message}`));
+      return;
+    }
 
-      await this.prisma.campaign.update({
-        where: { id: campaignId },
-        data:  { failedCount: { increment: 1 } },
-      });
+    await this.prisma.campaignContact.update({
+      where: { id: recipientId },
+      data:  { status: 'FAILED', failedAt: new Date(), failedReason: reason, errorCode, errorTitle },
+    }).catch((err) => this.logger.error(`Could not fail ${recipientId}: ${err.message}`));
 
-      const completed = await this.tryComplete(campaignId, tenantId);
-      if (completed) await this.progress.emitNow(campaignId); else this.progress.touch(campaignId);
-      throw err;
+    await this.prisma.campaign.update({
+      where: { id: campaignId },
+      data:  { [counter]: { increment: 1 }, lastError: reason.slice(0, 500) },
+    }).catch((err) => this.logger.error(`Could not count ${counter} on ${campaignId}: ${err.message}`));
+
+    const completed = await this.tryComplete(campaignId, tenantId);
+    if (completed) await this.progress.emitNow(campaignId); else this.progress.touch(campaignId);
+  }
+
+  // ── Halting ────────────────────────────────────────────────────────────────
+
+  private haltKey(campaignId: string): string {
+    return `campaign:halted:${campaignId}`;
+  }
+
+  /**
+   * Stop the campaign where it stands. Pending recipients stay pending, so resuming it
+   * after fixing the cause picks up exactly where it left off rather than re-sending.
+   *
+   * The flag goes in Redis as well as the database because the campaign row is cached per
+   * worker for 30 minutes, and waiting out that cache would mean thousands more doomed
+   * sends. Every job checks the flag before claiming.
+   */
+  private async haltCampaign(
+    campaignId: string, tenantId: string, businessId: string,
+    reason: string, errorCode: number | null,
+  ): Promise<void> {
+    const halted = await this.prisma.campaign.updateMany({
+      where: { id: campaignId, status: { in: ['RUNNING', 'PROCESSING'] } },
+      data:  {
+        status: 'PAUSED', haltedAt: new Date(), haltReason: reason.slice(0, 500),
+        haltErrorCode: errorCode, lastError: reason.slice(0, 500),
+      },
+    });
+
+    // Set the flag whether or not we were the one to pause it, so a worker holding a
+    // stale cached row still stops.
+    await this.redis.client.set(this.haltKey(campaignId), reason.slice(0, 500), 'EX', 24 * 60 * 60)
+      .catch((err) => this.logger.error(`Could not flag halt for ${campaignId}: ${err.message}`));
+    this.campaignCache.delete(campaignId);
+
+    if (halted.count === 0) return; // already paused — only notify once
+
+    const remaining = await this.prisma.campaignContact.count({
+      where: { campaignId, status: 'PENDING' },
+    });
+
+    this.logger.error(`Campaign ${campaignId} halted (code ${errorCode ?? 'none'}): ${reason}`);
+
+    void this.notifications.notify({
+      tenantId,
+      businessId,
+      recipients: { roles: MANAGER_ROLES },
+      type:  'SYSTEM',
+      title: 'Campaign paused by WhatsApp',
+      body:  `${reason} ${remaining.toLocaleString()} recipient${remaining === 1 ? '' : 's'} not sent. Fix the cause, then resume.`,
+      href:  `/campaigns/${campaignId}`,
+      data:  { campaignId, errorCode },
+    });
+    this.webhooks.dispatchEvent(tenantId, 'campaign.paused', { campaignId, reason, errorCode, remaining });
+  }
+
+  private async isHalted(campaignId: string): Promise<boolean> {
+    try {
+      return (await this.redis.client.exists(this.haltKey(campaignId))) === 1;
+    } catch {
+      // Redis is unreachable. The cached campaign status is the fallback.
+      return false;
     }
   }
 
@@ -230,17 +445,19 @@ export class CampaignSendProcessor {
   // on the transition from RUNNING → COMPLETED, so the webhook fires exactly once.
   private async tryComplete(campaignId: string, tenantId: string): Promise<boolean> {
     // Prisma maps camelCase fields to quoted camelCase columns in Postgres (confirmed by migration SQL).
+    // Skipped recipients count towards being done: they were deliberately not sent to,
+    // so a campaign full of opt-outs still finishes instead of hanging at RUNNING.
     const rows = await this.prisma.$queryRaw<Array<{
       tenantId: string; businessId: string; name: string; sentCount: bigint; failedCount: bigint;
-      deliveredCount: bigint; readCount: bigint; totalCount: bigint;
+      skippedCount: bigint; deliveredCount: bigint; readCount: bigint; totalCount: bigint;
       completedAt: Date;
     }>>`
       UPDATE campaigns
       SET    status = 'COMPLETED', "completedAt" = NOW()
       WHERE  id     = ${campaignId}
         AND  status = 'RUNNING'
-        AND  "sentCount" + "failedCount" >= "totalCount"
-      RETURNING "tenantId", "businessId", "name", "sentCount", "failedCount", "deliveredCount", "readCount", "totalCount", "completedAt"
+        AND  "sentCount" + "failedCount" + "skippedCount" >= "totalCount"
+      RETURNING "tenantId", "businessId", "name", "sentCount", "failedCount", "skippedCount", "deliveredCount", "readCount", "totalCount", "completedAt"
     `;
 
     if (!rows.length) return false;
@@ -254,7 +471,12 @@ export class CampaignSendProcessor {
       recipients: { roles: MANAGER_ROLES },
       type:       'CAMPAIGN_COMPLETED',
       title:      `Campaign "${c.name}" finished`,
-      body:       `${Number(c.sentCount).toLocaleString()} sent · ${Number(c.failedCount).toLocaleString()} failed of ${Number(c.totalCount).toLocaleString()}`,
+      body:       [
+        `${Number(c.sentCount).toLocaleString()} sent`,
+        `${Number(c.failedCount).toLocaleString()} failed`,
+        ...(Number(c.skippedCount) > 0 ? [`${Number(c.skippedCount).toLocaleString()} skipped`] : []),
+        `of ${Number(c.totalCount).toLocaleString()}`,
+      ].join(' · '),
       href:       `/campaigns/${campaignId}`,
       data:       { campaignId },
     });

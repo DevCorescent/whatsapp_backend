@@ -21,7 +21,24 @@ export interface WAChangeValue {
   statuses?: WAStatus[];
   /** `calls` webhook field — see WACall. */
   calls?: WACall[];
+  /** `user_preferences` webhook field — see WAUserPreference. */
+  user_preferences?: WAUserPreference[];
   errors?: Array<{ code: number; title?: string; message?: string; error_data?: { details?: string } }>;
+}
+
+/**
+ * One entry of the `user_preferences` webhook field: a WhatsApp user turning marketing
+ * messages from this business off or back on.
+ */
+export interface WAUserPreference {
+  wa_id?: string;
+  user_id?: string;
+  parent_user_id?: string;
+  /** Only `marketing_messages` exists today. */
+  category: string;
+  value: 'stop' | 'resume';
+  detail?: string;
+  timestamp?: number;
 }
 
 /** One entry of the `calls` webhook field (Meta Calling API). */

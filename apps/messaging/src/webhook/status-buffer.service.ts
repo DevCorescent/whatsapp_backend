@@ -1,6 +1,8 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { RealtimeService, type RtStatusUpdate } from '@lib/common';
+import {
+  RealtimeService, SuppressionService, classifySendError, type RtStatusUpdate,
+} from '@lib/common';
 
 interface Buffered {
   tenantId:    string;
@@ -41,6 +43,7 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly prisma:   PrismaService,
     private readonly realtime: RealtimeService,
+    private readonly suppression: SuppressionService,
   ) {}
 
   onModuleInit() {
@@ -144,25 +147,86 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
     } else if (status === 'failed') {
       for (const row of transitioning) {
         const b = byId.get(row.waMessageId ?? '');
+        const rule = classifySendError(b?.errorCode);
         ops.push(this.prisma.campaignContact.update({
           where: { id: row.id },
           data:  {
             status: 'FAILED', failedAt: now,
-            ...(b?.errorCode !== undefined ? { errorCode: b.errorCode, errorTitle: b.errorTitle, failedReason: b.errorTitle } : {}),
+            ...(b?.errorCode !== undefined
+              ? {
+                  errorCode:  b.errorCode,
+                  errorTitle: b.errorTitle,
+                  // Our own wording explains what to do about it; Meta's title alone does not.
+                  failedReason: `${rule.reason}${b.errorCode ? ` (WhatsApp error ${b.errorCode})` : ''}`.slice(0, 500),
+                }
+              : {}),
           },
         }));
       }
     }
 
-    const perCampaign = new Map<string, number>();
-    for (const r of transitioning) perCampaign.set(r.campaignId, (perCampaign.get(r.campaignId) ?? 0) + 1);
-    for (const [campaignId, n] of perCampaign) {
-      ops.push(this.prisma.campaign.update({ where: { id: campaignId }, data: { [counter]: { increment: n } } }));
+    // A message can be accepted and then fail on delivery, so an opt-out often arrives
+    // here rather than as a rejected send. Same conclusion either way: stop sending.
+    if (status === 'failed') void this.applySuppressions(group, transitioning);
+
+    // Deliveries that failed because the person opted out, or had already had their fill
+    // of marketing for the day, are counted apart from genuine delivery failures.
+    const perCampaign = new Map<string, { failed: number; skipped: number }>();
+    for (const r of transitioning) {
+      const code = byId.get(r.waMessageId ?? '')?.errorCode;
+      const skip = status === 'failed' && (code === 131050 || code === 131049);
+      const tally = perCampaign.get(r.campaignId) ?? { failed: 0, skipped: 0 };
+      if (skip) tally.skipped++; else tally.failed++;
+      perCampaign.set(r.campaignId, tally);
+    }
+    for (const [campaignId, tally] of perCampaign) {
+      const data: Record<string, { increment: number }> = {};
+      if (status === 'failed') {
+        if (tally.failed)  data.failedCount  = { increment: tally.failed };
+        if (tally.skipped) data.skippedCount = { increment: tally.skipped };
+      } else {
+        data[counter] = { increment: tally.failed + tally.skipped };
+      }
+      ops.push(this.prisma.campaign.update({ where: { id: campaignId }, data }));
       touched.add(campaignId);
     }
 
     const results = await Promise.allSettled(ops);
     for (const r of results) if (r.status === 'rejected') this.logger.error(`campaign flush (${status}): ${r.reason?.message ?? r.reason}`);
+  }
+
+  /**
+   * Error 131050 on a delivery receipt means this person has turned off marketing
+   * messages. Record it against the number so no later campaign tries again.
+   */
+  private async applySuppressions(
+    group: Buffered[],
+    rows: { id: string; campaignId: string; waMessageId: string | null }[],
+  ): Promise<void> {
+    const optedOut = new Set(group.filter((g) => g.errorCode === 131050).map((g) => g.waMessageId));
+    if (!optedOut.size) return;
+
+    const ids = rows.filter((r) => r.waMessageId && optedOut.has(r.waMessageId)).map((r) => r.id);
+    if (!ids.length) return;
+
+    try {
+      const recipients = await this.prisma.campaignContact.findMany({
+        where:  { id: { in: ids } },
+        select: { phone: true, campaign: { select: { tenantId: true, businessId: true } } },
+      });
+      for (const r of recipients) {
+        if (!r.campaign) continue;
+        await this.suppression.suppress({
+          tenantId:   r.campaign.tenantId,
+          businessId: r.campaign.businessId,
+          phone:      r.phone,
+          errorCode:  131050,
+          reason:     classifySendError(131050).reason,
+        });
+      }
+    } catch (err: any) {
+      this.logger.error(`Could not record opt-outs from delivery receipts: ${err.message}`);
+    }
   }
 
   private async emitMessageStatuses(group: Buffered[], status: string) {

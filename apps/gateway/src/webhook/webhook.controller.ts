@@ -79,6 +79,12 @@ export class GatewayWebhookController {
             await this.calls.process(change.value).catch(err =>
               this.logger.error(`Entry ${entry.id} calls processing error`, err),
             );
+          } else if (change.field === 'user_preferences') {
+            // Someone turned marketing messages on or off. This arrives the moment they
+            // do it, rather than when the next campaign tries and is rejected.
+            await this.webhook.processUserPreferences(change.value).catch(err =>
+              this.logger.error(`Entry ${entry.id} user preference error`, err),
+            );
           } else {
             this.logger.debug(`Webhook field ignored: ${change.field}`);
           }

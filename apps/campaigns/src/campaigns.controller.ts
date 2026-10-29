@@ -88,6 +88,28 @@ export class CampaignsController {
     return this.svc.cancel(scope, id);
   }
 
+  @Post(':id/pause')
+  @RequiresPermission('campaigns.send')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Pause a running campaign, keeping its pending recipients' })
+  pause(@CurrentTenant() scope: TenantScope, @Param('id') id: string, @Body() body: { reason?: string } = {}) {
+    return this.svc.pause(scope, id, body?.reason);
+  }
+
+  @Post(':id/resume')
+  @RequiresPermission('campaigns.send')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Resume a paused campaign from where it stopped' })
+  resume(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
+    return this.svc.resume(scope, id);
+  }
+
+  @Get(':id/failures')
+  @ApiOperation({ summary: 'Why recipients failed, grouped by WhatsApp error code' })
+  failures(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
+    return this.svc.getFailureBreakdown(scope, id);
+  }
+
   @Patch(':id')
   @RequiresPermission('campaigns.send')
   @ApiOperation({ summary: 'Update a campaign (DRAFT/SCHEDULED only)' })

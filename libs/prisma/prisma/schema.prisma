@@ -942,7 +942,16 @@ model Campaign {
   repliedCount   Int            @default(0)
   clickedCount   Int            @default(0)
   failedCount    Int            @default(0)
+  /// Recipients passed over without being a delivery failure: already opted out, or at
+  /// WhatsApp's own per-person marketing limit. Kept apart so a sender's failure rate
+  /// reflects messages that actually went wrong.
+  skippedCount   Int            @default(0)
   lastError      String?
+  /// Set when the campaign stopped itself because every remaining send would fail the
+  /// same way — a restricted account, or a template WhatsApp has disabled.
+  haltedAt       DateTime?
+  haltReason     String?
+  haltErrorCode  Int?
   filters        Json?
   metadata       Json?
   createdAt      DateTime       @default(now())
@@ -1015,6 +1024,11 @@ model BlacklistEntry {
   /// Digits-only E.164, normalised exactly like Contact.phone.
   phone       String
   reason      String?
+  /// MANUAL, or OPT_OUT when WhatsApp told us this person stopped marketing messages.
+  /// A person who opts back in clears only the automatic entry, never a manual block.
+  source      String   @default("MANUAL")
+  /// The WhatsApp error code that caused an automatic entry, e.g. 131050.
+  errorCode   Int?
   createdById String?
   createdAt   DateTime @default(now())
 

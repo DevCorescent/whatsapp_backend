@@ -6,6 +6,7 @@ import type { Queue } from 'bull';
 import { PrismaService } from '@lib/prisma';
 import {
   WebhookDispatchService, MessageEventsService, StorageService, NotificationsService, AGENT_ROLES, decryptSecret,
+  SuppressionService,
 } from '@lib/common';
 import { QUEUE_MEDIA_FETCH } from '@lib/queue';
 import { StatusBufferService } from './status-buffer.service';
@@ -42,6 +43,7 @@ export class WebhookService {
     private readonly events:       MessageEventsService,
     private readonly storage:      StorageService,
     private readonly notifications: NotificationsService,
+    private readonly suppression:  SuppressionService,
     private readonly cfg:          ConfigService,
     @InjectQueue(QUEUE_MEDIA_FETCH) private readonly mediaQueue: Queue<MediaFetchJob>,
   ) {}
@@ -169,6 +171,45 @@ export class WebhookService {
     for (const status of value.statuses ?? []) {
       if (status.type === 'call') continue; // call statuses belong to the Calling API flow
       this.processStatus(identity.tenantId, status);
+    }
+  }
+
+  // ── Marketing preferences ─────────────────────────────────────────────────
+
+  /**
+   * The `user_preferences` webhook: a WhatsApp user has stopped or resumed marketing
+   * messages from this business.
+   *
+   * Worth handling even though error 131050 already catches an opt-out at send time,
+   * because this arrives when they make the choice. Acting on it means the next campaign
+   * never counts them as a recipient, instead of sending, being refused, and recording a
+   * failure against the number's reputation.
+   */
+  async processUserPreferences(value: WAChangeValue): Promise<void> {
+    const phoneNumberId = value.metadata?.phone_number_id;
+    const preferences = value.user_preferences ?? [];
+    if (!phoneNumberId || !preferences.length) return;
+
+    const identity = await this.resolveTenant(phoneNumberId);
+    if (!identity) {
+      this.logger.warn(`No tenant for phone_number_id=${phoneNumberId} on a preference change`);
+      return;
+    }
+
+    for (const pref of preferences) {
+      if (pref.category !== 'marketing_messages' || !pref.wa_id) continue;
+
+      if (pref.value === 'stop') {
+        await this.suppression.suppress({
+          tenantId:   identity.tenantId,
+          businessId: identity.businessId,
+          phone:      pref.wa_id,
+          reason:     pref.detail ?? 'They turned off marketing messages from your business on WhatsApp.',
+        });
+      } else if (pref.value === 'resume') {
+        await this.suppression.resume(identity.tenantId, pref.wa_id);
+      }
+      this.logger.log(`Marketing preference ${pref.value} for ${pref.wa_id} (tenant ${identity.tenantId})`);
     }
   }
 
