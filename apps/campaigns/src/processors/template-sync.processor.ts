@@ -2,6 +2,7 @@ import { Processor, Process } from '@nestjs/bull';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bull';
 import { PrismaService } from '@lib/prisma';
+import { decryptSecret } from '@lib/common';
 import { QUEUE_TEMPLATE_SYNC } from '@lib/queue';
 
 interface TemplateSyncJob {
@@ -31,6 +32,13 @@ export class TemplateSyncProcessor {
       return;
     }
 
+    const accessToken = decryptSecret(integration.accessToken);
+    if (!accessToken) {
+      this.logger.error(`Failed to decrypt access token for business ${businessId}`);
+      return;
+    }
+    this.logger.log(`TemplateSyncProcessor templateId=${templateId} wabaId=${integration.whatsappBusinessId} tokenPrefix=${accessToken.slice(0, 8)}...`);
+
     try {
       const components: unknown[] = [];
 
@@ -59,7 +67,7 @@ export class TemplateSyncProcessor {
         {
           method:  'POST',
           headers: {
-            Authorization:  `Bearer ${integration.accessToken}`,
+            Authorization:  `Bearer ${accessToken}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -72,6 +80,7 @@ export class TemplateSyncProcessor {
       );
 
       const json = await res.json() as any;
+      this.logger.log(`TemplateSyncProcessor ← status=${res.status} waTemplateId=${json?.id} metaStatus=${json?.status} error=${JSON.stringify(json?.error ?? null)}`);
 
       if (!res.ok) {
         const reason = json?.error?.message ?? 'Unknown Meta error';

@@ -1,14 +1,16 @@
 import {
-  Injectable, NotFoundException, ConflictException,
+  Injectable, NotFoundException, ConflictException, Logger,
 } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope } from '@lib/common';
+import { TenantScope, decryptSecret } from '@lib/common';
 import { QUEUE_TEMPLATE_SYNC } from '@lib/queue';
 
 @Injectable()
 export class TemplatesService {
+  private readonly logger = new Logger(TemplatesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     @InjectQueue(QUEUE_TEMPLATE_SYNC) private readonly syncQueue: Queue,
@@ -165,13 +167,18 @@ export class TemplatesService {
       throw new NotFoundException('No active default WhatsApp integration found');
     }
 
+    const accessToken = decryptSecret(integration.accessToken);
+    if (!accessToken) throw new NotFoundException('Could not decrypt WhatsApp access token');
+
     const version = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
     const url = `https://graph.facebook.com/${version}/${integration.whatsappBusinessId}/message_templates?name=${encodeURIComponent(template.name)}`;
+    this.logger.log(`refreshStatus → GET ${url} (tokenPrefix=${accessToken.slice(0, 8)}...)`);
 
     const res  = await fetch(url, {
-      headers: { Authorization: `Bearer ${integration.accessToken}` },
+      headers: { Authorization: `Bearer ${accessToken}` },
     });
     const json = await res.json() as any;
+    this.logger.log(`refreshStatus ← status=${res.status} data=${JSON.stringify(json?.data?.[0]?.status ?? json?.error)}`);
 
     const remote = json?.data?.[0];
     if (!remote) {
@@ -200,6 +207,10 @@ export class TemplatesService {
       throw new NotFoundException('No active default WhatsApp integration found');
     }
 
+    const accessToken = decryptSecret(integration.accessToken);
+    if (!accessToken) throw new NotFoundException('Could not decrypt WhatsApp access token');
+    this.logger.log(`importFromMeta businessId=${scope.businessId} wabaId=${integration.whatsappBusinessId} tokenPrefix=${accessToken.slice(0, 8)}...`);
+
     const existingNames = new Set(
       (await this.prisma.messageTemplate.findMany({
         where:  { businessId: scope.businessId },
@@ -215,10 +226,12 @@ export class TemplatesService {
     let updated = 0;
 
     while (nextUrl) {
+      this.logger.log(`importFromMeta → GET ${nextUrl}`);
       const res  = await fetch(nextUrl, {
-        headers: { Authorization: `Bearer ${integration.accessToken}` },
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
       const json = await res.json() as any;
+      this.logger.log(`importFromMeta ← status=${res.status} count=${json?.data?.length ?? 0} hasNext=${!!json?.paging?.next} error=${JSON.stringify(json?.error ?? null)}`);
 
       const templates: any[] = json?.data ?? [];
 
