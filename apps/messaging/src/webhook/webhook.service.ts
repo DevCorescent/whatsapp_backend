@@ -173,7 +173,8 @@ export class WebhookService {
     const contactName = contact?.profile?.name;
     const contactWaId = contact?.bsuid ?? contact?.username ?? contact?.wa_id ?? message.from;
     const phone       = message.from;
-    const content     = this.extractContent(message);
+    const content     = this.extractCaption(message);
+    const preview     = this.extractPreview(message);
 
     // 1. Upsert contact
     const contactRow = await this.prisma.contact.upsert({
@@ -230,7 +231,7 @@ export class WebhookService {
           data: {
             status:             'OPEN',
             lastMessageAt:      new Date(),
-            lastMessagePreview: content.slice(0, 100),
+            lastMessagePreview: preview.slice(0, 100),
             unreadCount:        { increment: 1 },
           },
         }),
@@ -273,18 +274,35 @@ export class WebhookService {
     }).catch((err) => this.logger.error(`InboundPipeline failed conv=${conversation.id}`, err?.message ?? err));
   }
 
-  private extractContent(message: WAMessage): string {
+  /** Text stored as message.content — caption only, null for uncaptioned media. */
+  private extractCaption(message: WAMessage): string | null {
     switch (message.type) {
-      case 'text':        return message.text?.body ?? '';
-      case 'image':       return message.image?.caption?.trim()      || '📷 Photo';
-      case 'video':       return message.video?.caption?.trim()      || '🎥 Video';
-      case 'audio':       return '🎵 Voice message';
-      case 'document':    return message.document?.caption?.trim() || message.document?.filename || '📄 Document';
-      case 'sticker':     return '😊 Sticker';
+      case 'text':        return message.text?.body || null;
+      case 'image':       return message.image?.caption?.trim()    || null;
+      case 'video':       return message.video?.caption?.trim()    || null;
+      case 'document':    return message.document?.caption?.trim() || null;
       case 'location':    return `📍 ${message.location?.name ?? 'Location'}`;
-      case 'interactive': return message.interactive?.button_reply?.title ?? message.interactive?.list_reply?.title ?? '💬 Interactive';
-      case 'button':      return message.button?.text ?? '🔘 Button reply';
+      case 'interactive': return message.interactive?.button_reply?.title ?? message.interactive?.list_reply?.title ?? null;
+      case 'button':      return message.button?.text ?? null;
       case 'reaction':    return `${message.reaction?.emoji ?? '👍'} Reaction`;
+      default:            return null;
+    }
+  }
+
+  /** Short label for the conversation list preview — always non-empty. */
+  private extractPreview(message: WAMessage): string {
+    const caption = this.extractCaption(message);
+    switch (message.type) {
+      case 'text':        return caption ?? '';
+      case 'image':       return caption ?? '📷';
+      case 'video':       return caption ?? '🎥';
+      case 'audio':       return '🎵 Voice message';
+      case 'document':    return caption ?? message.document?.filename ?? '📄';
+      case 'sticker':     return '😊 Sticker';
+      case 'location':    return caption ?? '📍 Location';
+      case 'interactive': return caption ?? '💬 Interactive';
+      case 'button':      return caption ?? '🔘 Button reply';
+      case 'reaction':    return caption ?? '👍';
       default:            return '📎 Attachment';
     }
   }
