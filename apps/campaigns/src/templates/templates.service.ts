@@ -183,7 +183,7 @@ export class TemplatesService {
       data:  {
         status:          remote.status ?? template.status,
         waTemplateId:    remote.id     ?? template.waTemplateId,
-        rejectionReason: remote.rejected_reason ?? null,
+        rejectionReason: remote.rejection_reason ?? null,
         lastSyncedAt:    new Date(),
       },
     });
@@ -200,54 +200,74 @@ export class TemplatesService {
       throw new NotFoundException('No active default WhatsApp integration found');
     }
 
+    const existingNames = new Set(
+      (await this.prisma.messageTemplate.findMany({
+        where:  { businessId: scope.businessId },
+        select: { name: true },
+      })).map((t) => t.name),
+    );
+
     const version = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
-    const url = `https://graph.facebook.com/${version}/${integration.whatsappBusinessId}/message_templates?limit=200`;
+    let nextUrl: string | null =
+      `https://graph.facebook.com/${version}/${integration.whatsappBusinessId}/message_templates?limit=200`;
 
-    const res  = await fetch(url, {
-      headers: { Authorization: `Bearer ${integration.accessToken}` },
-    });
-    const json = await res.json() as any;
+    let created = 0;
+    let updated = 0;
 
-    const templates: any[] = json?.data ?? [];
-    let imported = 0;
-
-    for (const t of templates) {
-      const bodyComponent    = t.components?.find((c: any) => c.type === 'BODY');
-      const headerComponent  = t.components?.find((c: any) => c.type === 'HEADER');
-      const footerComponent  = t.components?.find((c: any) => c.type === 'FOOTER');
-      const buttonsComponent = t.components?.find((c: any) => c.type === 'BUTTONS');
-
-      if (!bodyComponent?.text) continue;
-
-      await this.prisma.messageTemplate.upsert({
-        where:  { name_businessId: { name: t.name, businessId: scope.businessId } },
-        create: {
-          tenantId:        scope.tenantId,
-          businessId:      scope.businessId,
-          name:            t.name,
-          category:        t.category,
-          language:        t.language,
-          headerType:      headerComponent?.format   ?? null,
-          headerContent:   headerComponent?.text     ?? null,
-          body:            bodyComponent.text,
-          footer:          footerComponent?.text     ?? null,
-          buttons:         buttonsComponent?.buttons ?? null,
-          variables:       [],
-          headerVariables: [],
-          waTemplateId:    t.id,
-          status:          t.status,
-          lastSyncedAt:    new Date(),
-        },
-        update: {
-          waTemplateId: t.id,
-          status:       t.status,
-          lastSyncedAt: new Date(),
-        },
+    while (nextUrl) {
+      const res  = await fetch(nextUrl, {
+        headers: { Authorization: `Bearer ${integration.accessToken}` },
       });
-      imported++;
+      const json = await res.json() as any;
+
+      const templates: any[] = json?.data ?? [];
+
+      for (const t of templates) {
+        const bodyComponent    = t.components?.find((c: any) => c.type === 'BODY');
+        const headerComponent  = t.components?.find((c: any) => c.type === 'HEADER');
+        const footerComponent  = t.components?.find((c: any) => c.type === 'FOOTER');
+        const buttonsComponent = t.components?.find((c: any) => c.type === 'BUTTONS');
+
+        if (!bodyComponent?.text) continue;
+
+        await this.prisma.messageTemplate.upsert({
+          where:  { name_businessId: { name: t.name, businessId: scope.businessId } },
+          create: {
+            tenantId:        scope.tenantId,
+            businessId:      scope.businessId,
+            name:            t.name,
+            category:        t.category,
+            language:        t.language,
+            headerType:      headerComponent?.format   ?? null,
+            headerContent:   headerComponent?.text     ?? null,
+            body:            bodyComponent.text,
+            footer:          footerComponent?.text     ?? null,
+            buttons:         buttonsComponent?.buttons ?? null,
+            variables:       [],
+            headerVariables: [],
+            waTemplateId:    t.id,
+            status:          t.status,
+            lastSyncedAt:    new Date(),
+          },
+          update: {
+            waTemplateId: t.id,
+            status:       t.status,
+            lastSyncedAt: new Date(),
+          },
+        });
+
+        if (existingNames.has(t.name)) {
+          updated++;
+        } else {
+          created++;
+          existingNames.add(t.name);
+        }
+      }
+
+      nextUrl = json?.paging?.next ?? null;
     }
 
-    return { imported };
+    return { success: true, created, updated };
   }
 
   // ── Sync all pending templates ─────────────────────────────────────────────

@@ -53,8 +53,9 @@ export class TemplateSyncProcessor {
         components.push({ type: 'BUTTONS', buttons });
       }
 
+      const version = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
       const res = await fetch(
-        `https://graph.facebook.com/v20.0/${integration.whatsappBusinessId}/message_templates`,
+        `https://graph.facebook.com/${version}/${integration.whatsappBusinessId}/message_templates`,
         {
           method:  'POST',
           headers: {

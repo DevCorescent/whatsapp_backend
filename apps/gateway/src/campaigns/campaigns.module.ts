@@ -8,6 +8,7 @@ import { CampaignsService }         from '../../../../apps/campaigns/src/campaig
 import { TemplatesController }      from '../../../../apps/campaigns/src/templates/templates.controller';
 import { TemplatesService }         from '../../../../apps/campaigns/src/templates/templates.service';
 import { CampaignSendProcessor }    from '../../../../apps/campaigns/src/processors/campaign-send.processor';
+import { TemplateSyncProcessor }    from '../../../../apps/campaigns/src/processors/template-sync.processor';
 import { CampaignSchedulerService } from './campaign-scheduler.service';
 import { CampaignDebugController }  from './campaign-debug.controller';
 
@@ -18,6 +19,6 @@ import { CampaignDebugController }  from './campaign-debug.controller';
     BullModule.registerQueue({ name: QUEUE_TEMPLATE_SYNC }),
   ],
   controllers: [CampaignsController, TemplatesController, CampaignDebugController],
-  providers:   [CampaignsService, TemplatesService, WebhookDispatchService, CampaignSendProcessor, CampaignSchedulerService],
+  providers:   [CampaignsService, TemplatesService, WebhookDispatchService, CampaignSendProcessor, TemplateSyncProcessor, CampaignSchedulerService],
 })
 export class CampaignsModule {}
