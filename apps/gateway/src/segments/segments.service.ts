@@ -7,12 +7,15 @@ import { TenantScope } from '@lib/common';
 const TEXT_FIELDS = ['name', 'location', 'company', 'source', 'email'] as const;
 type TextField = (typeof TEXT_FIELDS)[number];
 
+type TextOp = 'is' | 'contains' | 'is_not' | 'starts_with' | 'ends_with' | 'is_empty' | 'not_empty';
+const EMPTY_VALUE_OPS: TextOp[] = ['is_empty', 'not_empty'];
+
 type SegmentRule =
-  | { field: TextField;       op: 'is' | 'contains';       values: string[] }
+  | { field: TextField;       op: TextOp;                   values: string[] }
   | { field: 'tags';          op: 'any' | 'all' | 'none';  values: string[] }
   | { field: 'status';        op: 'is';                     values: ('active' | 'opted_out' | 'blacklisted')[] }
   | { field: 'leadStage';     op: 'any';                    values: string[] }
-  | { field: 'custom'; key: string; op: 'is' | 'contains'; values: string[] };
+  | { field: 'custom'; key: string; op: 'is' | 'contains' | 'is_not' | 'starts_with'; values: string[] };
 
 interface SegmentFilters {
   rules: SegmentRule[];
@@ -30,7 +33,8 @@ function validateFilters(raw: unknown): SegmentFilters {
     if (!rule || typeof rule !== 'object') throw new BadRequestException('Each rule must be an object');
     const r = rule as Record<string, unknown>;
     if (typeof r.field !== 'string') throw new BadRequestException('Each rule must have a string field');
-    if (!Array.isArray(r.values) || r.values.length === 0)
+    const isEmptyValueOp = typeof r.op === 'string' && EMPTY_VALUE_OPS.includes(r.op as TextOp);
+    if (!Array.isArray(r.values) || (!isEmptyValueOp && r.values.length === 0))
       throw new BadRequestException(`Rule "${r.field}" must have a non-empty values array`);
     if (r.field === 'custom' && typeof r.key !== 'string')
       throw new BadRequestException('Custom rules must have a key property');
@@ -41,12 +45,19 @@ function validateFilters(raw: unknown): SegmentFilters {
 
 // ── Where-clause builder (full port of lib/segments.ts) ───────────────────────
 
-function textClause(field: TextField, op: 'is' | 'contains', values: string[]): Record<string, unknown> {
+function textClause(field: TextField, op: TextOp, values: string[]): Record<string, unknown> {
+  if (op === 'is_empty')
+    return { OR: [{ [field]: null }, { [field]: '' }] };
+  if (op === 'not_empty')
+    return { AND: [{ NOT: { [field]: null } }, { NOT: { [field]: '' } }] };
   return {
     OR: values.map((v) => ({
-      [field]: op === 'is'
-        ? { equals: v, mode: 'insensitive' }
-        : { contains: v, mode: 'insensitive' },
+      [field]:
+        op === 'is'          ? { equals: v, mode: 'insensitive' }
+        : op === 'is_not'    ? { not: { equals: v, mode: 'insensitive' } }
+        : op === 'starts_with' ? { startsWith: v, mode: 'insensitive' }
+        : op === 'ends_with' ? { endsWith: v, mode: 'insensitive' }
+        :                      { contains: v, mode: 'insensitive' },
     })),
   };
 }
@@ -110,9 +121,11 @@ async function buildWhere(
       case 'custom':
         and.push({
           OR: rule.values.map((v) => ({
-            customFields: rule.op === 'is'
-              ? { path: [rule.key], equals: v }
-              : { path: [rule.key], string_contains: v },
+            customFields:
+              rule.op === 'is'          ? { path: [rule.key], equals: v }
+              : rule.op === 'is_not'    ? { NOT: { path: [rule.key], equals: v } }
+              : rule.op === 'starts_with' ? { path: [rule.key], string_starts_with: v }
+              :                           { path: [rule.key], string_contains: v },
           })),
         });
         break;

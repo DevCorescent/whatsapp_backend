@@ -4,6 +4,12 @@ import {
 import { PrismaService } from '@lib/prisma';
 import { TenantScope } from '@lib/common';
 
+export interface AuditLogQuery {
+  page?: number;
+  limit?: number;
+  q?: string;
+}
+
 @Injectable()
 export class AccountService {
   constructor(private readonly prisma: PrismaService) {}
@@ -44,6 +50,42 @@ export class AccountService {
   }
 
   // ── Invite code ────────────────────────────────────────────────────────────
+
+  // ── Audit log ──────────────────────────────────────────────────────────────
+
+  async listAuditLogs(scope: TenantScope, q: AuditLogQuery) {
+    const page  = Math.max(1, q.page ?? 1);
+    const limit = Math.min(100, q.limit ?? 20);
+    const skip  = (page - 1) * limit;
+    const where: Record<string, unknown> = { tenantId: scope.tenantId };
+    if (q.q) {
+      where.OR = [
+        { action:   { contains: q.q, mode: 'insensitive' } },
+        { resource: { contains: q.q, mode: 'insensitive' } },
+        { user: { name: { contains: q.q, mode: 'insensitive' } } },
+      ];
+    }
+    const [rows, total] = await Promise.all([
+      this.prisma.auditLog.findMany({
+        where,
+        skip,
+        take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: { user: { select: { id: true, name: true, email: true } } },
+      }),
+      this.prisma.auditLog.count({ where }),
+    ]);
+    const logs = rows.map((r) => ({
+      id:         r.id,
+      action:     r.action,
+      actor:      r.user?.name ?? r.user?.email ?? null,
+      actorRole:  null as string | null,
+      details:    [r.resource, r.resourceId].filter(Boolean).join(' · ') || null,
+      ip:         null as string | null,
+      createdAt:  r.createdAt,
+    }));
+    return { logs, total, page, limit };
+  }
 
   async getInviteCode(scope: TenantScope) {
     const user = await this.prisma.user.findUnique({
