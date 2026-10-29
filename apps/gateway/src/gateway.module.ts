@@ -7,7 +7,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from '@lib/prisma';
 import {
   RealtimeModule, StorageModule, NotificationsCoreModule, MessageRatesModule,
-  WalletModule as WalletCoreModule, PermissionsModule, SuppressionModule,
+  WalletModule as WalletCoreModule, PermissionsModule, SuppressionModule, LlmModule, HandoverModule,
 } from '@lib/common';
 
 // Core
@@ -44,6 +44,7 @@ import { LeadsModule }        from './leads/leads.module';
 import { MediaModule }        from './media/media.module';
 import { NewsletterModule }   from './newsletter/newsletter.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { HandoverApiModule }   from './handover/handover-api.module';
 import { OnboardingModule }   from './onboarding/onboarding.module';
 import { QuickRepliesModule } from './quick-replies/quick-replies.module';
 import { ResellerModule }     from './reseller/reseller.module';
@@ -102,6 +103,8 @@ import { CallsModule }        from './calls/calls.module';
     WalletCoreModule,
     PermissionsModule,
     SuppressionModule,
+    LlmModule,
+    HandoverModule,
 
     // Auth & API access
     AuthModule,
@@ -159,6 +162,7 @@ import { CallsModule }        from './calls/calls.module';
     // Misc
     NewsletterModule,
     NotificationsModule,
+    HandoverApiModule,
     OnboardingModule,
   ],
 })

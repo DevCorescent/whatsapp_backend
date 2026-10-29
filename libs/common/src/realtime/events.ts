@@ -100,6 +100,20 @@ export interface RealtimeEvents {
   'notification:count':   { unread: number };
   'call:incoming':        RtCallIncoming;
   'call:status':          RtCallStatus;
+  'handover:new':         RtHandover;
+  'handover:update':      { id: string; status: string; assignedToId: string | null };
+}
+
+/** A conversation the AI has just passed to a person. */
+export interface RtHandover {
+  id: string;
+  conversationId: string;
+  contactName: string;
+  reason: string;
+  status: string;
+  assignedToId: string | null;
+  departmentId: string | null;
+  requestedAt: string;
 }
 
 export type RealtimeEventName = keyof RealtimeEvents;

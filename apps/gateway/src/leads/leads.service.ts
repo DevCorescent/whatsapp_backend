@@ -1,17 +1,20 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope } from '@lib/common';
-
-function scoreToLabel(score: number): string {
-  if (score === 0)   return 'COLD';
-  if (score <= 30)   return 'WARM';
-  if (score <= 70)   return 'HOT';
-  return 'QUALIFIED';
-}
+import {
+  TenantScope, LeadQualificationService, CRITERIA, DEFAULT_WEIGHTS, scoreLabelFor,
+} from '@lib/common';
+import {
+  buildLeadWhere, leadOrderBy, leadsToCsv,
+  DEFAULT_LEAD_COLUMNS, LEAD_COLUMNS, LEAD_SORTS,
+  type LeadFilterQuery, type LeadRow,
+} from './lead-filters';
 
 @Injectable()
 export class LeadsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly qualification: LeadQualificationService,
+  ) {}
 
   // ── Pipeline Stages ─────────────────────────────────────────────────────────
 
@@ -65,43 +68,200 @@ export class LeadsService {
 
   async listLeads(
     scope: TenantScope,
-    query: {
-      page?: number; limit?: number; search?: string;
-      stageId?: string; assignedToId?: string; scoreLabel?: string;
-    },
+    query: LeadFilterQuery & { page?: number; limit?: number },
   ) {
     const page  = Math.max(1, query.page  ?? 1);
     const limit = Math.min(100, query.limit ?? 20);
-    const skip  = (page - 1) * limit;
+    const where = buildLeadWhere(scope, query);
 
-    const where: any = { tenantId: scope.tenantId, businessId: scope.businessId };
-    if (query.stageId)      where.stageId      = query.stageId;
-    if (query.assignedToId) where.assignedToId = query.assignedToId;
-    if (query.scoreLabel)   where.scoreLabel   = query.scoreLabel;
-    if (query.search) {
-      where.OR = [
-        { title:   { contains: query.search, mode: 'insensitive' } },
-        { contact: { name: { contains: query.search, mode: 'insensitive' } } },
-      ];
-    }
-
-    const [leads, total] = await Promise.all([
+    const [leads, total, stats] = await Promise.all([
       this.prisma.lead.findMany({
         where,
-        skip,
+        skip:    (page - 1) * limit,
         take:    limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: leadOrderBy(query.sort),
         include: {
-          contact:    { select: { name: true, phone: true } },
+          contact:    { select: { name: true, phone: true, company: true } },
           assignedTo: { select: { name: true } },
           stage:      { select: { name: true, color: true, outcome: true } },
           _count:     { select: { activities: true } },
         },
       }),
       this.prisma.lead.count({ where }),
+      // Totals for the matched set, not the page — a filtered list is worth a figure.
+      this.prisma.lead.aggregate({
+        where,
+        _sum: { value: true },
+        _avg: { score: true },
+      }),
     ]);
 
-    return { leads, total, page, limit };
+    return {
+      leads, total, page, limit,
+      totals: {
+        value:    stats._sum.value ?? 0,
+        avgScore: Math.round(stats._avg.score ?? 0),
+      },
+    };
+  }
+
+  /**
+   * What the list can be narrowed by, filled in with this workspace's own stages, people
+   * and tags, so the filter panel never has to guess.
+   */
+  async filterOptions(scope: TenantScope) {
+    const [stages, agents, tags] = await Promise.all([
+      this.prisma.pipelineStage.findMany({
+        where:   { tenantId: scope.tenantId, enabled: true },
+        orderBy: { order: 'asc' },
+        select:  { id: true, name: true, color: true, outcome: true },
+      }),
+      this.prisma.user.findMany({
+        where:   { tenantId: scope.tenantId, isActive: true, removedAt: null },
+        orderBy: { name: 'asc' },
+        select:  { id: true, name: true, role: true },
+      }),
+      this.prisma.tag.findMany({
+        where:   { businessId: scope.businessId },
+        orderBy: { name: 'asc' },
+        select:  { name: true, color: true },
+      }),
+    ]);
+
+    return {
+      stages, agents, tags,
+      scoreLabels:  ['COLD', 'WARM', 'HOT', 'QUALIFIED'],
+      qualifiedBy:  ['AI', 'MANUAL', 'IMPORT', 'API'],
+      outcomes:     ['OPEN', 'WON', 'LOST'],
+      sorts: Object.keys(LEAD_SORTS),
+      columns: LEAD_COLUMNS.map((c) => ({ key: c.key, label: c.label })),
+      defaultColumns: DEFAULT_LEAD_COLUMNS,
+    };
+  }
+
+  /** The same filters, as a CSV. */
+  async exportLeads(scope: TenantScope, query: LeadFilterQuery & { columns?: string; limit?: number }) {
+    const where = buildLeadWhere(scope, query);
+    const leads = await this.prisma.lead.findMany({
+      where,
+      orderBy: leadOrderBy(query.sort),
+      // A hard ceiling: an export is a file somebody downloads, not a data dump.
+      take: Math.min(query.limit ?? 10_000, 10_000),
+      include: {
+        contact:    { select: { name: true, phone: true, email: true, company: true, source: true, tags: { include: { tag: { select: { name: true } } } } } },
+        assignedTo: { select: { name: true, email: true } },
+        stage:      { select: { name: true, outcome: true } },
+      },
+    });
+
+    const columns = (query.columns ?? '').split(',').map((c) => c.trim()).filter(Boolean);
+    return { csv: leadsToCsv(leads as unknown as LeadRow[], columns), count: leads.length };
+  }
+
+  // ── AI qualification settings ──────────────────────────────────────────────
+
+  async getQualificationConfig(scope: TenantScope) {
+    const [config, stages] = await Promise.all([
+      this.prisma.leadQualificationConfig.findUnique({ where: { businessId: scope.businessId } }),
+      this.prisma.pipelineStage.findMany({
+        where:   { tenantId: scope.tenantId, enabled: true },
+        orderBy: { order: 'asc' },
+        select:  { id: true, name: true, color: true },
+      }),
+    ]);
+
+    return {
+      config: config ?? {
+        enabled: false, trigger: 'AFTER_MESSAGES', afterMessages: 6,
+        requalify: true, requalifyAfterHours: 24, keywords: [],
+        minScore: 0, autoCreate: true, autoAssign: true,
+        instructions: null, productContext: null, weights: null, stageMap: null,
+        model: null, notifyAboveScore: 0,
+      },
+      stages,
+      defaultWeights: DEFAULT_WEIGHTS,
+      criteria: CRITERIA,
+      triggers: ['AFTER_MESSAGES', 'ON_HANDOVER', 'ON_CLOSE', 'MANUAL'],
+      bands: [
+        { label: 'QUALIFIED', from: 80 },
+        { label: 'HOT',       from: 65 },
+        { label: 'WARM',      from: 40 },
+        { label: 'COLD',      from: 0 },
+      ],
+    };
+  }
+
+  async saveQualificationConfig(scope: TenantScope, body: Record<string, unknown>) {
+    const int = (v: unknown, lo: number, hi: number, fallback: number) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? Math.max(lo, Math.min(hi, Math.round(n))) : fallback;
+    };
+    const str = (v: unknown, max: number) =>
+      typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null;
+
+    const triggers = ['AFTER_MESSAGES', 'ON_HANDOVER', 'ON_CLOSE', 'MANUAL'];
+
+    // Weights are stored as given and normalised when a score is computed, so a set that
+    // does not add to 100 is still meaningful rather than being rejected.
+    let weights: Record<string, number> | null = null;
+    if (body.weights && typeof body.weights === 'object') {
+      weights = {};
+      for (const key of CRITERIA) {
+        weights[key] = int((body.weights as Record<string, unknown>)[key], 0, 100, DEFAULT_WEIGHTS[key]);
+      }
+    }
+
+    // Only real stages, so a renamed or deleted one cannot strand a score band.
+    let stageMap: Record<string, string> | null = null;
+    if (body.stageMap && typeof body.stageMap === 'object') {
+      const valid = await this.prisma.pipelineStage.findMany({
+        where: { tenantId: scope.tenantId }, select: { id: true },
+      });
+      const ids = new Set(valid.map((s) => s.id));
+      stageMap = {};
+      for (const band of ['qualified', 'hot', 'warm', 'cold']) {
+        const id = (body.stageMap as Record<string, unknown>)[band];
+        if (typeof id === 'string' && ids.has(id)) stageMap[band] = id;
+      }
+    }
+
+    const keywords = Array.isArray(body.keywords)
+      ? [...new Set((body.keywords as unknown[]).map((k) => String(k).trim()).filter((k) => k.length >= 2 && k.length <= 60))].slice(0, 50)
+      : undefined;
+
+    const data = {
+      enabled:             body.enabled === true,
+      trigger:             triggers.includes(String(body.trigger)) ? String(body.trigger) : 'AFTER_MESSAGES',
+      afterMessages:       int(body.afterMessages, 1, 100, 6),
+      requalify:           body.requalify !== false,
+      requalifyAfterHours: int(body.requalifyAfterHours, 1, 720, 24),
+      minScore:            int(body.minScore, 0, 100, 0),
+      autoCreate:          body.autoCreate !== false,
+      autoAssign:          body.autoAssign !== false,
+      instructions:        str(body.instructions, 4000),
+      productContext:      str(body.productContext, 4000),
+      model:               str(body.model, 200),
+      notifyAboveScore:    int(body.notifyAboveScore, 0, 100, 0),
+      ...(weights  ? { weights:  weights as any }  : {}),
+      ...(stageMap ? { stageMap: stageMap as any } : {}),
+      ...(keywords ? { keywords } : {}),
+    };
+
+    return this.prisma.leadQualificationConfig.upsert({
+      where:  { businessId: scope.businessId },
+      create: { tenantId: scope.tenantId, businessId: scope.businessId, ...data, keywords: keywords ?? [] },
+      update: data,
+    });
+  }
+
+  /** Score one conversation now, whatever the configured trigger says. */
+  async qualifyConversation(scope: TenantScope, conversationId: string) {
+    const conversation = await this.prisma.conversation.findFirst({
+      where:  { id: conversationId, tenantId: scope.tenantId, businessId: scope.businessId },
+      select: { id: true },
+    });
+    if (!conversation) throw new NotFoundException('That conversation does not exist here');
+    return this.qualification.qualify(conversationId, { force: true, userId: scope.userId });
   }
 
   async createLead(
@@ -128,7 +288,7 @@ export class LeadsService {
         title:           body.title,
         stageId:         body.stageId,
         score,
-        scoreLabel:      scoreToLabel(score) as any,
+        scoreLabel:      scoreLabelFor(score) as any,
         value:           body.value,
         currency:        body.currency,
         budget:          body.budget,
@@ -181,7 +341,7 @@ export class LeadsService {
 
     if (body.score !== undefined) {
       data.score      = body.score;
-      data.scoreLabel = scoreToLabel(body.score);
+      data.scoreLabel = scoreLabelFor(body.score);
     } else if (body.scoreLabel !== undefined) {
       data.scoreLabel = body.scoreLabel;
     }

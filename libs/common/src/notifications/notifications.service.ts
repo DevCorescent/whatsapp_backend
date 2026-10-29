@@ -14,7 +14,8 @@ export interface NotifyInput {
   tenantId:    string;
   businessId?: string | null;
   recipients:  NotificationRecipients;
-  type:        'NEW_MESSAGE' | 'MISSED_CALL' | 'CAMPAIGN_COMPLETED' | 'CONVERSATION_ASSIGNED' | 'LEAD_ASSIGNED' | 'SYSTEM';
+  type:        'NEW_MESSAGE' | 'MISSED_CALL' | 'CAMPAIGN_COMPLETED' | 'CONVERSATION_ASSIGNED' | 'LEAD_ASSIGNED'
+             | 'HANDOVER_REQUESTED' | 'LEAD_QUALIFIED' | 'SYSTEM';
   title:       string;
   body?:       string | null;
   href?:       string | null;

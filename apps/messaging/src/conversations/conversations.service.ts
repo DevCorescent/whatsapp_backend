@@ -2,7 +2,10 @@ import {
   Injectable, NotFoundException, BadRequestException, Logger,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope, decryptSecret, MessageEventsService, NotificationsService } from '@lib/common';
+import {
+  TenantScope, decryptSecret, MessageEventsService, NotificationsService,
+  HandoverService, LeadQualificationService,
+} from '@lib/common';
 
 const WA_API_VERSION = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
 
@@ -18,6 +21,8 @@ export class ConversationsService {
     private readonly prisma: PrismaService,
     private readonly events: MessageEventsService,
     private readonly notifications: NotificationsService,
+    private readonly handover: HandoverService,
+    private readonly qualification: LeadQualificationService,
   ) {}
 
   // ── List ───────────────────────────────────────────────────────────────────
@@ -155,7 +160,25 @@ export class ConversationsService {
         data:       { conversationId: id },
       });
     }
+
+    // Closing the thread settles any handover waiting on it, and is the last chance to
+    // judge it as a lead for a workspace that scores on close.
+    if (data.status === 'CLOSED') {
+      void this.handover.resolveForConversation(id);
+      void this.qualifyOnClose(id);
+    }
     return updated;
+  }
+
+  /** Score the conversation if this workspace asked for that to happen on close. */
+  private async qualifyOnClose(conversationId: string): Promise<void> {
+    try {
+      if (await this.qualification.isDue(conversationId, 'ON_CLOSE')) {
+        await this.qualification.qualify(conversationId);
+      }
+    } catch (err: any) {
+      this.logger.warn(`Could not score ${conversationId} on close: ${err?.message ?? err}`);
+    }
   }
 
   // ── Send outbound message ──────────────────────────────────────────────────

@@ -172,6 +172,10 @@ enum NotificationType {
   CAMPAIGN_COMPLETED
   CONVERSATION_ASSIGNED
   LEAD_ASSIGNED
+  /// A conversation the AI has passed to a person.
+  HANDOVER_REQUESTED
+  /// A lead the model scored highly enough to be worth someone's attention.
+  LEAD_QUALIFIED
   SYSTEM
 }
 
@@ -243,6 +247,10 @@ model Tenant {
   conversations        Conversation[]
   leads                Lead[]
   pipelineStages       PipelineStage[]
+  departments          Department[]
+  handovers            HandoverRequest[]
+  handoverConfigs      HandoverConfig[]
+  leadQualifications   LeadQualificationConfig[]
   campaigns            Campaign[]
   templates            MessageTemplate[]
   chatbotFlows         ChatbotFlow[]
@@ -317,6 +325,10 @@ model Business {
   quickReplies     QuickReply[]
   contactImports   ContactImport[]
   calls            Call[]
+  departments      Department[]
+  handovers        HandoverRequest[]
+  handoverConfig   HandoverConfig?
+  leadQualification LeadQualificationConfig?
 
   // Multiple WhatsApp numbers/integrations per business
   whatsappIntegrations WhatsAppIntegration[]
@@ -492,6 +504,8 @@ model User {
   notifications     Notification[]
   pushSubscriptions PushSubscription[]
   answeredCalls     Call[]               @relation("CallAnsweredBy")
+  departments       DepartmentMember[]
+  handovers         HandoverRequest[]    @relation("HandoverAssignee")
 
   @@unique([email, tenantId])
   @@map("users")
@@ -721,6 +735,7 @@ model Conversation {
   faqInteractions FaqInteraction[]
   flowRuns        FlowRun[]
   calls           Call[]
+  handovers       HandoverRequest[]
 
   // The WhatsApp number this thread lives on. Replies go out from this number and no
   // other; null for threads that predate multi-number support (legacy credentials).
@@ -812,6 +827,24 @@ model Lead {
   notes           String?
   lostReason      String?
   closedAt        DateTime?
+  /// Where the lead came from: AI, MANUAL, IMPORT or API.
+  qualifiedBy     String         @default("MANUAL")
+  /// When the model last scored this lead, and what it concluded. Kept beside the
+  /// human-editable fields rather than replacing them: an agent who corrects a budget
+  /// should not have their correction overwritten by the next run, so a re-score only
+  /// fills what is still empty.
+  aiQualifiedAt   DateTime?
+  aiScore         Int?
+  /// How sure the model was, 0-100. A low number is worth a human reading the thread.
+  aiConfidence    Int?
+  aiSummary       String?
+  aiIntent        String?
+  aiNextStep      String?
+  aiModel         String?
+  /// Per-criterion scores and the weights applied, so a score can be explained.
+  aiBreakdown     Json?
+  /// The conversation the model read, for a link back to the thread.
+  aiConversationId String?
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @updatedAt
 
@@ -825,7 +858,200 @@ model Lead {
 
   @@index([tenantId, stageId])
   @@index([businessId, stageId])
+  @@index([businessId, scoreLabel])
+  @@index([businessId, aiQualifiedAt])
   @@map("leads")
+}
+
+// ─── DEPARTMENTS ──────────────────────────────────────────────────────────────
+//
+// A group of people a conversation can be handed to: Sales, Support, Billing. Routing
+// targets a department rather than a person so a handover does not depend on one
+// individual being around.
+
+model Department {
+  id          String  @id @default(cuid())
+  tenantId    String
+  businessId  String
+  name        String
+  description String?
+  /// A `StageColor` key from lib/utils, stored as text so the palette can grow.
+  color       String  @default("slate")
+  order       Int     @default(0)
+  enabled     Boolean @default(true)
+  /// Where a handover goes when nothing more specific was chosen.
+  isDefault   Boolean @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  members  DepartmentMember[]
+  handovers HandoverRequest[]
+
+  @@unique([businessId, name])
+  @@index([businessId, order])
+  @@map("departments")
+}
+
+model DepartmentMember {
+  id           String   @id @default(cuid())
+  departmentId String
+  userId       String
+  createdAt    DateTime @default(now())
+
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([departmentId, userId])
+  @@index([userId])
+  @@map("department_members")
+}
+
+// ─── AI TO HUMAN HANDOVER ─────────────────────────────────────────────────────
+
+model HandoverConfig {
+  id         String  @id @default(cuid())
+  tenantId   String
+  businessId String  @unique
+  enabled    Boolean @default(true)
+
+  // ── When to hand over ──
+  /// The customer asks for a person, in any of the phrasings below.
+  onCustomerRequest Boolean  @default(true)
+  requestKeywords   String[]
+  /// The model says it is unsure, below this confidence out of 100.
+  onAiUnsure        Boolean  @default(false)
+  aiUnsureThreshold Int      @default(50)
+  /// After this many AI replies in a row with no human involved. 0 is off.
+  afterAiReplies    Int      @default(0)
+  /// The customer sounds unhappy.
+  onNegativeSentiment Boolean @default(false)
+  /// Outside the business hours set in general settings.
+  offHours          Boolean  @default(false)
+
+  // ── Who gets it ──
+  /// LEAST_BUSY, ROUND_ROBIN, DEPARTMENT or SPECIFIC_USER.
+  strategy     String  @default("LEAST_BUSY")
+  departmentId String?
+  assignToId   String?
+  /// Skip people who are not connected right now, and fall back to everyone if none are.
+  onlineOnly   Boolean @default(false)
+
+  // ── What happens ──
+  /// Stop the AI replying once a person owns the thread.
+  pauseAi         Boolean @default(true)
+  notifyAgent     Boolean @default(true)
+  notifyManagers  Boolean @default(false)
+  /// Sent to the customer when the handover happens. Empty sends nothing.
+  customerMessage String?
+  /// Tell managers if nobody has accepted after this many minutes. 0 is off.
+  escalateAfterMinutes Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@map("handover_configs")
+}
+
+/// One conversation handed from the AI to a person, and what became of it.
+model HandoverRequest {
+  id             String  @id @default(cuid())
+  tenantId       String
+  businessId     String
+  conversationId String
+  contactId      String?
+
+  /// CUSTOMER_REQUEST, FLOW_NODE, AI_UNSURE, AFTER_REPLIES, NEGATIVE_SENTIMENT,
+  /// OFF_HOURS or MANUAL.
+  reason String
+  /// What the flow or the agent wrote to explain it.
+  note   String?
+  /// The customer's own words that triggered it, for context on the queue screen.
+  trigger String?
+
+  departmentId String?
+  assignedToId String?
+  /// PENDING when nobody could be found, ASSIGNED once it has an owner, ACCEPTED when
+  /// they opened it, RESOLVED when the conversation was closed, CANCELLED if the AI
+  /// took it back.
+  status String @default("PENDING")
+
+  requestedAt DateTime  @default(now())
+  assignedAt  DateTime?
+  acceptedAt  DateTime?
+  resolvedAt  DateTime?
+  /// Set once managers have been told nobody picked it up.
+  escalatedAt DateTime?
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  business     Business     @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  department   Department?  @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  assignedTo   User?        @relation("HandoverAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+
+  @@index([businessId, status, requestedAt])
+  @@index([conversationId])
+  @@map("handover_requests")
+}
+
+// ─── AI LEAD QUALIFICATION ────────────────────────────────────────────────────
+//
+// How a business wants the model to judge a conversation. One row per business, created
+// on first save; absent means the feature has never been switched on.
+
+model LeadQualificationConfig {
+  id         String  @id @default(cuid())
+  tenantId   String
+  businessId String  @unique
+  enabled    Boolean @default(false)
+
+  /// AFTER_MESSAGES, ON_HANDOVER, ON_CLOSE or MANUAL — when a conversation gets scored.
+  trigger       String @default("AFTER_MESSAGES")
+  /// For AFTER_MESSAGES: how many messages from the customer before the first run.
+  afterMessages Int    @default(6)
+  /// Score a conversation again later as it develops, and how long to wait first.
+  requalify            Boolean @default(true)
+  requalifyAfterHours  Int     @default(24)
+
+  /// Only look at conversations mentioning one of these. Empty means every conversation.
+  keywords String[]
+
+  /// Below this score no lead is created at all, so a browsing customer does not become
+  /// a row somebody has to clear up. 0 creates one every time.
+  minScore   Int     @default(0)
+  autoCreate Boolean @default(true)
+  /// Give the lead to whoever is handling the conversation.
+  autoAssign Boolean @default(true)
+
+  /// What this business counts as a good lead, in its own words. Added to the prompt.
+  instructions String?
+  /// What the business sells, so the model can judge fit.
+  productContext String?
+
+  /// Criterion weights out of 100: budget, authority, need, timeline, engagement.
+  /// Null uses an even split across the five.
+  weights Json?
+
+  /// Which pipeline stage a score band lands in: { qualified, hot, warm, cold }.
+  stageMap Json?
+
+  /// Override the model for scoring. Null uses the business's reply model.
+  model String?
+
+  /// Tell managers when a lead scores at or above this. 0 is off.
+  notifyAboveScore Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@map("lead_qualification_configs")
 }
 
 // ─── PIPELINE STAGE (dynamic lead pipeline) ──────────────────────────────────

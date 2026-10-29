@@ -8,7 +8,9 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '@lib/prisma';
 import { Prisma } from '@prisma/client';
-import { decryptSecret, MessageEventsService } from '@lib/common';
+import {
+  decryptSecret, MessageEventsService, HandoverService, LeadQualificationService, LlmService,
+} from '@lib/common';
 import { runFlowStep } from './chatbot/engine';
 import { toFlowDocument } from './chatbot/types';
 import type { FlowVariables } from './chatbot/engine';
@@ -69,6 +71,9 @@ export class InboundPipelineService {
     private readonly prisma:  PrismaService,
     private readonly config:  ConfigService,
     private readonly events:  MessageEventsService,
+    private readonly handover: HandoverService,
+    private readonly qualification: LeadQualificationService,
+    private readonly llm: LlmService,
   ) {}
 
   // ── Entry point ─────────────────────────────────────────────────────────────
@@ -124,6 +129,11 @@ export class InboundPipelineService {
 
     this.logger.log(`Pipeline start conv=${opts.conversationId} creds=${creds ? 'ok' : 'null'}`);
 
+    // ── 1b. Does this message need a person? ─────────────────────────────────
+    // Checked before the flow and the AI, because someone who has asked for a human
+    // should not be answered by a robot first.
+    if (await this.checkHandoverTriggers(opts, conversation, contact, creds)) return;
+
     // ── 2. Chatbot flow ──────────────────────────────────────────────────────
     const flowHandled = await this.executeFlow(
       opts.tenantId,
@@ -155,6 +165,157 @@ export class InboundPipelineService {
         this.logger.error(`handleAutoReply failed conv=${opts.conversationId}`, err?.message ?? err),
       );
       if (delayMs > 0) setTimeout(run, delayMs); else await run();
+    }
+
+    // ── 4. Score the conversation as a lead ──────────────────────────────────
+    // Last, and never blocking the reply: the customer should not wait on a model that
+    // is only writing to our own pipeline.
+    void this.maybeQualify(opts.conversationId, 'AFTER_MESSAGES');
+  }
+
+  // ── Handing over to a person ────────────────────────────────────────────────
+
+  /**
+   * The triggers a business can switch on, in the order they are worth checking.
+   *
+   * Returns true when the conversation now belongs to a person, which stops the flow and
+   * the auto-reply from running over the top of them.
+   */
+  private async checkHandoverTriggers(
+    opts: { tenantId: string; businessId: string; conversationId: string; content: string },
+    conversation: any,
+    contact: any,
+    creds: WACreds | null,
+  ): Promise<boolean> {
+    const config = await this.handover.configFor(opts.businessId).catch(() => null);
+    if (config && !config.enabled) return false;
+
+    // Already with a person and the AI is off: nothing more to decide.
+    if (conversation.assignedToId && conversation.isAiActive === false) return false;
+
+    let reason: 'CUSTOMER_REQUEST' | 'AFTER_REPLIES' | 'OFF_HOURS' | 'AI_UNSURE' | 'NEGATIVE_SENTIMENT' | null = null;
+    let trigger: string | null = null;
+
+    if (config?.onCustomerRequest !== false) {
+      const matched = this.handover.asksForHuman(opts.content, config);
+      if (matched) { reason = 'CUSTOMER_REQUEST'; trigger = opts.content.slice(0, 500); }
+    }
+
+    if (!reason && config?.afterAiReplies && config.afterAiReplies > 0) {
+      // Consecutive AI replies since the last time a person said anything.
+      const lastHuman = await this.prisma.message.findFirst({
+        where:   { conversationId: opts.conversationId, direction: 'OUTBOUND', sentById: { not: null } },
+        orderBy: { createdAt: 'desc' },
+        select:  { createdAt: true },
+      });
+      const aiReplies = await this.prisma.message.count({
+        where: {
+          conversationId: opts.conversationId,
+          direction:      'OUTBOUND',
+          sentById:       null,
+          ...(lastHuman ? { createdAt: { gt: lastHuman.createdAt } } : {}),
+        },
+      });
+      if (aiReplies >= config.afterAiReplies) {
+        reason = 'AFTER_REPLIES';
+        trigger = `${aiReplies} AI replies with no human involved`;
+      }
+    }
+
+    if (!reason && config?.offHours && !(await this.withinBusinessHours(opts.tenantId, opts.businessId))) {
+      reason = 'OFF_HOURS';
+    }
+
+    // Both of these need the model's read of the message, so they share one call and it
+    // only happens for a business that asked for it.
+    if (!reason && (config?.onAiUnsure || config?.onNegativeSentiment)) {
+      const assessment = await this.handover.assess(opts.content);
+      if (assessment) {
+        if (config.onAiUnsure && (assessment.needsHuman || assessment.confidence < config.aiUnsureThreshold)) {
+          reason = 'AI_UNSURE';
+          trigger = assessment.needsHuman
+            ? 'The model judged this as needing a person'
+            : `The model was only ${assessment.confidence}% confident it could answer`;
+        } else if (config.onNegativeSentiment && assessment.sentiment === 'negative') {
+          reason = 'NEGATIVE_SENTIMENT';
+          trigger = opts.content.slice(0, 500);
+        }
+      }
+    }
+
+    if (!reason) return false;
+
+    const outcome = await this.handover.request({
+      conversationId: opts.conversationId,
+      reason,
+      trigger,
+    }).catch((err: any) => {
+      this.logger.error(`Handover failed for ${opts.conversationId}: ${err?.message ?? err}`);
+      return null;
+    });
+    if (!outcome) return false;
+
+    // Tell the customer somebody is coming, if the business wrote a line for it.
+    const message = config?.customerMessage?.trim();
+    if (message && creds) {
+      await this.sendText(creds, contact.phone, message).catch(() => {});
+    }
+
+    void this.events.conversationUpdated(opts.conversationId);
+    // A handover is also a good moment to judge the lead, if that is the chosen trigger.
+    void this.maybeQualify(opts.conversationId, 'ON_HANDOVER');
+    return true;
+  }
+
+  /** Whether now is inside the business hours set in general settings. */
+  private async withinBusinessHours(tenantId: string, businessId: string): Promise<boolean> {
+    const settings = await this.prisma.tenantSettings.findFirst({
+      where:  { tenantId },
+      select: { businessHoursStart: true, businessHoursEnd: true, businessDays: true },
+    }).catch(() => null);
+    const business = await this.prisma.business.findUnique({
+      where: { id: businessId }, select: { timezone: true },
+    }).catch(() => null);
+
+    // Nothing configured means always open, which is how the rest of the app reads it.
+    if (!settings?.businessHoursStart || !settings?.businessHoursEnd) return true;
+
+    const zone = business?.timezone || 'Asia/Kolkata';
+    const now = new Date();
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: zone, hour: '2-digit', minute: '2-digit', weekday: 'short', hour12: false,
+    }).formatToParts(now);
+    const hour   = Number(parts.find((p) => p.type === 'hour')?.value ?? '0');
+    const minute = Number(parts.find((p) => p.type === 'minute')?.value ?? '0');
+    const weekday = parts.find((p) => p.type === 'weekday')?.value ?? '';
+
+    const dayIndex = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(weekday);
+    const days = Array.isArray(settings.businessDays) ? (settings.businessDays as number[]) : null;
+    if (days?.length && dayIndex >= 0 && !days.includes(dayIndex)) return false;
+
+    const toMinutes = (hhmm: string) => {
+      const [h, m] = hhmm.split(':').map(Number);
+      return (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0);
+    };
+    const nowMinutes = hour * 60 + minute;
+    const start = toMinutes(settings.businessHoursStart);
+    const end   = toMinutes(settings.businessHoursEnd);
+    // An end before the start means the window runs past midnight.
+    return end >= start
+      ? nowMinutes >= start && nowMinutes <= end
+      : nowMinutes >= start || nowMinutes <= end;
+  }
+
+  /** Score the conversation when the business's trigger says to, never blocking a reply. */
+  private async maybeQualify(conversationId: string, trigger: 'AFTER_MESSAGES' | 'ON_HANDOVER' | 'ON_CLOSE'): Promise<void> {
+    try {
+      if (!(await this.qualification.isDue(conversationId, trigger))) return;
+      const result = await this.qualification.qualify(conversationId);
+      if (result.status === 'created' || result.status === 'updated') {
+        this.logger.log(`Lead ${result.status} from ${conversationId}: ${result.score} (${result.label})`);
+      }
+    } catch (err: any) {
+      this.logger.warn(`Lead qualification failed for ${conversationId}: ${err?.message ?? err}`);
     }
   }
 
@@ -294,10 +455,18 @@ export class InboundPipelineService {
       data:  { activeFlowId: null, activeNodeId: null, flowVars: Prisma.JsonNull },
     });
 
-    // Handoff: assign to a human agent.
+    // Handoff: the node's own department, team or note decides where it goes. These were
+    // collected by the builder and then ignored; the handover service honours them.
     if (result.handoff) {
-      await this.assignConversationToAgent(conversation).catch(() => {});
+      const target = result.actions.find((a) => a.type === 'handoff')?.handoff;
+      await this.handover.request({
+        conversationId: conversation.id,
+        reason:         'FLOW_NODE',
+        note:           target?.note ?? null,
+        departmentName: target?.department ?? target?.team ?? target?.queue ?? null,
+      }).catch((err: any) => this.logger.error(`Flow handover failed for ${conversation.id}: ${err?.message ?? err}`));
       void this.events.conversationUpdated(conversation.id);
+      void this.maybeQualify(conversation.id, 'ON_HANDOVER');
       return true;
     }
 
@@ -612,52 +781,14 @@ export class InboundPipelineService {
     temperature?:  number | null,
     maxTokens?:    number | null,
   ): Promise<string | null> {
-    const openRouterKey = this.config.get<string>('OPENROUTER_API_KEY', '');
-    const groqKey       = this.config.get<string>('GROQ_API_KEY', '');
-    const apiKey        = openRouterKey || groqKey;
-    if (!apiKey) return null;
-
-    const endpoint = openRouterKey
-      ? 'https://openrouter.ai/api/v1/chat/completions'
-      : 'https://api.groq.com/openai/v1/chat/completions';
-
-    const defaultModel = openRouterKey
-      ? (this.config.get<string>('OPENROUTER_MODEL') ?? 'meta-llama/llama-3.3-70b-instruct')
-      : (this.config.get<string>('GROQ_MODEL') ?? 'llama-3.3-70b-versatile');
-
-    // For OpenRouter, a model id must contain "/" to be valid; otherwise use the default.
-    const resolvedModel = openRouterKey
-      ? (model?.includes('/') ? model : defaultModel)
-      : defaultModel;
-
-    const messages = [{ role: 'system', content: systemPrompt }, ...history];
-
-    this.logger.log(`generateReply model=${resolvedModel} msgs=${history.length}`);
-    try {
-      const res = await fetch(endpoint, {
-        method:  'POST',
-        headers: {
-          'Content-Type':  'application/json',
-          Authorization:   `Bearer ${apiKey}`,
-          ...(openRouterKey ? { 'HTTP-Referer': 'https://whatscrm.app', 'X-Title': 'WhatsCRM' } : {}),
-        },
-        body: JSON.stringify({
-          model:       resolvedModel,
-          messages,
-          max_tokens:  maxTokens ?? 500,
-          temperature: temperature ?? 0.7,
-        }),
-      });
-      if (!res.ok) {
-        this.logger.error(`LLM ${res.status}: ${await res.text()}`);
-        return null;
-      }
-      const json: any = await res.json();
-      return json?.choices?.[0]?.message?.content ?? null;
-    } catch (err: any) {
-      this.logger.error('generateReply fetch failed', err?.message);
-      return null;
-    }
+    // Provider selection, model rules and failure handling all live in LlmService, which
+    // lead qualification uses as well. Keeping two copies meant the next provider change
+    // had to be made twice.
+    this.logger.log(`generateReply model=${model ?? 'default'} msgs=${history.length}`);
+    return this.llm.complete(
+      [{ role: 'system', content: systemPrompt }, ...history],
+      { model, temperature, maxTokens },
+    );
   }
 
   private async callAi(
@@ -674,39 +805,6 @@ export class InboundPipelineService {
       temperature,
     );
     return reply ?? '';
-  }
-
-  // ── Handoff assignment ──────────────────────────────────────────────────────
-
-  private async assignConversationToAgent(conversation: any): Promise<void> {
-    if (conversation.assignedToId) {
-      await this.prisma.conversation.update({
-        where: { id: conversation.id },
-        data:  { isAiActive: false },
-      });
-      return;
-    }
-
-    const agents = await this.prisma.user.findMany({
-      where:  { tenantId: conversation.tenantId, isActive: true, role: { in: ['AGENT', 'MANAGER', 'ADMIN', 'TENANT_OWNER'] } },
-      select: { id: true, _count: { select: { assignedConvs: { where: { status: { in: ['OPEN', 'ASSIGNED'] } } } } } },
-    });
-
-    let assignedToId: string | null = null;
-    if (agents.length > 0) {
-      agents.sort((a: any, b: any) =>
-        a._count.assignedConvs - b._count.assignedConvs || a.id.localeCompare(b.id),
-      );
-      assignedToId = agents[0].id;
-    }
-
-    await this.prisma.conversation.update({
-      where: { id: conversation.id },
-      data:  {
-        isAiActive:   false,
-        ...(assignedToId ? { assignedToId, status: 'ASSIGNED' } : {}),
-      },
-    });
   }
 
 }
