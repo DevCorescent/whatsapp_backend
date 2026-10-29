@@ -132,7 +132,15 @@ export class MediaService {
     if (!mediaId) throw new NotFoundException('This message has no media');
 
     const { accessToken } = await this.integrationFor(scope.businessId, message.conversation?.whatsappIntegrationId);
-    const { buffer, info } = await downloadMetaMedia(mediaId, accessToken);
+    let downloaded: Awaited<ReturnType<typeof downloadMetaMedia>>;
+    try {
+      downloaded = await downloadMetaMedia(mediaId, accessToken);
+    } catch (err: any) {
+      // Meta media ids expire (~30 days) — a stale one is "gone", not a server fault.
+      this.logger.warn(`Meta media ${mediaId} unavailable for message ${messageId}: ${String(err?.message ?? err).slice(0, 160)}`);
+      throw new NotFoundException('This attachment is no longer available from WhatsApp');
+    }
+    const { buffer, info } = downloaded;
     return {
       kind: 'bytes', buffer,
       contentType: info.mimeType || message.mediaMimeType || 'application/octet-stream',

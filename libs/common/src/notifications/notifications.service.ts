@@ -23,9 +23,9 @@ export interface NotifyInput {
   dedupeKey?:  string;
 }
 
-/** Everyone who should hear about customer activity by default. */
-export const AGENT_ROLES = ['TENANT_OWNER', 'OWNER', 'ADMIN', 'MANAGER', 'AGENT'];
-export const MANAGER_ROLES = ['TENANT_OWNER', 'OWNER', 'ADMIN', 'MANAGER', 'MARKETING_USER'];
+/** Everyone who should hear about customer activity by default (UserRole enum values only). */
+export const AGENT_ROLES = ['TENANT_OWNER', 'ADMIN', 'MANAGER', 'AGENT'];
+export const MANAGER_ROLES = ['TENANT_OWNER', 'ADMIN', 'MANAGER', 'MARKETING_USER'];
 
 @Injectable()
 export class NotificationsService {
