@@ -192,6 +192,19 @@ export class HandoverController {
     return this.departments.list(scope);
   }
 
+  @Get('departments/members')
+  @RequiresPermission('settings.manage')
+  @ApiOperation({ summary: 'The people who can be put in a department' })
+  async availableMembers(@CurrentTenant() scope: TenantScope) {
+    // Its own route rather than borrowing the lead filters, which need a different
+    // permission: someone who may edit departments should not also need Contacts.
+    return this.prisma.user.findMany({
+      where:   { tenantId: scope.tenantId, isActive: true, removedAt: null },
+      orderBy: { name: 'asc' },
+      select:  { id: true, name: true, email: true, role: true, avatar: true },
+    });
+  }
+
   @Post('departments')
   @RequiresPermission('settings.manage')
   @ApiOperation({ summary: 'Create a department' })
