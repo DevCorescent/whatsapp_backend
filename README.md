@@ -253,7 +253,38 @@ GROQ_API_KEY=
 GROQ_MODEL=llama-3.1-8b-instant
 OPENROUTER_API_KEY=             # optional fallback
 OPENROUTER_MODEL=               # optional
+
+# ── Chat media storage (S3-compatible: AWS S3, Cloudflare R2, Supabase, MinIO) ──
+# Optional. Without it, attachments stream from Meta on every view and vanish
+# once Meta expires them (~30 days). With it, inbound media is copied into the
+# bucket by a queue job and outbound uploads are stored alongside Meta's copy.
+STORAGE_ENDPOINT=               # e.g. https://<account>.r2.cloudflarestorage.com (leave empty for AWS)
+STORAGE_REGION=auto
+STORAGE_BUCKET=
+STORAGE_ACCESS_KEY=
+STORAGE_SECRET_KEY=
+STORAGE_PUBLIC_URL=             # public base URL of the bucket/CDN; empty = presigned links
+
+# ── Web push (desktop notifications) ───────────────────────
+# Generate once with: npx web-push generate-vapid-keys
+VAPID_PUBLIC_KEY=
+VAPID_PRIVATE_KEY=
+VAPID_SUBJECT=mailto:support@yourdomain.com
+
+# ── WhatsApp calling (WebRTC) ───────────────────────────────
+# Google STUN is always used. Add TURN for agents behind strict NAT/VPN.
+TURN_URLS=                      # optional, comma-separated: turn:host:3478?transport=udp,turns:host:5349
+TURN_USERNAME=                  # optional
+TURN_CREDENTIAL=                # optional
 ```
+
+Realtime (Socket.IO) runs on the gateway's own port under `/rt`; the browser connects to
+`NEXT_PUBLIC_BACKEND_URL` directly, so `FRONTEND_URL` (comma-separated for several
+origins) must list every dashboard origin. Localhost origins are always allowed.
+
+To receive WhatsApp calls: subscribe the Meta app to the **`calls`** webhook field, enable
+calling on the number from Settings → WhatsApp (the number needs the 2,000/day messaging
+tier), and switch **WhatsApp calling** on in the tenant's plan.
 
 ---
 

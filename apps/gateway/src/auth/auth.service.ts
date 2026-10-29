@@ -119,6 +119,16 @@ export class AuthService {
           select: {
             slug: true, name: true, accountType: true,
             resellerType: true, parentId: true, isActive: true,
+            subscription: {
+              select: {
+                plan: {
+                  select: {
+                    name: true, displayName: true, aiEnabled: true, ragEnabled: true, whiteLabel: true,
+                    advancedAi: true, allowExport: true, callingEnabled: true,
+                  },
+                },
+              },
+            },
           },
         },
       },
@@ -126,7 +136,17 @@ export class AuthService {
 
     if (!user?.isActive || !user.tenant.isActive) return null;
 
+    const plan = user.tenant.subscription?.plan ?? null;
+
     return {
+      plan: plan ? {
+        name:        plan.name,
+        displayName: plan.displayName,
+        features: {
+          aiEnabled: plan.aiEnabled, ragEnabled: plan.ragEnabled, whiteLabel: plan.whiteLabel,
+          advancedAi: plan.advancedAi, allowExport: plan.allowExport, callingEnabled: plan.callingEnabled,
+        },
+      } : null,
       id:             user.id,
       email:          user.email,
       name:           user.name,

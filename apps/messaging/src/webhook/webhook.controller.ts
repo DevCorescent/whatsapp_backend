@@ -5,6 +5,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { Request } from 'express';
 import { WebhookService } from './webhook.service';
+import { CallsWebhookService } from '../calls/calls-webhook.service';
 import type { WAWebhookPayload } from './webhook.types';
 
 @Controller('webhook/whatsapp')
@@ -13,6 +14,7 @@ export class WebhookController {
 
   constructor(
     private readonly webhookService: WebhookService,
+    private readonly calls:          CallsWebhookService,
     private readonly cfg:            ConfigService,
   ) {}
 
@@ -62,6 +64,12 @@ export class WebhookController {
             await this.webhookService.processChangeValue(change.value).catch(err =>
               this.logger.error(`Entry ${entry.id} processing error`, err),
             );
+          } else if (change.field === 'calls') {
+            await this.calls.process(change.value).catch(err =>
+              this.logger.error(`Entry ${entry.id} calls processing error`, err),
+            );
+          } else {
+            this.logger.debug(`Webhook field ignored: ${change.field}`);
           }
         }
       }

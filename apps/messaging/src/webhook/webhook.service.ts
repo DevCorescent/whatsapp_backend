@@ -167,8 +167,49 @@ export class WebhookService {
     }
 
     for (const status of value.statuses ?? []) {
+      if (status.type === 'call') continue; // call statuses belong to the Calling API flow
       this.processStatus(identity.tenantId, status);
     }
+  }
+
+  /** Shared with the Calling API: the contact row and open thread for a WhatsApp user. */
+  async resolveContactAndConversation(
+    identity: { tenantId: string; businessId: string; whatsappIntegrationId: string | null },
+    phone: string,
+    profile?: { name?: string | null; waId?: string | null },
+  ) {
+    const contact = await this.prisma.contact.upsert({
+      where:  { phone_businessId: { phone, businessId: identity.businessId } },
+      create: {
+        tenantId:   identity.tenantId,
+        businessId: identity.businessId,
+        phone,
+        waId:       profile?.waId ?? phone,
+        name:       profile?.name ?? '',
+      },
+      update: {
+        ...(profile?.name ? { name: profile.name } : {}),
+        ...(profile?.waId ? { waId: profile.waId } : {}),
+      },
+    });
+
+    let conversation = await this.prisma.conversation.findFirst({
+      where:   { tenantId: identity.tenantId, businessId: identity.businessId, contactId: contact.id },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!conversation) {
+      conversation = await this.prisma.conversation.create({
+        data: {
+          tenantId:              identity.tenantId,
+          businessId:            identity.businessId,
+          contactId:             contact.id,
+          whatsappIntegrationId: identity.whatsappIntegrationId,
+          isAiActive:            false,
+          status:                'OPEN',
+        },
+      });
+    }
+    return { contact, conversation };
   }
 
   // ── Inbound message — direct DB write, no queue ───────────────────────────
@@ -186,39 +227,10 @@ export class WebhookService {
     const preview     = this.extractPreview(message);
     const media       = mediaOf(message);
 
-    // 1. Upsert contact
-    const contactRow = await this.prisma.contact.upsert({
-      where:  { phone_businessId: { phone, businessId: identity.businessId } },
-      create: {
-        tenantId:   identity.tenantId,
-        businessId: identity.businessId,
-        phone,
-        waId:       contactWaId ?? phone,
-        name:       contactName ?? '',
-      },
-      update: {
-        ...(contactName ? { name: contactName } : {}),
-        ...(contactWaId ? { waId: contactWaId } : {}),
-      },
-    });
-
-    // 2. Find or create conversation
-    let conversation = await this.prisma.conversation.findFirst({
-      where:   { tenantId: identity.tenantId, businessId: identity.businessId, contactId: contactRow.id },
-      orderBy: { createdAt: 'desc' },
-    });
-    if (!conversation) {
-      conversation = await this.prisma.conversation.create({
-        data: {
-          tenantId:              identity.tenantId,
-          businessId:            identity.businessId,
-          contactId:             contactRow.id,
-          whatsappIntegrationId: identity.whatsappIntegrationId,
-          isAiActive:            false,
-          status:                'OPEN',
-        },
-      });
-    }
+    // 1–2. Contact row + open thread
+    const { contact: contactRow, conversation } = await this.resolveContactAndConversation(
+      identity, phone, { name: contactName, waId: contactWaId },
+    );
 
     // 3. Save message + update conversation (idempotent via waMessageId unique)
     let savedId: string;

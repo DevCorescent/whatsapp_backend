@@ -49,6 +49,7 @@ import { SegmentsModule }     from './segments/segments.module';
 import { TagsModule }         from './tags/tags.module';
 import { TicketsModule }      from './tickets/tickets.module';
 import { WebhooksModule }     from './webhooks/webhooks.module';
+import { CallsModule }        from './calls/calls.module';
 
 @Module({
   controllers: [GatewayController],
@@ -126,6 +127,7 @@ import { WebhooksModule }     from './webhooks/webhooks.module';
     // Contacts & conversations
     ContactsModule,
     ConversationsModule,
+    CallsModule,
 
     // Campaigns, templates & media
     CampaignsModule,

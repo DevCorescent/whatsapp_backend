@@ -6,6 +6,7 @@ import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { Request, Response } from 'express';
 import { WebhookService } from '../../../../apps/messaging/src/webhook/webhook.service';
+import { CallsWebhookService } from '../../../../apps/messaging/src/calls/calls-webhook.service';
 import { BillingService } from '../../../../apps/billing/src/billing.service';
 import type { WAWebhookPayload } from '../../../../apps/messaging/src/webhook/webhook.types';
 
@@ -16,6 +17,7 @@ export class GatewayWebhookController {
 
   constructor(
     private readonly webhook: WebhookService,
+    private readonly calls:   CallsWebhookService,
     private readonly billing: BillingService,
     private readonly cfg:     ConfigService,
   ) {}
@@ -73,6 +75,12 @@ export class GatewayWebhookController {
             await this.webhook.processChangeValue(change.value).catch(err =>
               this.logger.error(`Entry ${entry.id} processing error`, err),
             );
+          } else if (change.field === 'calls') {
+            await this.calls.process(change.value).catch(err =>
+              this.logger.error(`Entry ${entry.id} calls processing error`, err),
+            );
+          } else {
+            this.logger.debug(`Webhook field ignored: ${change.field}`);
           }
         }
       }

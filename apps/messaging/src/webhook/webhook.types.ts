@@ -19,6 +19,26 @@ export interface WAChangeValue {
   contacts?: WAContact[];
   messages?: WAMessage[];
   statuses?: WAStatus[];
+  /** `calls` webhook field — see WACall. */
+  calls?: WACall[];
+  errors?: Array<{ code: number; title?: string; message?: string; error_data?: { details?: string } }>;
+}
+
+/** One entry of the `calls` webhook field (Meta Calling API). */
+export interface WACall {
+  id: string;                 // wacid.…
+  from?: string;              // caller wa_id (user-initiated)
+  to: string;                 // business display number
+  from_user_id?: string;
+  event: 'connect' | 'terminate' | string;
+  timestamp: string;
+  direction: 'USER_INITIATED' | 'BUSINESS_INITIATED';
+  session?: { sdp_type: 'offer' | 'answer'; sdp: string };
+  status?: 'COMPLETED' | 'FAILED' | string;
+  start_time?: string;
+  end_time?: string;
+  duration?: number;
+  biz_opaque_callback_data?: string;
 }
 
 export interface WAContact {
@@ -64,8 +84,10 @@ export function mediaOf(message: WAMessage): { mediaId: string; mimeType?: strin
 }
 
 export interface WAStatus {
-  id: string;        // wamid
-  status: string;    // sent | delivered | read | failed
+  id: string;        // wamid (or wacid for call statuses)
+  status: string;    // sent | delivered | read | failed | RINGING | ACCEPTED | REJECTED
+  /** 'call' for Calling API status updates; absent for message statuses. */
+  type?: string;
   timestamp: string;
   recipient_id: string;
   conversation?: { id: string; origin?: { type: string } };

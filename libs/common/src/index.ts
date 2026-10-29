@@ -1,5 +1,6 @@
 export * from './decorators/tenant.decorator';
 export * from './guards/jwt-auth.guard';
+export * from './guards/plan-feature.guard';
 export * from './permissions';
 export * from './webhook-dispatch.service';
 export * from './crypto';
