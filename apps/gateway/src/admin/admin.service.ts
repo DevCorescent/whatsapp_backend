@@ -2,7 +2,7 @@ import {
   Injectable, NotFoundException, ForbiddenException, BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope, PERMISSIONS, accountCeiling, roleDefaults, resolvePermission } from '@lib/common';
+import { TenantScope, PERMISSIONS, accountCeiling, roleDefaults, resolvePermission, MessageRatesService } from '@lib/common';
 import * as bcrypt from 'bcryptjs';
 
 // ── CMS section metadata (mirrored from lib/cms/sections.ts — no Next.js imports) ──
@@ -30,7 +30,10 @@ const CMS_SECTION_KEYS = Object.keys(CMS_SECTIONS_META);
 
 @Injectable()
 export class AdminService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly rates:  MessageRatesService,
+  ) {}
 
   private guard(scope: TenantScope) {
     if (scope.role !== 'SUPER_ADMIN') throw new ForbiddenException('Super admin only');
@@ -329,28 +332,51 @@ export class AdminService {
 
   async listRates(scope: TenantScope) {
     this.guard(scope);
-    const RATE_CATEGORIES = ['WA_MARKETING', 'WA_UTILITY', 'WA_AUTHENTICATION'];
-    const dbRates = await this.prisma.messageRate.findMany({ where: { resellerId: null } });
-    const byCategory = new Map(dbRates.map(r => [r.category as string, r.priceMinor]));
-    return {
-      success: true,
-      data: RATE_CATEGORIES.map(category => ({ category, priceMinor: byCategory.get(category) ?? null })),
-    };
+    const [platform, customers] = await Promise.all([
+      this.rates.listPlatform(),
+      this.rates.listCustomerOverrides(),
+    ]);
+    return { success: true, data: platform, customers };
   }
 
-  async updateRate(scope: TenantScope, category: string, resellerId: string | null | undefined, priceMinor: number | null | undefined) {
+  /** Effective prices for one account, with the platform/reseller values it inherits. */
+  async getTenantRates(scope: TenantScope, tenantId: string) {
     this.guard(scope);
-    if (priceMinor == null) {
-      await this.prisma.messageRate.deleteMany({
-        where: { category: category as any, resellerId: resellerId ?? null },
-      });
+    const tenant = await this.prisma.tenant.findUnique({
+      where:  { id: tenantId },
+      select: { id: true, name: true, accountType: true, parent: { select: { id: true, name: true } } },
+    });
+    if (!tenant) throw new NotFoundException('Account not found');
+    return { success: true, data: { tenant, rates: await this.rates.resolveAll(tenantId) } };
+  }
+
+  /**
+   * Set or clear a price. The scope is whichever id is supplied: `tenantId` prices one
+   * account, `resellerId` prices a reseller's clients, neither sets the platform default.
+   * A null `priceMinor` removes the row so the next scope up applies again.
+   */
+  async updateRate(
+    scope: TenantScope,
+    category: string,
+    resellerId: string | null | undefined,
+    priceMinor: number | null | undefined,
+    tenantId?: string | null,
+  ) {
+    this.guard(scope);
+    const price = priceMinor ?? null;
+
+    if (tenantId) {
+      const exists = await this.prisma.tenant.findUnique({ where: { id: tenantId }, select: { id: true } });
+      if (!exists) throw new NotFoundException('Account not found');
+      await this.rates.setCustomer(tenantId, category, price);
+    } else if (resellerId) {
+      const reseller = await this.prisma.tenant.findUnique({ where: { id: resellerId }, select: { accountType: true } });
+      if (reseller?.accountType !== 'RESELLER') throw new BadRequestException('That account is not a reseller');
+      await this.rates.setReseller(resellerId, category, price);
     } else {
-      await this.prisma.messageRate.upsert({
-        where:  { category_resellerId: { category: category as any, resellerId: (resellerId ?? null) as any } },
-        create: { category: category as any, resellerId: resellerId ?? null, priceMinor },
-        update: { priceMinor },
-      });
+      await this.rates.setPlatform(category, price);
     }
+
     await this.prisma.auditLog.create({
       data: {
         tenantId:   scope.tenantId,
@@ -358,7 +384,7 @@ export class AdminService {
         action:     'RATE_UPDATED',
         resource:   'messageRate',
         resourceId: category,
-        metadata:   { priceMinor: priceMinor ?? null, resellerId: resellerId ?? null },
+        metadata:   { priceMinor: price, resellerId: resellerId ?? null, forTenantId: tenantId ?? null },
       },
     });
     return { success: true };

@@ -2,13 +2,16 @@ import {
   Injectable, NotFoundException, ForbiddenException, ConflictException, Logger,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope, decryptSecret, encryptSecret, sanitizeWhatsAppToken, isMetaAccessToken } from '@lib/common';
+import { TenantScope, decryptSecret, encryptSecret, sanitizeWhatsAppToken, isMetaAccessToken, MessageRatesService } from '@lib/common';
 
 @Injectable()
 export class SettingsService {
   private readonly logger = new Logger(SettingsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly rates:  MessageRatesService,
+  ) {}
 
   // ── Opt-out / Opt-in Manager ──────────────────────────────────────────────────
 
@@ -179,42 +182,37 @@ export class SettingsService {
 
   // ── Message Rates ──────────────────────────────────────────────────────────
 
-  async getMessageRates(_scope: TenantScope) {
-    const categories = ['WA_MARKETING', 'WA_UTILITY', 'WA_AUTHENTICATION'] as const;
-    const rows = await this.prisma.messageRate.findMany({
-      where: { resellerId: null },
-    });
-    return categories.map(category => {
-      const row = rows.find(r => r.category === category);
-      return { category, priceMinor: row?.priceMinor ?? 0, id: row?.id ?? null };
-    });
+  /**
+   * What this workspace is charged per message, and where each price comes from.
+   *
+   * Read-only on purpose. This used to return the platform rows and let any tenant admin
+   * write them, which meant a customer could set its own message price — including to
+   * zero. Platform pricing now lives behind the super-admin screens only.
+   */
+  async getMessageRates(scope: TenantScope) {
+    const rates = await this.rates.resolveAll(scope.tenantId);
+    return rates.map(r => ({
+      category:      r.category,
+      priceMinor:    r.priceMinor,
+      source:        r.source,
+      platformMinor: r.platformMinor,
+      resellerMinor: r.resellerMinor,
+      customerMinor: r.customerMinor,
+    }));
   }
 
+  /** Only the platform owner may change prices; everyone else sees them read-only. */
   async updateMessageRates(
-    _scope: TenantScope,
+    scope: TenantScope,
     rates: Array<{ category: string; priceMinor: number }>,
   ) {
-    const results = [];
-    for (const rate of rates) {
-      const existing = await this.prisma.messageRate.findFirst({
-        where: { category: rate.category as any, resellerId: null },
-      });
-      if (existing) {
-        results.push(
-          await this.prisma.messageRate.update({
-            where: { id: existing.id },
-            data:  { priceMinor: rate.priceMinor },
-          }),
-        );
-      } else {
-        results.push(
-          await this.prisma.messageRate.create({
-            data: { category: rate.category as any, priceMinor: rate.priceMinor },
-          }),
-        );
-      }
+    if (scope.role !== 'SUPER_ADMIN') {
+      throw new ForbiddenException('Message prices are set by the platform. Contact your account manager to change them.');
     }
-    return results;
+    for (const rate of rates) {
+      await this.rates.setPlatform(rate.category, rate.priceMinor);
+    }
+    return this.rates.listPlatform();
   }
 
   // ── Business / AI settings ─────────────────────────────────────────────────

@@ -2,7 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bull';
 import { PrismaModule } from '@lib/prisma';
-import { WebhookDispatchService } from '@lib/common';
+import { WebhookDispatchService, MessageRatesModule } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, QUEUE_TEMPLATE_SYNC } from '@lib/queue';
 import { CampaignsController } from './campaigns.controller';
 import { CampaignsService } from './campaigns.service';
@@ -28,6 +28,7 @@ import { TemplatesModule } from './templates/templates.module';
     BullModule.registerQueue({ name: QUEUE_CAMPAIGN_SEND }),
     BullModule.registerQueue({ name: QUEUE_TEMPLATE_SYNC }),
     PrismaModule,
+    MessageRatesModule,
     TemplatesModule,
   ],
   controllers: [CampaignsController],

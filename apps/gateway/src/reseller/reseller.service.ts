@@ -2,13 +2,16 @@ import {
   Injectable, NotFoundException, ForbiddenException, BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope } from '@lib/common';
+import { TenantScope, MessageRatesService } from '@lib/common';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 
 @Injectable()
 export class ResellerService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly rates:  MessageRatesService,
+  ) {}
 
   private async guardReseller(scope: TenantScope) {
     const tenant = await this.prisma.tenant.findUnique({
@@ -645,46 +648,46 @@ export class ResellerService {
 
   async listRates(scope: TenantScope) {
     await this.guardReseller(scope);
-
-    const CATEGORIES = ['WA_MARKETING', 'WA_UTILITY', 'WA_AUTHENTICATION'];
-    const [platformRates, resellerRates] = await Promise.all([
-      this.prisma.messageRate.findMany({ where: { resellerId: null } }),
-      this.prisma.messageRate.findMany({ where: { resellerId: scope.tenantId } }),
-    ]);
-
-    const platformMap = new Map((platformRates as any[]).map((r: any) => [r.category as string, r.priceMinor as number]));
-    const resellerMap = new Map((resellerRates as any[]).map((r: any) => [r.category as string, r.priceMinor as number]));
-
-    return CATEGORIES.map((cat) => ({
-      category:      cat,
-      platformMinor: platformMap.has(cat) ? platformMap.get(cat) : null,
-      yoursMinor:    resellerMap.has(cat) ? resellerMap.get(cat) : null,
-    }));
+    return this.rates.resolveAllForReseller(scope.tenantId);
   }
 
+  /** The reseller's list price for all of its clients. */
   async upsertRate(scope: TenantScope, data: { category: string; priceMinor: number | null }) {
     await this.guardReseller(scope);
+    await this.rates.setReseller(scope.tenantId, data.category, data.priceMinor);
+    return { ok: true };
+  }
 
-    if (data.priceMinor === null) {
-      await this.prisma.messageRate.deleteMany({
-        where: { category: data.category as any, resellerId: scope.tenantId },
-      });
-      return { ok: true };
-    }
+  /** Accounts under this reseller that have their own price, for the clients list. */
+  async listClientRateOverrides(scope: TenantScope) {
+    await this.guardReseller(scope);
+    return this.rates.listCustomerOverrides({ resellerId: scope.tenantId });
+  }
 
-    const platformRate = await this.prisma.messageRate.findFirst({
-      where:  { category: data.category as any, resellerId: null },
-      select: { priceMinor: true },
+  async getClientRates(scope: TenantScope, clientId: string) {
+    await this.guardReseller(scope);
+    const client = await this.ownClient(scope, clientId);
+    return { client, rates: await this.rates.resolveAll(client.id) };
+  }
+
+  /**
+   * A price for one client. The reseller may discount against its own list price but not
+   * below the platform price it pays, so a message can never be sold at a loss.
+   */
+  async setClientRate(scope: TenantScope, clientId: string, data: { category: string; priceMinor: number | null }) {
+    await this.guardReseller(scope);
+    const client = await this.ownClient(scope, clientId);
+    const rates  = await this.rates.setCustomer(client.id, data.category, data.priceMinor, { floorToPlatform: true });
+    return { client, rates };
+  }
+
+  private async ownClient(scope: TenantScope, clientId: string) {
+    const client = await this.prisma.tenant.findFirst({
+      where:  { id: clientId, parentId: scope.tenantId },
+      select: { id: true, name: true, slug: true },
     });
-    if (platformRate && data.priceMinor < platformRate.priceMinor) {
-      throw new BadRequestException(`Price must be at least ${platformRate.priceMinor} paise (platform rate)`);
-    }
-
-    return this.prisma.messageRate.upsert({
-      where:  { category_resellerId: { category: data.category as any, resellerId: scope.tenantId } },
-      create: { category: data.category as any, resellerId: scope.tenantId, priceMinor: data.priceMinor },
-      update: { priceMinor: data.priceMinor },
-    });
+    if (!client) throw new NotFoundException('Client not found');
+    return client;
   }
 
   // ── Commissions ────────────────────────────────────────────────────────────

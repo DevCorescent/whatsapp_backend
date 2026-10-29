@@ -177,6 +177,28 @@ export class ResellerController {
     return this.svc.upsertRate(scope, body);
   }
 
+  @Get('rates/clients')
+  @ApiOperation({ summary: 'Clients that have their own message price' })
+  listClientRateOverrides(@CurrentTenant() scope: TenantScope) {
+    return this.svc.listClientRateOverrides(scope);
+  }
+
+  @Get('clients/:id/rates')
+  @ApiOperation({ summary: 'Effective message prices for one client' })
+  getClientRates(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
+    return this.svc.getClientRates(scope, id);
+  }
+
+  @Put('clients/:id/rates')
+  @ApiOperation({ summary: 'Set or clear one client\'s message price (null clears it)' })
+  setClientRate(
+    @CurrentTenant() scope: TenantScope,
+    @Param('id') id: string,
+    @Body() body: { category: string; priceMinor: number | null },
+  ) {
+    return this.svc.setClientRate(scope, id, body);
+  }
+
   // ── Commissions ───────────────────────────────────────────────────────────
 
   @Get('commissions')

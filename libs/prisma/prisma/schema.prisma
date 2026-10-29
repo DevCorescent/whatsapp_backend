@@ -233,7 +233,8 @@ model Tenant {
   commissionsGenerated ResellerCommission[]  @relation("CommissionClient")
   wallet               Wallet?
   walletTransactions   WalletTransaction[]
-  resellerRates        MessageRate[]
+  resellerRates        MessageRate[]         @relation("ResellerMessageRates")
+  customerRates        MessageRate[]         @relation("CustomerMessageRates")
   segments             Segment[]
   blacklistEntries     BlacklistEntry[]
   users                User[]
@@ -1195,16 +1196,27 @@ model WalletTransaction {
 
 /// Price per message unit in paise. `resellerId` null = platform rate; a reseller's
 /// row prices that reseller's clients (never below the platform rate).
+/// What one WhatsApp template message costs, at one of three scopes. Which row applies is
+/// decided by MessageRatesService: the customer's own price wins, then its reseller's price,
+/// then the platform price. Exactly one row may exist per (category, scope) — enforced by
+/// three partial unique indexes created in raw SQL, because a plain UNIQUE treats the NULLs
+/// that mark a scope as distinct and so would allow duplicates.
+///   platform  — resellerId NULL, tenantId NULL
+///   reseller  — resellerId set,  tenantId NULL  (applies to all of that reseller's clients)
+///   customer  — tenantId set                    (applies to that one account)
 model MessageRate {
   id         String       @id @default(cuid())
   category   RateCategory
   resellerId String?
+  tenantId   String?
   priceMinor Int
   updatedAt  DateTime     @updatedAt
 
-  reseller Tenant? @relation(fields: [resellerId], references: [id], onDelete: Cascade)
+  reseller Tenant? @relation("ResellerMessageRates", fields: [resellerId], references: [id], onDelete: Cascade)
+  tenant   Tenant? @relation("CustomerMessageRates", fields: [tenantId], references: [id], onDelete: Cascade)
 
-  @@unique([category, resellerId])
+  @@index([tenantId])
+  @@index([resellerId])
   @@map("message_rates")
 }
 

@@ -2,7 +2,7 @@ import { Processor, Process } from '@nestjs/bull';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bull';
 import { PrismaService } from '@lib/prisma';
-import { WebhookDispatchService, NotificationsService, MANAGER_ROLES, decryptSecret } from '@lib/common';
+import { WebhookDispatchService, NotificationsService, MessageRatesService, MANAGER_ROLES, decryptSecret } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
 import { CampaignProgressService } from '../campaign-progress.service';
 
@@ -34,6 +34,7 @@ export class CampaignSendProcessor {
     private readonly webhooks:  WebhookDispatchService,
     private readonly progress:  CampaignProgressService,
     private readonly notifications: NotificationsService,
+    private readonly rates:     MessageRatesService,
   ) {}
 
   private async getCampaignData(campaignId: string): Promise<CampaignData | null> {
@@ -181,57 +182,45 @@ export class CampaignSendProcessor {
         data:  { sentCount: { increment: 1 } },
       });
 
-      // Debit wallet per message sent — failure is non-fatal (logged, not re-thrown)
+      // Debit wallet per message sent — failure is non-fatal (logged, not re-thrown).
+      // The price is this customer's own, falling back to its reseller's and then the
+      // platform's (MessageRatesService).
       try {
-        const tmplCategory = campaign.template?.category ?? '';
-        const upper        = tmplCategory.toUpperCase();
-        const rateCategory = upper.includes('MARKETING')   ? 'WA_MARKETING'
-                           : upper.includes('UTILITY')     ? 'WA_UTILITY'
-                           : upper.includes('AUTH')        ? 'WA_AUTHENTICATION'
-                           : null;
-
-        if (rateCategory) {
-          const rate = await this.prisma.messageRate.findFirst({
-            where:  { category: rateCategory as any, resellerId: null },
-            select: { priceMinor: true },
-          });
-          const priceMinor = rate?.priceMinor ?? 0;
-
-          if (priceMinor > 0) {
-            await this.prisma.$transaction(async (tx) => {
-              const wallet       = await tx.wallet.findUnique({
-                where:  { tenantId: campaign.tenantId },
-                select: { balanceMinor: true },
-              });
-              const newBalance = (wallet?.balanceMinor ?? 0) - priceMinor;
-
-              await tx.walletTransaction.create({
-                data: {
-                  tenantId:         campaign.tenantId,
-                  type:             'DEBIT',
-                  amountMinor:      priceMinor,
-                  balanceAfterMinor: newBalance,
-                  description:      `Campaign message: ${campaignId}`,
-                  idempotencyKey:   `campaign-debit:${recipientId}`,
-                },
-              });
-
-              await tx.wallet.update({
-                where: { tenantId: campaign.tenantId },
-                data:  { balanceMinor: { decrement: priceMinor } },
-              });
-
-              await tx.campaignContact.update({
-                where: { id: recipientId },
-                data:  { costMinor: priceMinor },
-              });
-
-              await tx.campaign.update({
-                where: { id: campaignId },
-                data:  { costMinor: { increment: priceMinor } },
-              });
+        const priceMinor = await this.rates.priceFor(campaign.tenantId, campaign.template?.category);
+        if (priceMinor > 0) {
+          await this.prisma.$transaction(async (tx) => {
+            const wallet = await tx.wallet.findUnique({
+              where:  { tenantId: campaign.tenantId },
+              select: { balanceMinor: true },
             });
-          }
+            const newBalance = (wallet?.balanceMinor ?? 0) - priceMinor;
+
+            await tx.walletTransaction.create({
+              data: {
+                tenantId:          campaign.tenantId,
+                type:              'DEBIT',
+                amountMinor:       priceMinor,
+                balanceAfterMinor: newBalance,
+                description:       `Campaign message: ${campaignId}`,
+                idempotencyKey:    `campaign-debit:${recipientId}`,
+              },
+            });
+
+            await tx.wallet.update({
+              where: { tenantId: campaign.tenantId },
+              data:  { balanceMinor: { decrement: priceMinor } },
+            });
+
+            await tx.campaignContact.update({
+              where: { id: recipientId },
+              data:  { costMinor: priceMinor },
+            });
+
+            await tx.campaign.update({
+              where: { id: campaignId },
+              data:  { costMinor: { increment: priceMinor } },
+            });
+          });
         }
       } catch (walletErr: any) {
         this.logger.warn(`Wallet debit skipped for ${recipientId}: ${walletErr.message}`);

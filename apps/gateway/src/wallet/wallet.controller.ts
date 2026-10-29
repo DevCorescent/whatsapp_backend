@@ -23,7 +23,7 @@ export class WalletController {
     @Query('page') page?: number,
     @Query('limit') limit?: number,
   ) {
-    return this.svc.getWallet(scope);
+    return this.svc.getWallet(scope, { page, limit });
   }
 
   @Get('transactions')

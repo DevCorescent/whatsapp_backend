@@ -1,10 +1,13 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope } from '@lib/common';
+import { TenantScope, MessageRatesService } from '@lib/common';
 
 @Injectable()
 export class BillingService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly rates:  MessageRatesService,
+  ) {}
 
   // ── Plans ──────────────────────────────────────────────────────────────────
 
@@ -461,10 +464,49 @@ export class BillingService {
 
   // ── Wallet ─────────────────────────────────────────────────────────────────
 
-  async getWallet(scope: TenantScope) {
-    const wallet = await this.prisma.wallet.findUnique({ where: { tenantId: scope.tenantId } });
+  /**
+   * Everything the wallet screen renders: balance, the prices this account is charged per
+   * message, and the first page of the statement.
+   *
+   * It used to return the bare wallet row, so `rates`, `canTopUp` and `transactions` were
+   * all undefined on the client and the page threw on the first `.map`.
+   */
+  async getWallet(scope: TenantScope, query: { page?: number; limit?: number } = {}) {
+    const page  = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(100, Number(query.limit) || 20);
+
+    const [wallet, rates] = await Promise.all([
+      this.prisma.wallet.findUnique({ where: { tenantId: scope.tenantId } }),
+      this.rates.resolveAll(scope.tenantId),
+    ]);
     if (!wallet) throw new NotFoundException('Wallet not found');
-    return wallet;
+
+    const [transactions, total] = await Promise.all([
+      this.prisma.walletTransaction.findMany({
+        where:   { tenantId: scope.tenantId },
+        skip:    (page - 1) * limit,
+        take:    limit,
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.walletTransaction.count({ where: { tenantId: scope.tenantId } }),
+    ]);
+
+    return {
+      success: true,
+      data: {
+        balanceMinor:             wallet.balanceMinor,
+        lowBalanceThresholdMinor: wallet.lowBalanceThresholdMinor,
+        currency:                 (wallet as { currency?: string }).currency ?? 'INR',
+        canTopUp:                 Boolean(process.env['RAZORPAY_KEY_ID'] && process.env['RAZORPAY_KEY_SECRET']),
+        rates: rates.map(r => ({
+          category:   r.category,
+          priceMinor: r.source === 'unpriced' ? null : r.priceMinor,
+          source:     r.source,
+        })),
+        transactions,
+      },
+      pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+    };
   }
 
   async getWalletTransactions(scope: TenantScope, query: { page?: number; limit?: number }) {

@@ -5,7 +5,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bull';
 import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from '@lib/prisma';
-import { RealtimeModule, StorageModule, NotificationsCoreModule } from '@lib/common';
+import { RealtimeModule, StorageModule, NotificationsCoreModule, MessageRatesModule } from '@lib/common';
 
 // Core
 import { AuthModule }         from './auth/auth.module';
@@ -95,6 +95,7 @@ import { CallsModule }        from './calls/calls.module';
     RealtimeModule,
     StorageModule,
     NotificationsCoreModule,
+    MessageRatesModule,
 
     // Auth & API access
     AuthModule,

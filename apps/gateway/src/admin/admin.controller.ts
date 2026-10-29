@@ -227,14 +227,32 @@ export class AdminController {
   }
 
   @Put('rates')
-  @ApiOperation({ summary: 'Upsert a message rate (super admin)' })
+  @ApiOperation({ summary: 'Set a message price — platform, a reseller, or one customer (super admin)' })
   updateRate(
     @CurrentTenant() scope: TenantScope,
     @Body('category')   category: string,
     @Body('resellerId') resellerId: string | undefined,
     @Body('priceMinor') priceMinor: number | null | undefined,
+    @Body('tenantId')   tenantId: string | undefined,
   ) {
-    return this.svc.updateRate(scope, category, resellerId, priceMinor);
+    return this.svc.updateRate(scope, category, resellerId, priceMinor, tenantId);
+  }
+
+  @Get('tenants/:id/rates')
+  @ApiOperation({ summary: 'Effective message prices for one account (super admin)' })
+  getTenantRates(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
+    return this.svc.getTenantRates(scope, id);
+  }
+
+  @Put('tenants/:id/rates')
+  @ApiOperation({ summary: 'Set or clear one account\'s own message price (super admin)' })
+  setTenantRate(
+    @CurrentTenant() scope: TenantScope,
+    @Param('id') id: string,
+    @Body('category')   category: string,
+    @Body('priceMinor') priceMinor: number | null | undefined,
+  ) {
+    return this.svc.updateRate(scope, category, null, priceMinor, id);
   }
 
   // ── View-as ─────────────────────────────────────────────────────────────────

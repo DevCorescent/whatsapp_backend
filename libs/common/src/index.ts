@@ -16,3 +16,5 @@ export * from './whatsapp/meta-media';
 export * from './notifications/notification-prefs';
 export * from './notifications/notifications.service';
 export * from './notifications/notifications.module';
+export * from './rates/message-rates.service';
+export * from './rates/message-rates.module';

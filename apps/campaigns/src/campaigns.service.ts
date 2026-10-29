@@ -4,7 +4,7 @@ import {
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope } from '@lib/common';
+import { TenantScope, MessageRatesService } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
 import { CampaignProgressService } from './campaign-progress.service';
 
@@ -14,6 +14,7 @@ export class CampaignsService {
     private readonly prisma: PrismaService,
     @InjectQueue(QUEUE_CAMPAIGN_SEND) private readonly sendQueue: Queue,
     private readonly progress: CampaignProgressService,
+    private readonly rates: MessageRatesService,
   ) {}
 
   // ── List ───────────────────────────────────────────────────────────────────
@@ -107,15 +108,6 @@ export class CampaignsService {
   }
 
   // ── Broadcast create ───────────────────────────────────────────────────────
-
-  /** Map a MessageTemplate.category string to the RateCategory enum value. */
-  private templateCategoryToRateCategory(category: string): string {
-    const upper = (category ?? '').toUpperCase();
-    if (upper.includes('MARKETING'))     return 'WA_MARKETING';
-    if (upper.includes('UTILITY'))       return 'WA_UTILITY';
-    if (upper.includes('AUTH'))          return 'WA_AUTHENTICATION';
-    return 'WA_MARKETING';
-  }
 
   private async createBroadcast(scope: TenantScope, data: any) {
     const {
@@ -218,15 +210,8 @@ export class CampaignsService {
         templateId ? this.prisma.messageTemplate.findUnique({ where: { id: templateId }, select: { category: true } }) : Promise.resolve(null),
       ]);
 
-      let unitPriceMinor = 100; // default 1 rupee (100 paise)
-      if (template?.category) {
-        const rateCategory = this.templateCategoryToRateCategory(template.category);
-        const rate = await this.prisma.messageRate.findFirst({
-          where:  { category: rateCategory as any, resellerId: null },
-          select: { priceMinor: true },
-        });
-        if (rate) unitPriceMinor = rate.priceMinor;
-      }
+      // Quote the price this customer will actually be charged (own → reseller → platform).
+      const unitPriceMinor = await this.rates.priceFor(scope.tenantId, template?.category);
 
       const samplePhone  = validNumbers[0] ?? null;
       const sampleFields = samplePhone ? (recipientFields[samplePhone] ?? {}) : {};

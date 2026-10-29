@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { PrismaModule } from '@lib/prisma';
+import { MessageRatesModule } from '@lib/common';
 import { BillingController } from './billing.controller';
 import { BillingService } from './billing.service';
 
@@ -8,6 +9,7 @@ import { BillingService } from './billing.service';
   imports: [
     ConfigModule.forRoot({ isGlobal: true, envFilePath: '.env' }),
     PrismaModule,
+    MessageRatesModule,
   ],
   controllers: [BillingController],
   providers:   [BillingService],
