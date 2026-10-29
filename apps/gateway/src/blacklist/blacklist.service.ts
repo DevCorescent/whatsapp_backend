@@ -38,6 +38,9 @@ export class BlacklistService {
           id:        true,
           phone:     true,
           reason:    true,
+          // So an entry WhatsApp added is not mistaken for one a colleague added.
+          source:    true,
+          errorCode: true,
           createdAt: true,
           createdBy: { select: { id: true, name: true } },
         },
