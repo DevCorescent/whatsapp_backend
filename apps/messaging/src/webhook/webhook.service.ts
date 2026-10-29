@@ -4,7 +4,9 @@ import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bull';
 import type { Queue } from 'bull';
 import { PrismaService } from '@lib/prisma';
-import { WebhookDispatchService, MessageEventsService, StorageService, decryptSecret } from '@lib/common';
+import {
+  WebhookDispatchService, MessageEventsService, StorageService, NotificationsService, AGENT_ROLES, decryptSecret,
+} from '@lib/common';
 import { QUEUE_MEDIA_FETCH } from '@lib/queue';
 import { StatusBufferService } from './status-buffer.service';
 import { InboundPipelineService } from './inbound-pipeline.service';
@@ -39,6 +41,7 @@ export class WebhookService {
     private readonly pipeline:     InboundPipelineService,
     private readonly events:       MessageEventsService,
     private readonly storage:      StorageService,
+    private readonly notifications: NotificationsService,
     private readonly cfg:          ConfigService,
     @InjectQueue(QUEUE_MEDIA_FETCH) private readonly mediaQueue: Queue<MediaFetchJob>,
   ) {}
@@ -270,8 +273,20 @@ export class WebhookService {
       phoneNumberId: identity.phoneNumberId,
     });
 
-    // 5. Real-time push to every agent in this business
+    // 5. Real-time push to every agent in this business, plus a notification
+    //    (toast/bell when the app is open, OS notification when it is not)
     void this.events.messageNew(savedId);
+    void this.notifications.notify({
+      tenantId:   identity.tenantId,
+      businessId: identity.businessId,
+      recipients: conversation.assignedToId ? { userIds: [conversation.assignedToId] } : { roles: AGENT_ROLES },
+      type:       'NEW_MESSAGE',
+      title:      contactName || contactRow.name || phone,
+      body:       preview.slice(0, 140),
+      href:       `/inbox?c=${conversation.id}`,
+      data:       { conversationId: conversation.id, contactId: contactRow.id },
+      dedupeKey:  `conversation:${conversation.id}`,
+    });
 
     // 6. Copy media into our storage before Meta's URL expires (bubble streams from Meta meanwhile)
     if (media && this.storage.isConfigured()) {

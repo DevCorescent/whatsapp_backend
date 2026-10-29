@@ -166,6 +166,32 @@ enum BusinessStatus {
   SUSPENDED
 }
 
+enum NotificationType {
+  NEW_MESSAGE
+  MISSED_CALL
+  CAMPAIGN_COMPLETED
+  CONVERSATION_ASSIGNED
+  LEAD_ASSIGNED
+  SYSTEM
+}
+
+enum CallDirection {
+  INBOUND
+  OUTBOUND
+}
+
+/// RINGING → CONNECTING (an agent accepted, answer SDP sent to Meta) → IN_PROGRESS → COMPLETED.
+/// MISSED when nobody answered before Meta hung up; REJECTED when an agent declined.
+enum CallStatus {
+  RINGING
+  CONNECTING
+  IN_PROGRESS
+  COMPLETED
+  MISSED
+  REJECTED
+  FAILED
+}
+
 // ─── TENANT (Workspace) ──────────────────────────────────────────────────────
 
 model Tenant {
@@ -233,6 +259,8 @@ model Tenant {
   whatsAppIntegrations WhatsAppIntegration[]
   webhookEndpoints     WebhookEndpoint[]
   contactImports       ContactImport[]
+  notifications        Notification[]
+  calls                Call[]
 
   @@index([parentId])
   @@index([referredById])
@@ -287,6 +315,7 @@ model Business {
   tags             Tag[]
   quickReplies     QuickReply[]
   contactImports   ContactImport[]
+  calls            Call[]
 
   // Multiple WhatsApp numbers/integrations per business
   whatsappIntegrations WhatsAppIntegration[]
@@ -340,11 +369,15 @@ model WhatsAppIntegration {
   isActive  Boolean @default(true)
   isDefault Boolean @default(false)
 
+  /// Mirrors Meta's per-number calling setting (POST /{phone_number_id}/settings { calling }).
+  callingEnabled Boolean @default(false)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   conversations Conversation[]
   campaigns     Campaign[]
+  calls         Call[]
 
   @@index([tenantId])
   @@index([businessId])
@@ -431,22 +464,108 @@ model User {
   emailVerifyToken  String?   @unique
   emailVerifyExpiry DateTime?
 
+  /// Per-event channel switches ({ newMessage: { inApp, desktop, sound, email }, … }).
+  /// Null means the defaults in libs/common notification-prefs.ts.
+  notificationPrefs Json?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  tenant          Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  assignedConvs   Conversation[]       @relation("AssignedAgent")
-  messages        Message[]
-  assignedLeads   Lead[]               @relation("AssignedLeadAgent")
-  leadActivities  LeadActivity[]
-  assignedTickets Ticket[]             @relation("AssignedTicketAgent")
-  auditLogs       AuditLog[]
-  resetTokens     PasswordResetToken[]
-  blacklistAdded  BlacklistEntry[]     @relation("BlacklistCreatedBy")
-  userPermissions UserPermission[]     @relation("UserPermissions")
+  tenant            Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  assignedConvs     Conversation[]       @relation("AssignedAgent")
+  messages          Message[]
+  assignedLeads     Lead[]               @relation("AssignedLeadAgent")
+  leadActivities    LeadActivity[]
+  assignedTickets   Ticket[]             @relation("AssignedTicketAgent")
+  auditLogs         AuditLog[]
+  resetTokens       PasswordResetToken[]
+  blacklistAdded    BlacklistEntry[]     @relation("BlacklistCreatedBy")
+  userPermissions   UserPermission[]     @relation("UserPermissions")
+  notifications     Notification[]
+  pushSubscriptions PushSubscription[]
+  answeredCalls     Call[]               @relation("CallAnsweredBy")
 
   @@unique([email, tenantId])
   @@map("users")
+}
+
+// ─── NOTIFICATION ─────────────────────────────────────────────────────────────
+
+model Notification {
+  id         String           @id @default(cuid())
+  tenantId   String
+  businessId String?
+  userId     String
+  type       NotificationType
+  title      String
+  body       String?
+  href       String?
+  data       Json?
+  readAt     DateTime?
+  createdAt  DateTime         @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt, createdAt(sort: Desc)])
+  @@index([tenantId, createdAt])
+  @@map("notifications")
+}
+
+/// One browser's web-push endpoint. A user has one row per browser/device they allowed.
+model PushSubscription {
+  id         String    @id @default(cuid())
+  userId     String
+  endpoint   String    @unique
+  p256dh     String
+  auth       String
+  userAgent  String?
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("push_subscriptions")
+}
+
+// ─── CALL (WhatsApp voice calls via the Calling API) ─────────────────────────
+
+model Call {
+  id                    String        @id @default(cuid())
+  /// Meta's call id (wacid.…) — the key every Calling API request and webhook carries.
+  waCallId              String        @unique
+  tenantId              String
+  businessId            String
+  whatsappIntegrationId String
+  contactId             String
+  conversationId        String?
+  direction             CallDirection
+  status                CallStatus    @default(RINGING)
+  answeredById          String?
+  fromPhone             String
+  toPhone               String
+  ringingAt             DateTime      @default(now())
+  answeredAt            DateTime?
+  endedAt               DateTime?
+  durationSec           Int?
+  errorCode             Int?
+  errorTitle            String?
+  metadata              Json?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  tenant       Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  business     Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  integration  WhatsAppIntegration @relation(fields: [whatsappIntegrationId], references: [id], onDelete: Cascade)
+  contact      Contact             @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  conversation Conversation?       @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  answeredBy   User?               @relation("CallAnsweredBy", fields: [answeredById], references: [id], onDelete: SetNull)
+
+  @@index([businessId, createdAt(sort: Desc)])
+  @@index([businessId, status])
+  @@index([contactId])
+  @@map("calls")
 }
 
 // ─── PASSWORD RESET TOKEN ─────────────────────────────────────────────────────
@@ -495,6 +614,7 @@ model Contact {
   campaignsSent   CampaignContact[]
   faqInteractions FaqInteraction[]
   flowRuns        FlowRun[]
+  calls           Call[]
 
   @@unique([phone, businessId])
   @@index([tenantId])
@@ -592,6 +712,7 @@ model Conversation {
   ticket          Ticket?
   faqInteractions FaqInteraction[]
   flowRuns        FlowRun[]
+  calls           Call[]
 
   // The WhatsApp number this thread lives on. Replies go out from this number and no
   // other; null for threads that predate multi-number support (legacy credentials).
@@ -1398,6 +1519,9 @@ model Plan {
   allowedAiModels String[]
 
   allowExport Boolean @default(true)
+
+  // WhatsApp voice calling (Meta Calling API + WebRTC in the inbox).
+  callingEnabled Boolean @default(false)
 
   // Which card wears the "Most Popular" ribbon. Presentation, not entitlement —
   // it changes nothing about what the tier grants. Kept to at most one row by

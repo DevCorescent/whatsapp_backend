@@ -2,7 +2,7 @@ import {
   Injectable, NotFoundException, BadRequestException, Logger,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope, decryptSecret, MessageEventsService } from '@lib/common';
+import { TenantScope, decryptSecret, MessageEventsService, NotificationsService } from '@lib/common';
 
 const WA_API_VERSION = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
 
@@ -17,6 +17,7 @@ export class ConversationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly events: MessageEventsService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   // ── List ───────────────────────────────────────────────────────────────────
@@ -124,7 +125,8 @@ export class ConversationsService {
     labels?: string[]; unreadCount?: number;
   }) {
     const exists = await this.prisma.conversation.findFirst({
-      where: { id, tenantId: scope.tenantId, businessId: scope.businessId }, select: { id: true },
+      where:  { id, tenantId: scope.tenantId, businessId: scope.businessId },
+      select: { id: true, assignedToId: true, contact: { select: { name: true, phone: true } } },
     });
     if (!exists) throw new NotFoundException('Conversation not found');
 
@@ -139,6 +141,20 @@ export class ConversationsService {
       },
     });
     void this.events.conversationUpdated(id);
+
+    const newAssignee = data.assignedToId;
+    if (newAssignee && newAssignee !== exists.assignedToId && newAssignee !== scope.userId) {
+      void this.notifications.notify({
+        tenantId:   scope.tenantId,
+        businessId: scope.businessId,
+        recipients: { userIds: [newAssignee] },
+        type:       'CONVERSATION_ASSIGNED',
+        title:      `Conversation assigned to you`,
+        body:       exists.contact.name || exists.contact.phone || undefined,
+        href:       `/inbox?c=${id}`,
+        data:       { conversationId: id },
+      });
+    }
     return updated;
   }
 

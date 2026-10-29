@@ -2,7 +2,7 @@ import { Processor, Process } from '@nestjs/bull';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bull';
 import { PrismaService } from '@lib/prisma';
-import { WebhookDispatchService, decryptSecret } from '@lib/common';
+import { WebhookDispatchService, NotificationsService, MANAGER_ROLES, decryptSecret } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
 import { CampaignProgressService } from '../campaign-progress.service';
 
@@ -33,6 +33,7 @@ export class CampaignSendProcessor {
     private readonly prisma:    PrismaService,
     private readonly webhooks:  WebhookDispatchService,
     private readonly progress:  CampaignProgressService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   private async getCampaignData(campaignId: string): Promise<CampaignData | null> {
@@ -267,7 +268,7 @@ export class CampaignSendProcessor {
   private async tryComplete(campaignId: string, tenantId: string): Promise<boolean> {
     // Prisma maps camelCase fields to quoted camelCase columns in Postgres (confirmed by migration SQL).
     const rows = await this.prisma.$queryRaw<Array<{
-      tenantId: string; sentCount: bigint; failedCount: bigint;
+      tenantId: string; businessId: string; name: string; sentCount: bigint; failedCount: bigint;
       deliveredCount: bigint; readCount: bigint; totalCount: bigint;
       completedAt: Date;
     }>>`
@@ -276,7 +277,7 @@ export class CampaignSendProcessor {
       WHERE  id     = ${campaignId}
         AND  status = 'RUNNING'
         AND  "sentCount" + "failedCount" >= "totalCount"
-      RETURNING "tenantId", "sentCount", "failedCount", "deliveredCount", "readCount", "totalCount", "completedAt"
+      RETURNING "tenantId", "businessId", "name", "sentCount", "failedCount", "deliveredCount", "readCount", "totalCount", "completedAt"
     `;
 
     if (!rows.length) return false;
@@ -284,6 +285,16 @@ export class CampaignSendProcessor {
     this.campaignCache.delete(campaignId);
 
     const c = rows[0];
+    void this.notifications.notify({
+      tenantId:   c.tenantId ?? tenantId,
+      businessId: c.businessId,
+      recipients: { roles: MANAGER_ROLES },
+      type:       'CAMPAIGN_COMPLETED',
+      title:      `Campaign "${c.name}" finished`,
+      body:       `${Number(c.sentCount).toLocaleString()} sent · ${Number(c.failedCount).toLocaleString()} failed of ${Number(c.totalCount).toLocaleString()}`,
+      href:       `/campaigns/${campaignId}`,
+      data:       { campaignId },
+    });
     this.webhooks.dispatchEvent(c.tenantId ?? tenantId, 'campaign.completed', {
       campaignId,
       sentCount:      Number(c.sentCount),
