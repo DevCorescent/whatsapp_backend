@@ -2,7 +2,9 @@ import {
   Controller, Get, Post, Body, Param, Query, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiSecurity, ApiOperation } from '@nestjs/swagger';
-import { CurrentTenant, TenantScope, decryptSecret, MessageEventsService } from '@lib/common';
+import {
+  CurrentTenant, TenantScope, decryptSecret, MessageEventsService, buildSendComponents, toSpec,
+} from '@lib/common';
 import { PrismaService } from '@lib/prisma';
 import { ApiKeyGuard } from './api-key.guard';
 
@@ -107,10 +109,15 @@ export class V1Controller {
       });
       if (!tpl) return { error: `Template "${templateName}" not found or not approved` };
 
-      const comps: unknown[] = [];
-      if (variables?.body?.length) {
-        comps.push({ type: 'body', parameters: variables.body.map((v: string) => ({ type: 'text', text: v })) });
-      }
+      // Positional values arrive as a plain array; the builder keys them by index.
+      const vars: Record<string, string> = {};
+      (variables?.body ?? []).forEach((v: string, i: number) => { vars[String(i + 1)] = v; });
+      (variables?.header ?? []).forEach((v: string, i: number) => { vars[`header_${i + 1}`] = v; });
+      const comps = buildSendComponents(toSpec(tpl), {
+        variables: vars,
+        headerMediaId:  variables?.headerMediaId ?? null,
+        headerMediaUrl: variables?.headerMediaUrl ?? null,
+      });
       msgBody = {
         messaging_product: 'whatsapp', to,
         type: 'template',

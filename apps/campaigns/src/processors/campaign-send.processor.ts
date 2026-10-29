@@ -4,6 +4,7 @@ import { Job } from 'bull';
 import { PrismaService } from '@lib/prisma';
 import {
   WebhookDispatchService, NotificationsService, MessageRatesService, WalletService, MANAGER_ROLES, decryptSecret,
+  buildSendComponents, toSpec,
 } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
 import { CampaignProgressService } from '../campaign-progress.service';
@@ -17,7 +18,8 @@ interface CampaignData {
   tenantId:             string;
   totalCount:           number;
   metadata:             any;
-  template:             { name: string; language: string; category: string; variables: any; headerType: string | null; headerContent: string | null; headerVariables: any[] } | null;
+  /** Everything the payload builder needs; loosely typed because the Json columns are. */
+  template:             Record<string, any> | null;
   whatsappIntegration:  { phoneNumberId: string; accessToken: string | null } | null;
   businessId:           string;
 }
@@ -49,12 +51,7 @@ export class CampaignSendProcessor {
       select: {
         id: true, status: true, tenantId: true, totalCount: true, businessId: true,
         metadata: true,
-        template: {
-          select: {
-            name: true, language: true, category: true, variables: true,
-            headerType: true, headerContent: true, headerVariables: true,
-          },
-        },
+        template: true,
         whatsappIntegration: {
           select: { phoneNumberId: true, accessToken: true },
         },
@@ -113,30 +110,18 @@ export class CampaignSendProcessor {
       const variables = (recipient.variables as Record<string, string>) ?? {};
 
       const meta: Record<string, any> = (campaign.metadata as any) ?? {};
-      const components: unknown[] = [];
 
-      // Header component: media (IMAGE/VIDEO/DOCUMENT) or text variables
-      if (template.headerType === 'IMAGE' || template.headerType === 'VIDEO' || template.headerType === 'DOCUMENT') {
-        const mediaId  = meta.headerMediaId  ?? variables['header_media_id']  ?? null;
-        const mediaUrl = meta.headerMediaUrl ?? variables['header_media_url'] ?? null;
-        if (mediaId || mediaUrl) {
-          const mediaType = template.headerType.toLowerCase() as 'image' | 'video' | 'document';
-          components.push({
-            type:       'header',
-            parameters: [{ type: mediaType, [mediaType]: mediaId ? { id: mediaId } : { link: mediaUrl } }],
-          });
-        }
-      } else if (template.headerType === 'TEXT' && template.headerContent) {
-        const headerVars = (template.headerVariables ?? []).map((_: unknown, i: number) =>
-          ({ type: 'text', text: variables[`header_${i + 1}`] ?? '' })
-        );
-        if (headerVars.length) components.push({ type: 'header', parameters: headerVars });
-      }
-
-      const bodyVars = (template.variables ?? []).map((_: unknown, i: number) =>
-        ({ type: 'text', text: variables[`${i + 1}`] ?? '' })
-      );
-      if (bodyVars.length) components.push({ type: 'body', parameters: bodyVars });
+      // One builder for every template shape — carousel cards, dynamic URL buttons,
+      // copy-code buttons and offer countdowns included.
+      const components = buildSendComponents(toSpec(template), {
+        variables,
+        headerMediaId:  meta.headerMediaId  ?? variables['header_media_id']  ?? null,
+        headerMediaUrl: meta.headerMediaUrl ?? variables['header_media_url'] ?? null,
+        cardMedia:      Array.isArray(meta.cardMedia) ? meta.cardMedia : null,
+        offerExpirationMs: meta.offerExpirationMs ? Number(meta.offerExpirationMs) : null,
+        couponCode:     meta.couponCode ?? variables['coupon_code'] ?? null,
+        location:       meta.location ?? null,
+      });
 
       const ttlSeconds: number | undefined = meta.ttlSeconds ? Number(meta.ttlSeconds) : undefined;
 

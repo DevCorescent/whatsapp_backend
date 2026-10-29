@@ -881,13 +881,29 @@ model MessageTemplate {
   name            String
   category        String
   language        String    @default("en")
+  /// TEXT, IMAGE, VIDEO, DOCUMENT or LOCATION. Null for no header.
   headerType      String?
+  /// Header text, or the resumable-upload handle of the sample media.
   headerContent   String?
   body            String
   footer          String?
   buttons         Json?
   variables       String[]
   headerVariables String[]  @default([])
+  /// POSITIONAL ({{1}}) or NAMED ({{order_id}}). Meta rejects a template that mixes them.
+  parameterFormat String    @default("POSITIONAL")
+  /// STANDARD, or CAROUSEL for a body plus 2-10 identically built cards.
+  templateType    String    @default("STANDARD")
+  /// Carousel cards: headerFormat, headerHandle, headerUrl, body, bodyVariables, buttons.
+  cards           Json?
+  /// Limited-time offer badge (marketing only): its text and whether to run a countdown.
+  ltoText          String?
+  ltoHasExpiration Boolean  @default(false)
+  /// Authentication templates: the security line, and when the code expires.
+  addSecurityRecommendation Boolean @default(false)
+  codeExpirationMinutes     Int?
+  /// How long Meta keeps retrying delivery before giving up.
+  messageSendTtlSeconds     Int?
   waTemplateId    String?
   status          String    @default("PENDING")
   rejectionReason String?

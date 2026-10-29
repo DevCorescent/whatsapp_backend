@@ -72,6 +72,14 @@ export class TemplatesController {
     return this.svc.submitToMeta(scope, id);
   }
 
+  @Post(':id/validate')
+  @RequiresPermission('templates.manage')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Check a draft against Meta’s rules without submitting it' })
+  validate(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
+    return this.svc.validate(scope, id);
+  }
+
   @Post(':id/duplicate')
   @RequiresPermission('templates.manage')
   @HttpCode(HttpStatus.OK)

@@ -2,7 +2,7 @@ import { Processor, Process } from '@nestjs/bull';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bull';
 import { PrismaService } from '@lib/prisma';
-import { decryptSecret } from '@lib/common';
+import { buildCreatePayload, decryptSecret, toSpec, validateTemplate } from '@lib/common';
 import { QUEUE_TEMPLATE_SYNC } from '@lib/queue';
 
 interface TemplateSyncJob {
@@ -39,27 +39,20 @@ export class TemplateSyncProcessor {
     }
     this.logger.log(`TemplateSyncProcessor templateId=${templateId} wabaId=${integration.whatsappBusinessId} tokenPrefix=${accessToken.slice(0, 8)}...`);
 
+    // Refuse before spending a submission on something Meta would reject anyway.
+    const spec = toSpec(template);
+    const problems = validateTemplate(spec);
+    if (problems.length) {
+      await this.prisma.messageTemplate.update({
+        where: { id: templateId },
+        data:  { status: 'REJECTED', rejectionReason: problems.join(' ') },
+      });
+      this.logger.warn(`Template ${templateId} not submitted: ${problems.join(' ')}`);
+      return;
+    }
+
     try {
-      const components: unknown[] = [];
-
-      if (template.headerType && template.headerContent) {
-        components.push({
-          type:   'HEADER',
-          format: template.headerType,
-          text:   template.headerType === 'TEXT' ? template.headerContent : undefined,
-        });
-      }
-
-      components.push({ type: 'BODY', text: template.body });
-
-      if (template.footer) {
-        components.push({ type: 'FOOTER', text: template.footer });
-      }
-
-      const buttons = template.buttons as any[];
-      if (buttons?.length) {
-        components.push({ type: 'BUTTONS', buttons });
-      }
+      const payload = buildCreatePayload(spec);
 
       const version = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
       const res = await fetch(
@@ -70,12 +63,7 @@ export class TemplateSyncProcessor {
             Authorization:  `Bearer ${accessToken}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({
-            name:       template.name,
-            category:   template.category.toUpperCase(),
-            language:   template.language,
-            components,
-          }),
+          body: JSON.stringify(payload),
         },
       );
 

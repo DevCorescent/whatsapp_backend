@@ -4,8 +4,53 @@ import {
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope, decryptSecret } from '@lib/common';
+import {
+  TenantScope, decryptSecret, parseMetaTemplate, toSpec, validateTemplate, StorageService,
+} from '@lib/common';
 import { QUEUE_TEMPLATE_SYNC } from '@lib/queue';
+
+/** What the builder may write. `status`, `waTemplateId` and the sync stamps are ours. */
+export interface TemplateWriteInput {
+  name?: string;
+  category?: string;
+  language?: string;
+  templateType?: string;
+  parameterFormat?: string;
+  headerType?: string | null;
+  headerContent?: string | null;
+  headerVariables?: string[];
+  body?: string;
+  variables?: string[];
+  footer?: string | null;
+  buttons?: unknown;
+  cards?: unknown;
+  ltoText?: string | null;
+  ltoHasExpiration?: boolean;
+  addSecurityRecommendation?: boolean;
+  codeExpirationMinutes?: number | null;
+  messageSendTtlSeconds?: number | null;
+}
+
+/**
+ * The fields create and update both write, with `undefined` left out so a PATCH that
+ * omits a field keeps it. Only an explicit `null` clears one.
+ */
+function writableFields(data: TemplateWriteInput) {
+  return {
+    templateType:    data.templateType,
+    parameterFormat: data.parameterFormat,
+    headerType:      data.headerType,
+    headerContent:   data.headerContent,
+    footer:          data.footer,
+    buttons:         data.buttons as any,
+    cards:           data.cards as any,
+    ltoText:         data.ltoText,
+    ltoHasExpiration: data.ltoHasExpiration,
+    addSecurityRecommendation: data.addSecurityRecommendation,
+    codeExpirationMinutes:     data.codeExpirationMinutes,
+    messageSendTtlSeconds:     data.messageSendTtlSeconds,
+  };
+}
 
 @Injectable()
 export class TemplatesService {
@@ -13,6 +58,7 @@ export class TemplatesService {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly storage: StorageService,
     @InjectQueue(QUEUE_TEMPLATE_SYNC) private readonly syncQueue: Queue,
   ) {}
 
@@ -51,29 +97,21 @@ export class TemplatesService {
 
   // ── Create ─────────────────────────────────────────────────────────────────
 
-  async create(scope: TenantScope, data: {
-    name: string; category: string; language?: string;
-    headerType?: string; headerContent?: string;
-    body: string; footer?: string; buttons?: unknown;
-    variables?: string[]; headerVariables?: string[];
-  }) {
+  async create(scope: TenantScope, data: TemplateWriteInput) {
     const existing = await this.prisma.messageTemplate.findUnique({
-      where: { name_businessId: { name: data.name, businessId: scope.businessId } },
+      where: { name_businessId: { name: data.name!, businessId: scope.businessId } },
     });
     if (existing) throw new ConflictException('A template with this name already exists');
 
     return this.prisma.messageTemplate.create({
       data: {
-        tenantId:        scope.tenantId,
-        businessId:      scope.businessId,
-        name:            data.name,
-        category:        data.category,
-        language:        data.language ?? 'en',
-        headerType:      data.headerType,
-        headerContent:   data.headerContent,
-        body:            data.body,
-        footer:          data.footer,
-        buttons:         data.buttons as any,
+        tenantId:   scope.tenantId,
+        businessId: scope.businessId,
+        name:       data.name!,
+        category:   data.category!,
+        language:   data.language ?? 'en',
+        body:       data.body ?? '',
+        ...writableFields(data),
         variables:       data.variables ?? [],
         headerVariables: data.headerVariables ?? [],
         status:          'PENDING',
@@ -83,12 +121,7 @@ export class TemplatesService {
 
   // ── Update ─────────────────────────────────────────────────────────────────
 
-  async update(scope: TenantScope, id: string, data: {
-    name?: string; category?: string; language?: string;
-    headerType?: string; headerContent?: string;
-    body?: string; footer?: string; buttons?: unknown;
-    variables?: string[]; headerVariables?: string[];
-  }) {
+  async update(scope: TenantScope, id: string, data: TemplateWriteInput) {
     await this.findOne(scope, id); // 404 guard
     return this.prisma.messageTemplate.update({
       where: { id },
@@ -96,17 +129,23 @@ export class TemplatesService {
         name:            data.name,
         category:        data.category,
         language:        data.language,
-        headerType:      data.headerType,
-        headerContent:   data.headerContent,
         body:            data.body,
-        footer:          data.footer,
-        buttons:         data.buttons as any,
+        ...writableFields(data),
         variables:       data.variables,
         headerVariables: data.headerVariables,
         status:          'PENDING',   // needs re-approval after edit
         waTemplateId:    undefined,   // reset WA id
       },
     });
+  }
+
+  // ── Check a draft without submitting it ────────────────────────────────────
+
+  /** Everything Meta would reject, so the builder can show it before submission. */
+  async validate(scope: TenantScope, id: string) {
+    const template = await this.findOne(scope, id);
+    const errors = validateTemplate(toSpec(template));
+    return { valid: errors.length === 0, errors };
   }
 
   // ── Delete ─────────────────────────────────────────────────────────────────
@@ -138,14 +177,23 @@ export class TemplatesService {
       data: {
         tenantId:        template.tenantId,
         businessId:      template.businessId,
-        name:            `${template.name} (Copy)`,
+        // Meta requires lowercase alphanumerics and underscores, so no " (Copy)".
+        name:            `${template.name}_copy`,
         category:        template.category,
         language:        template.language,
+        templateType:    template.templateType,
+        parameterFormat: template.parameterFormat,
         headerType:      template.headerType,
         headerContent:   template.headerContent,
         body:            template.body,
         footer:          template.footer,
         buttons:         template.buttons as any,
+        cards:           template.cards as any,
+        ltoText:         template.ltoText,
+        ltoHasExpiration: template.ltoHasExpiration,
+        addSecurityRecommendation: template.addSecurityRecommendation,
+        codeExpirationMinutes:     template.codeExpirationMinutes,
+        messageSendTtlSeconds:     template.messageSendTtlSeconds,
         variables:       template.variables,
         headerVariables: template.headerVariables,
         status:          'PENDING',
@@ -211,11 +259,13 @@ export class TemplatesService {
     if (!accessToken) throw new NotFoundException('Could not decrypt WhatsApp access token');
     this.logger.log(`importFromMeta businessId=${scope.businessId} wabaId=${integration.whatsappBusinessId} tokenPrefix=${accessToken.slice(0, 8)}...`);
 
-    const existingNames = new Set(
+    // Keep the local cards: Meta returns each card's upload handle but not the public
+    // media URL we send with, so a re-import would otherwise strip it.
+    const existing = new Map(
       (await this.prisma.messageTemplate.findMany({
         where:  { businessId: scope.businessId },
-        select: { name: true },
-      })).map((t) => t.name),
+        select: { name: true, cards: true },
+      })).map((t) => [t.name, t]),
     );
 
     const version = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
@@ -236,12 +286,16 @@ export class TemplatesService {
       const templates: any[] = json?.data ?? [];
 
       for (const t of templates) {
-        const bodyComponent    = t.components?.find((c: any) => c.type === 'BODY');
-        const headerComponent  = t.components?.find((c: any) => c.type === 'HEADER');
-        const footerComponent  = t.components?.find((c: any) => c.type === 'FOOTER');
-        const buttonsComponent = t.components?.find((c: any) => c.type === 'BUTTONS');
+        const parsed = parseMetaTemplate(t);
+        // An authentication template has no body text of its own — Meta writes it.
+        if (!parsed.body && parsed.category?.toUpperCase() !== 'AUTHENTICATION') continue;
 
-        if (!bodyComponent?.text) continue;
+        const previous = existing.get(t.name);
+        const previousCards: any[] = Array.isArray(previous?.cards) ? previous!.cards as any[] : [];
+        const cards = parsed.cards?.map((card, i) => ({
+          ...card,
+          headerUrl: card.headerUrl ?? previousCards[i]?.headerUrl ?? null,
+        })) ?? null;
 
         await this.prisma.messageTemplate.upsert({
           where:  { name_businessId: { name: t.name, businessId: scope.businessId } },
@@ -249,31 +303,57 @@ export class TemplatesService {
             tenantId:        scope.tenantId,
             businessId:      scope.businessId,
             name:            t.name,
-            category:        t.category,
-            language:        t.language,
-            headerType:      headerComponent?.format   ?? null,
-            headerContent:   headerComponent?.text     ?? null,
-            body:            bodyComponent.text,
-            footer:          footerComponent?.text     ?? null,
-            buttons:         buttonsComponent?.buttons ?? null,
-            variables:       [],
-            headerVariables: [],
+            category:        parsed.category ?? t.category,
+            language:        parsed.language ?? t.language,
+            templateType:    parsed.templateType ?? 'STANDARD',
+            parameterFormat: parsed.parameterFormat ?? 'POSITIONAL',
+            headerType:      parsed.headerType ?? null,
+            headerContent:   parsed.headerContent ?? null,
+            headerVariables: parsed.headerVariables ?? [],
+            body:            parsed.body,
+            variables:       parsed.variables ?? [],
+            footer:          parsed.footer ?? null,
+            buttons:         (parsed.buttons ?? []) as any,
+            cards:           (cards ?? undefined) as any,
+            ltoText:         parsed.ltoText ?? null,
+            ltoHasExpiration: parsed.ltoHasExpiration ?? false,
+            addSecurityRecommendation: parsed.addSecurityRecommendation ?? false,
+            codeExpirationMinutes:     parsed.codeExpirationMinutes ?? null,
+            messageSendTtlSeconds:     parsed.messageSendTtlSeconds ?? null,
             waTemplateId:    t.id,
             status:          t.status,
             lastSyncedAt:    new Date(),
           },
+          // Meta is the source of truth for an imported template, so refresh its
+          // content too — a template edited in Business Manager must not drift here.
           update: {
+            category:        parsed.category ?? t.category,
+            templateType:    parsed.templateType ?? 'STANDARD',
+            parameterFormat: parsed.parameterFormat ?? 'POSITIONAL',
+            headerType:      parsed.headerType ?? null,
+            headerContent:   parsed.headerContent ?? null,
+            headerVariables: parsed.headerVariables ?? [],
+            body:            parsed.body,
+            variables:       parsed.variables ?? [],
+            footer:          parsed.footer ?? null,
+            buttons:         (parsed.buttons ?? []) as any,
+            cards:           (cards ?? null) as any,
+            ltoText:         parsed.ltoText ?? null,
+            ltoHasExpiration: parsed.ltoHasExpiration ?? false,
+            addSecurityRecommendation: parsed.addSecurityRecommendation ?? false,
+            codeExpirationMinutes:     parsed.codeExpirationMinutes ?? null,
+            messageSendTtlSeconds:     parsed.messageSendTtlSeconds ?? null,
             waTemplateId: t.id,
             status:       t.status,
             lastSyncedAt: new Date(),
           },
         });
 
-        if (existingNames.has(t.name)) {
+        if (previous) {
           updated++;
         } else {
           created++;
-          existingNames.add(t.name);
+          existing.set(t.name, { name: t.name, cards: (cards ?? null) as any });
         }
       }
 
@@ -303,6 +383,13 @@ export class TemplatesService {
 
   // ── Upload header media ─────────────────────────────────────────────────────
 
+  /**
+   * One upload, two results. Meta approves a template against a resumable-upload
+   * **handle**, but sending a message needs a media id or a public **URL** — a handle is
+   * no good there. So the bytes also go to our own bucket when one is configured, and the
+   * caller gets a URL it can send with. Without a bucket the URL is null and the builder
+   * asks for one.
+   */
   async uploadHeaderMedia(scope: TenantScope, file: { buffer: Buffer; mimetype: string; originalname: string; size: number }) {
     if (!file) throw new Error('No file provided');
 
@@ -326,7 +413,8 @@ export class TemplatesService {
     });
     if (!integration?.accessToken) throw new Error('WhatsApp is not connected for this workspace');
 
-    const apiKey   = integration.accessToken;
+    const apiKey = decryptSecret(integration.accessToken);
+    if (!apiKey) throw new Error('WhatsApp access token could not be decrypted');
     const apiVer   = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
     const filename = file.originalname ?? `header.${file.mimetype.split('/')[1]}`;
 
@@ -356,6 +444,25 @@ export class TemplatesService {
       throw new Error(err?.error?.message ?? 'Upload failed');
     }
     const result: any = await uploadRes.json();
-    return { handle: result.h };
+
+    // Step 3: keep a copy we can send with. Optional — the handle alone is enough to
+    // get the template approved.
+    let url: string | null = null;
+    if (this.storage.isConfigured()) {
+      try {
+        const key = this.storage.mediaKey({
+          tenantId:   scope.tenantId,
+          businessId: scope.businessId,
+          id:         `templates/${Date.now()}`,
+          mimeType:   file.mimetype,
+          filename,
+        });
+        url = (await this.storage.put(key, file.buffer, file.mimetype)).url;
+      } catch (err) {
+        this.logger.warn(`Template media stored at Meta but not in our bucket: ${(err as Error).message}`);
+      }
+    }
+
+    return { handle: result.h, url };
   }
 }
