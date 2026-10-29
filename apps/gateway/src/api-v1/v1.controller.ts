@@ -2,7 +2,7 @@ import {
   Controller, Get, Post, Body, Param, Query, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiSecurity, ApiOperation } from '@nestjs/swagger';
-import { CurrentTenant, TenantScope, decryptSecret } from '@lib/common';
+import { CurrentTenant, TenantScope, decryptSecret, MessageEventsService } from '@lib/common';
 import { PrismaService } from '@lib/prisma';
 import { ApiKeyGuard } from './api-key.guard';
 
@@ -11,7 +11,10 @@ import { ApiKeyGuard } from './api-key.guard';
 @UseGuards(ApiKeyGuard)
 @Controller('v1')
 export class V1Controller {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly events: MessageEventsService,
+  ) {}
 
   // ── Contacts ───────────────────────────────────────────────────────────────
 
@@ -148,6 +151,7 @@ export class V1Controller {
       where: { id: conversation.id },
       data:  { lastMessageAt: new Date(), lastMessagePreview: text?.slice(0, 100) ?? templateName },
     });
+    void this.events.messageNew(message.id);
 
     return { messageId: message.id, waMessageId };
   }

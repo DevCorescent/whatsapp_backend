@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
+import { RedisIoAdapter } from '@lib/common';
 import { GatewayModule } from './gateway.module';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 
@@ -60,6 +61,11 @@ async function bootstrap() {
     origin: process.env.FRONTEND_URL ?? '*',
     credentials: true,
   });
+
+  // Socket.IO over Redis so realtime emits reach every gateway instance
+  const ioAdapter = new RedisIoAdapter(app);
+  await ioAdapter.connectToRedis();
+  app.useWebSocketAdapter(ioAdapter);
 
   // Global validation
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));

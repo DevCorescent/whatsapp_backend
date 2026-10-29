@@ -34,6 +34,8 @@ export class MessagesController {
       mediaType?:     string;
       mediaMimeType?: string;
       mediaSize?:     number;
+      fileName?:      string;
+      clientId?:      string;
     },
   ) {
     this.logger.log(`POST /messages — conversationId=${body.conversationId} type=${body.type ?? 'TEXT'} tenantId=${scope.tenantId} businessId=${scope.businessId}`);

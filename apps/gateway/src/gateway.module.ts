@@ -5,6 +5,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bull';
 import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from '@lib/prisma';
+import { RealtimeModule } from '@lib/common';
 
 // Core
 import { AuthModule }         from './auth/auth.module';
@@ -48,7 +49,6 @@ import { SegmentsModule }     from './segments/segments.module';
 import { TagsModule }         from './tags/tags.module';
 import { TicketsModule }      from './tickets/tickets.module';
 import { WebhooksModule }     from './webhooks/webhooks.module';
-import { EventsModule }       from './events/events.module';
 
 @Module({
   controllers: [GatewayController],
@@ -91,6 +91,7 @@ import { EventsModule }       from './events/events.module';
     }),
 
     PrismaModule,
+    RealtimeModule,
 
     // Auth & API access
     AuthModule,
@@ -148,9 +149,6 @@ import { EventsModule }       from './events/events.module';
     NewsletterModule,
     NotificationsModule,
     OnboardingModule,
-
-    // Real-time SSE
-    EventsModule,
   ],
 })
 export class GatewayModule {}

@@ -8,7 +8,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '@lib/prisma';
 import { Prisma } from '@prisma/client';
-import { decryptSecret, RedisPubSubService } from '@lib/common';
+import { decryptSecret, MessageEventsService } from '@lib/common';
 import { runFlowStep } from './chatbot/engine';
 import { toFlowDocument } from './chatbot/types';
 import type { FlowVariables } from './chatbot/engine';
@@ -68,7 +68,7 @@ export class InboundPipelineService {
   constructor(
     private readonly prisma:  PrismaService,
     private readonly config:  ConfigService,
-    private readonly pubSub:  RedisPubSubService,
+    private readonly events:  MessageEventsService,
   ) {}
 
   // ── Entry point ─────────────────────────────────────────────────────────────
@@ -241,16 +241,24 @@ export class InboundPipelineService {
       },
     });
 
-    // Send every outbound action to the customer.
+    // Send every outbound action to the customer and keep a copy in the thread.
     let sentCount = 0;
     for (const action of result.actions) {
       if (action.type === 'menu' && action.menu) {
         try {
-          await this.sendInteractive(creds, contact.phone, action.menu.interactive);
+          const sent = await this.sendInteractive(creds, contact.phone, action.menu.interactive);
+          await this.persistBotMessage(conversation, {
+            type: 'INTERACTIVE', content: action.menu.text, waMessageId: sent?.messages?.[0]?.id ?? null,
+            metadata: { interactive: action.menu.interactive, flowId: flow.id },
+          });
           sentCount += 1;
         } catch {
           try {
-            await this.sendText(creds, contact.phone, action.menu.text);
+            const sent = await this.sendText(creds, contact.phone, action.menu.text);
+            await this.persistBotMessage(conversation, {
+              type: 'TEXT', content: action.menu.text, waMessageId: sent?.messages?.[0]?.id ?? null,
+              metadata: { flowId: flow.id },
+            });
             sentCount += 1;
           } catch { /* skip */ }
         }
@@ -258,7 +266,11 @@ export class InboundPipelineService {
       }
       if ((action.type === 'message' || action.type === 'ai') && action.text) {
         try {
-          await this.sendText(creds, contact.phone, action.text);
+          const sent = await this.sendText(creds, contact.phone, action.text);
+          await this.persistBotMessage(conversation, {
+            type: 'TEXT', content: action.text, waMessageId: sent?.messages?.[0]?.id ?? null,
+            metadata: { flowId: flow.id },
+          });
           sentCount += 1;
         } catch { /* skip */ }
       }
@@ -285,6 +297,7 @@ export class InboundPipelineService {
     // Handoff: assign to a human agent.
     if (result.handoff) {
       await this.assignConversationToAgent(conversation).catch(() => {});
+      void this.events.conversationUpdated(conversation.id);
       return true;
     }
 
@@ -429,25 +442,34 @@ export class InboundPipelineService {
       return;
     }
 
-    await this.prisma.message.create({
+    await this.persistBotMessage(conversation, { type: 'TEXT', content: text, waMessageId });
+  }
+
+  /** Saves an automated outbound (AI or flow) into the thread and pushes it to agents. */
+  private async persistBotMessage(
+    conversation: { id: string; tenantId: string; businessId: string },
+    msg: { type: 'TEXT' | 'INTERACTIVE'; content: string; waMessageId: string | null; metadata?: Record<string, unknown> },
+  ): Promise<void> {
+    const saved = await this.prisma.message.create({
       data: {
         tenantId:       conversation.tenantId,
         businessId:     conversation.businessId,
         conversationId: conversation.id,
         direction:      'OUTBOUND',
         status:         'SENT',
-        type:           'TEXT',
-        content:        text,
-        waMessageId,
+        type:           msg.type,
+        content:        msg.content,
+        waMessageId:    msg.waMessageId,
+        metadata:       msg.metadata as any,
         isAiGenerated:  true,
         isNote:         false,
       },
     });
     await this.prisma.conversation.update({
       where: { id: conversation.id },
-      data:  { lastMessageAt: new Date(), lastMessagePreview: text.slice(0, 100) },
+      data:  { lastMessageAt: new Date(), lastMessagePreview: msg.content.slice(0, 100) },
     });
-    this.pubSub.publish(conversation.tenantId, { event: 'new-message', conversationId: conversation.id }).catch(() => {});
+    void this.events.messageNew(saved.id);
   }
 
   private async getKnowledgeBaseFaqs(businessId: string): Promise<{ question: string; answer: string }[]> {

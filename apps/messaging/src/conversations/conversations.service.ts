@@ -2,13 +2,22 @@ import {
   Injectable, NotFoundException, BadRequestException, Logger,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope, decryptSecret } from '@lib/common';
+import { TenantScope, decryptSecret, MessageEventsService } from '@lib/common';
+
+const WA_API_VERSION = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
+
+const MEDIA_PREVIEW: Record<string, string> = {
+  image: '📷 Photo', video: '🎥 Video', audio: '🎵 Voice message', document: '📄 Document', sticker: '😊 Sticker',
+};
 
 @Injectable()
 export class ConversationsService {
   private readonly logger = new Logger(ConversationsService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly events: MessageEventsService,
+  ) {}
 
   // ── List ───────────────────────────────────────────────────────────────────
 
@@ -112,36 +121,47 @@ export class ConversationsService {
 
   async update(scope: TenantScope, id: string, data: {
     status?: string; isAiActive?: boolean; assignedToId?: string | null;
-    labels?: string[];
+    labels?: string[]; unreadCount?: number;
   }) {
-    await this.findOne(scope, id); // 404 guard
-    return this.prisma.conversation.update({
+    const exists = await this.prisma.conversation.findFirst({
+      where: { id, tenantId: scope.tenantId, businessId: scope.businessId }, select: { id: true },
+    });
+    if (!exists) throw new NotFoundException('Conversation not found');
+
+    const updated = await this.prisma.conversation.update({
       where: { id },
       data:  {
         status:       data.status as any,
         isAiActive:   data.isAiActive,
         assignedToId: data.assignedToId,
         labels:       data.labels,
+        ...(data.unreadCount === 0 ? { unreadCount: 0 } : {}),
       },
     });
+    void this.events.conversationUpdated(id);
+    return updated;
   }
 
   // ── Send outbound message ──────────────────────────────────────────────────
 
   async sendMessage(scope: TenantScope, conversationId: string, payload: {
     text?: string; mediaUrl?: string; mediaId?: string; mediaType?: string;
-    mediaMimeType?: string; mediaSize?: number; type?: string; isNote?: boolean;
-    interactive?: Record<string, unknown>; replyToId?: string;
+    mediaMimeType?: string; mediaSize?: number; fileName?: string; type?: string; isNote?: boolean;
+    interactive?: Record<string, unknown>; replyToId?: string; clientId?: string;
   }) {
     this.logger.log(`sendMessage start — conversationId=${conversationId} tenantId=${scope.tenantId} businessId=${scope.businessId} type=${payload.type ?? 'TEXT'} isNote=${payload.isNote}`);
 
-    const { data: conv } = await this.findOne(scope, conversationId);
-    this.logger.log(`sendMessage conv found — whatsappIntegrationId=${conv.whatsappIntegrationId ?? 'null'}`);
+    const conv = await this.prisma.conversation.findFirst({
+      where:   { id: conversationId, tenantId: scope.tenantId, businessId: scope.businessId },
+      include: { contact: { select: { phone: true, waId: true } } },
+    });
+    if (!conv) throw new NotFoundException('Conversation not found');
 
     const isInteractive = (payload.type ?? '').toUpperCase() === 'INTERACTIVE';
-    if (!payload.text && !payload.mediaUrl && !isInteractive) {
-      this.logger.warn('sendMessage — missing text/mediaUrl/interactive');
-      throw new BadRequestException('Either text, mediaUrl, or interactive payload is required');
+    const hasMedia = Boolean(payload.mediaUrl || payload.mediaId);
+    if (!payload.text && !hasMedia && !isInteractive) {
+      this.logger.warn('sendMessage — missing text/media/interactive');
+      throw new BadRequestException('Either text, media, or interactive payload is required');
     }
 
     // Load WhatsApp integration for this conversation
@@ -158,72 +178,75 @@ export class ConversationsService {
     if (!integration) throw new BadRequestException('No active WhatsApp integration found');
     if (!integration.accessToken) throw new BadRequestException('WhatsApp integration has no access token');
 
-    const contact = conv.contact as any;
-    const to: string = contact.phone ?? contact.waId;
+    const to = conv.contact.phone ?? conv.contact.waId ?? '';
     this.logger.log(`sendMessage contact — to=${to ? to.slice(0, 6) + '***' : 'MISSING'}`);
     if (!to) throw new BadRequestException('Contact has no phone number');
 
+    let waMessageId: string | null = null;
     if (!payload.isNote) {
       const accessToken = decryptSecret(integration.accessToken);
       if (!accessToken) throw new BadRequestException('WhatsApp integration access token could not be decrypted — check ENCRYPTION_KEY');
-      this.logger.log(`sendMessage → calling Meta API via sendWhatsApp`);
-      await this.sendWhatsApp(integration.phoneNumberId, accessToken, to, payload);
-      this.logger.log(`sendMessage ← Meta API OK`);
+      waMessageId = await this.sendWhatsApp(integration.phoneNumberId, accessToken, to, payload);
+      this.logger.log(`sendMessage ← Meta API OK waMessageId=${waMessageId ?? 'none'}`);
     }
 
-    const messageData: any = {
-      tenantId:       scope.tenantId,
-      businessId:     scope.businessId,
-      conversationId,
-      sentById:       scope.userId,
-      direction:      'OUTBOUND',
-      type:           (payload.type ?? 'TEXT') as any,
-      content:        payload.text,
-      mediaUrl:       payload.mediaUrl,
-      mediaType:      payload.mediaType,
-      mediaMimeType:  payload.mediaMimeType,
-      status:         payload.isNote ? 'DELIVERED' : 'SENT',
-      isNote:         payload.isNote ?? false,
-      isAiGenerated:  false,
-      replyToId:      payload.replyToId ?? null,
-    };
-    if (payload.interactive) {
-      messageData.metadata = { interactive: payload.interactive };
-    }
-    if (payload.mediaId != null) {
-      messageData.mediaId = payload.mediaId;
-    }
-    const message = await this.prisma.message.create({ data: messageData });
+    const mediaKind = (payload.mediaType ?? (hasMedia ? (payload.type ?? '').toLowerCase() : '')).toLowerCase();
+    const metadata: Record<string, unknown> = {};
+    if (payload.interactive) metadata.interactive = payload.interactive;
+    if (payload.mediaId)     metadata.mediaId = payload.mediaId;
+    if (payload.fileName)    metadata.filename = payload.fileName;
+    if (payload.clientId)    metadata.clientId = payload.clientId;
+
+    const message = await this.prisma.message.create({
+      data: {
+        tenantId:       scope.tenantId,
+        businessId:     scope.businessId,
+        conversationId,
+        sentById:       scope.userId,
+        waMessageId,
+        direction:      'OUTBOUND',
+        type:           (payload.type ?? 'TEXT') as any,
+        content:        payload.text ?? null,
+        mediaUrl:       payload.mediaUrl ?? null,
+        mediaType:      payload.mediaType ?? null,
+        mediaMimeType:  payload.mediaMimeType ?? null,
+        mediaSize:      payload.mediaSize ?? null,
+        metadata:       Object.keys(metadata).length ? (metadata as any) : undefined,
+        status:         payload.isNote ? 'DELIVERED' : 'SENT',
+        isNote:         payload.isNote ?? false,
+        isAiGenerated:  false,
+        replyToId:      payload.replyToId ?? null,
+      },
+      include: { sentBy: { select: { id: true, name: true } } },
+    });
     this.logger.log(`sendMessage saved — messageId=${message.id}`);
 
     await this.prisma.conversation.update({
       where: { id: conversationId },
       data:  {
-        lastMessageAt:      new Date(),
+        lastMessageAt:      message.createdAt,
         lastMessagePreview: payload.text?.slice(0, 100)
-          ?? (payload.mediaType === 'image'    ? '📷 Photo'
-            : payload.mediaType === 'video'    ? '🎥 Video'
-            : payload.mediaType === 'audio'    ? '🎵 Voice message'
-            : payload.mediaType === 'document' ? '📄 Document'
-            :                                    '📎 Attachment'),
+          ?? (hasMedia ? (MEDIA_PREVIEW[mediaKind] ?? '📎 Attachment') : (isInteractive ? '💬 Interactive' : '')),
       },
     });
 
+    void this.events.messageNew(message.id);
     this.logger.log(`sendMessage done — messageId=${message.id}`);
     return message;
   }
 
   // ── Internal ───────────────────────────────────────────────────────────────
 
+  /** Sends via Meta Graph and returns the WhatsApp message id (`wamid.…`) for status tracking. */
   private async sendWhatsApp(
     phoneNumberId: string,
     accessToken:   string,
     to:            string,
     payload:       {
-      text?: string; mediaUrl?: string; mediaId?: string; type?: string;
+      text?: string; mediaUrl?: string; mediaId?: string; type?: string; fileName?: string;
       interactive?: Record<string, unknown>; replyToId?: string;
     },
-  ) {
+  ): Promise<string | null> {
     const type = (payload.type ?? 'text').toLowerCase();
     let body: Record<string, unknown>;
 
@@ -232,37 +255,39 @@ export class ConversationsService {
     } else if (type === 'text' || (!payload.mediaUrl && !payload.mediaId)) {
       body = { type: 'text', text: { body: payload.text, preview_url: false } };
     } else {
-      const mediaPayload = payload.mediaId
-        ? { id: payload.mediaId }
-        : { link: payload.mediaUrl };
-      body = { type, [type]: mediaPayload };
+      const media: Record<string, unknown> = payload.mediaId ? { id: payload.mediaId } : { link: payload.mediaUrl };
+      if (payload.text && type !== 'audio' && type !== 'sticker') media.caption = payload.text;
+      if (type === 'document' && payload.fileName) media.filename = payload.fileName;
+      body = { type, [type]: media };
     }
 
     const apiBody: Record<string, unknown> = { messaging_product: 'whatsapp', to, ...body };
     if (payload.replyToId) {
-      apiBody.context = { message_id: payload.replyToId };
+      // Meta wants the WhatsApp id of the quoted message, not our row id.
+      const quoted = await this.prisma.message.findUnique({ where: { id: payload.replyToId }, select: { waMessageId: true } });
+      if (quoted?.waMessageId) apiBody.context = { message_id: quoted.waMessageId };
     }
 
-    const metaUrl = `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`;
-    this.logger.log(`sendWhatsApp → ${metaUrl} type=${type} tokenPrefix=${accessToken.slice(0, 6)}...`);
+    const metaUrl = `https://graph.facebook.com/${WA_API_VERSION}/${phoneNumberId}/messages`;
+    this.logger.log(`sendWhatsApp → ${metaUrl} type=${type}`);
 
-    const res = await fetch(
-      metaUrl,
-      {
-        method:  'POST',
-        headers: {
-          Authorization:  `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(apiBody),
-      },
-    );
+    const res = await fetch(metaUrl, {
+      method:  'POST',
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      body:    JSON.stringify(apiBody),
+    });
 
     const responseText = await res.text();
     if (!res.ok) {
       this.logger.error(`sendWhatsApp ← Meta ${res.status} ${res.statusText}: ${responseText.slice(0, 600)}`);
-      throw new BadRequestException(`WhatsApp API error: ${responseText}`);
+      let reason = responseText;
+      try { reason = JSON.parse(responseText)?.error?.message ?? responseText; } catch { /* raw */ }
+      throw new BadRequestException(`WhatsApp API error: ${reason}`);
     }
-    this.logger.log(`sendWhatsApp ← Meta ${res.status} OK: ${responseText.slice(0, 200)}`);
+    try {
+      return (JSON.parse(responseText)?.messages?.[0]?.id as string | undefined) ?? null;
+    } catch {
+      return null;
+    }
   }
 }

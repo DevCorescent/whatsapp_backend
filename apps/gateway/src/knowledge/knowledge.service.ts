@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope } from '@lib/common';
+import { TenantScope, MessageEventsService } from '@lib/common';
 import { AiService } from '../ai/ai.service';
 
 @Injectable()
@@ -10,6 +10,7 @@ export class KnowledgeService {
     private readonly prisma:  PrismaService,
     private readonly ai:      AiService,
     private readonly config:  ConfigService,
+    private readonly events:  MessageEventsService,
     @Optional() private readonly queue?: any,
   ) {}
 
@@ -765,6 +766,7 @@ export class KnowledgeService {
       where: { id: conversationId },
       data:  { lastMessageAt: message.createdAt, lastMessagePreview: message.content ?? '' },
     });
+    void this.events.messageNew(message.id);
 
     return { success: true, data: { message, sent: sent.length, dropped, maxRows: MAX_ROWS } };
   }

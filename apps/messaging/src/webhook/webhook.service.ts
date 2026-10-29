@@ -2,7 +2,7 @@ import * as crypto from 'crypto';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '@lib/prisma';
-import { WebhookDispatchService, RedisPubSubService, decryptSecret } from '@lib/common';
+import { WebhookDispatchService, MessageEventsService, decryptSecret } from '@lib/common';
 import { StatusBufferService } from './status-buffer.service';
 import { InboundPipelineService } from './inbound-pipeline.service';
 import type { WAChangeValue, WAMessage, WAStatus, WAContact } from './webhook.types';
@@ -33,7 +33,7 @@ export class WebhookService {
     private readonly webhooks:     WebhookDispatchService,
     private readonly statusBuffer: StatusBufferService,
     private readonly pipeline:     InboundPipelineService,
-    private readonly pubSub:       RedisPubSubService,
+    private readonly events:       MessageEventsService,
     private readonly cfg:          ConfigService,
   ) {}
 
@@ -211,8 +211,9 @@ export class WebhookService {
     }
 
     // 3. Save message + update conversation (idempotent via waMessageId unique)
+    let savedId: string;
     try {
-      await this.prisma.$transaction([
+      const [saved] = await this.prisma.$transaction([
         this.prisma.message.create({
           data: {
             tenantId:       identity.tenantId,
@@ -236,6 +237,7 @@ export class WebhookService {
           },
         }),
       ]);
+      savedId = saved.id;
       this.logger.log(`Saved inbound ${message.id} → conversation ${conversation.id}`);
     } catch (err: any) {
       if (err?.code === 'P2002') {
@@ -256,10 +258,8 @@ export class WebhookService {
       phoneNumberId: identity.phoneNumberId,
     });
 
-    // 5. Real-time notification via Redis pub/sub → SSE
-    this.logger.log(`[WH] Publishing new-message tenantId=${identity.tenantId} conversationId=${conversation.id}`);
-    this.pubSub.publish(identity.tenantId, { event: 'new-message', conversationId: conversation.id })
-      .catch((err) => this.logger.error(`[WH] pubSub.publish failed: ${err?.message ?? err}`));
+    // 5. Real-time push to every agent in this business
+    void this.events.messageNew(savedId);
 
     // 6. Chatbot flow + AI auto-reply pipeline — fire-and-forget
     this.pipeline.process({

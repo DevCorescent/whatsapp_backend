@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { RedisPubSubService } from '@lib/common';
+import { RealtimeService, type RtStatusUpdate } from '@lib/common';
 
 interface Buffered {
   tenantId:    string;
@@ -24,6 +24,12 @@ const LOWER_STATUSES: Record<string, string[]> = {
   failed:    ['PENDING', 'SENT', 'DELIVERED', 'READ'],
 };
 
+const CAMPAIGN_COUNTER: Record<string, 'deliveredCount' | 'readCount' | 'failedCount'> = {
+  delivered: 'deliveredCount',
+  read:      'readCount',
+  failed:    'failedCount',
+};
+
 @Injectable()
 export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(StatusBufferService.name);
@@ -33,12 +39,12 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
   private timer: NodeJS.Timeout | null = null;
 
   constructor(
-    private readonly prisma:  PrismaService,
-    private readonly pubSub:  RedisPubSubService,
+    private readonly prisma:   PrismaService,
+    private readonly realtime: RealtimeService,
   ) {}
 
   onModuleInit() {
-    this.timer = setInterval(() => { void this.flush(); }, 5_000);
+    this.timer = setInterval(() => { void this.flush(); }, 1_000);
   }
 
   async onModuleDestroy() {
@@ -74,76 +80,138 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
       else groups.set(key, [item]);
     }
 
-    const ops: Promise<unknown>[] = [];
+    const touchedCampaigns = new Set<string>();
 
     for (const group of groups.values()) {
-      const { tenantId, status, rank } = group[0];
+      const { tenantId, status } = group[0];
       const ids = group.map(g => g.waMessageId);
-
       const lowerStatuses = LOWER_STATUSES[status] ?? [];
       const now = new Date();
 
-      // Bulk update messages table — status only (no timestamp columns on Message)
-      ops.push(
-        this.prisma.message.updateMany({
+      try {
+        await this.prisma.message.updateMany({
           where: { tenantId, waMessageId: { in: ids }, status: { in: lowerStatuses as never[] } },
           data:  { status: status.toUpperCase() as never },
-        }).catch(err => this.logger.error(`message flush (${status}): ${err.message}`)),
-      );
+        });
+      } catch (err: any) {
+        this.logger.error(`message flush (${status}): ${err.message}`);
+      }
 
-      // Bulk update campaign_contacts table (has deliveredAt / readAt / failedAt columns)
-      if (status === 'delivered') {
-        ops.push(
-          this.prisma.campaignContact.updateMany({
-            where: { waMessageId: { in: ids } },
-            data:  { status: 'DELIVERED', deliveredAt: now },
-          }).catch(err => this.logger.error(`campaignContact flush (delivered): ${err.message}`)),
-        );
-      } else if (status === 'read') {
-        ops.push(
-          this.prisma.campaignContact.updateMany({
-            where: { waMessageId: { in: ids } },
-            data:  { status: 'READ', readAt: now },
-          }).catch(err => this.logger.error(`campaignContact flush (read): ${err.message}`)),
-        );
-      } else if (status === 'failed') {
-        const failedNoCode = group.filter(g => g.errorCode === undefined);
-        if (failedNoCode.length) {
-          ops.push(
-            this.prisma.campaignContact.updateMany({
-              where: { waMessageId: { in: failedNoCode.map(g => g.waMessageId) } },
-              data:  { status: 'FAILED', failedAt: now },
-            }).catch(err => this.logger.error(`campaignContact flush (failed): ${err.message}`)),
-          );
-        }
+      await this.flushCampaignContacts(group, status, now, touchedCampaigns);
+      await this.emitMessageStatuses(group, status);
+    }
 
-        const codeGroups = new Map<string, Buffered[]>();
-        for (const f of group.filter(g => g.errorCode !== undefined)) {
-          const codeKey = `${f.errorCode}:${f.errorTitle ?? ''}`;
-          const cg = codeGroups.get(codeKey);
-          if (cg) cg.push(f);
-          else codeGroups.set(codeKey, [f]);
-        }
-        for (const cg of codeGroups.values()) {
-          const { errorCode, errorTitle } = cg[0];
-          ops.push(
-            this.prisma.campaignContact.updateMany({
-              where: { waMessageId: { in: cg.map(g => g.waMessageId) } },
-              data:  { status: 'FAILED', failedAt: now, errorCode, errorTitle, failedReason: errorTitle },
-            }).catch(err => this.logger.error(`campaignContact flush (failed w/code): ${err.message}`)),
-          );
-        }
+    for (const campaignId of touchedCampaigns) await this.emitCampaignProgress(campaignId);
+
+    this.logger.debug(`Flushed ${items.length} status updates`);
+  }
+
+  /** Per-recipient rows plus the campaign's aggregate counters (only for real transitions). */
+  private async flushCampaignContacts(group: Buffered[], status: string, now: Date, touched: Set<string>) {
+    const counter = CAMPAIGN_COUNTER[status];
+    if (!counter) return;
+    const ids = group.map(g => g.waMessageId);
+
+    let rows: { id: string; campaignId: string; status: string; waMessageId: string | null }[];
+    try {
+      rows = await this.prisma.campaignContact.findMany({
+        where:  { waMessageId: { in: ids } },
+        select: { id: true, campaignId: true, status: true, waMessageId: true },
+      });
+    } catch (err: any) {
+      this.logger.error(`campaignContact lookup (${status}): ${err.message}`);
+      return;
+    }
+    if (rows.length === 0) return;
+
+    const rank = STATUS_RANK[status];
+    const transitioning = rows.filter(r => (STATUS_RANK[r.status.toLowerCase()] ?? 0) < rank);
+    if (transitioning.length === 0) return;
+
+    const byId = new Map(group.map(g => [g.waMessageId, g]));
+    const ops: Promise<unknown>[] = [];
+
+    if (status === 'delivered') {
+      ops.push(this.prisma.campaignContact.updateMany({
+        where: { id: { in: transitioning.map(r => r.id) } },
+        data:  { status: 'DELIVERED', deliveredAt: now },
+      }));
+    } else if (status === 'read') {
+      ops.push(this.prisma.campaignContact.updateMany({
+        where: { id: { in: transitioning.map(r => r.id) } },
+        data:  { status: 'READ', readAt: now },
+      }));
+    } else if (status === 'failed') {
+      for (const row of transitioning) {
+        const b = byId.get(row.waMessageId ?? '');
+        ops.push(this.prisma.campaignContact.update({
+          where: { id: row.id },
+          data:  {
+            status: 'FAILED', failedAt: now,
+            ...(b?.errorCode !== undefined ? { errorCode: b.errorCode, errorTitle: b.errorTitle, failedReason: b.errorTitle } : {}),
+          },
+        }));
       }
     }
 
-    await Promise.allSettled(ops);
-    this.logger.debug(`Flushed ${items.length} status updates → ${ops.length} bulk DB ops`);
+    const perCampaign = new Map<string, number>();
+    for (const r of transitioning) perCampaign.set(r.campaignId, (perCampaign.get(r.campaignId) ?? 0) + 1);
+    for (const [campaignId, n] of perCampaign) {
+      ops.push(this.prisma.campaign.update({ where: { id: campaignId }, data: { [counter]: { increment: n } } }));
+      touched.add(campaignId);
+    }
 
-    // Notify SSE subscribers so message status icons update in real-time
-    const affectedTenants = new Set(items.map(i => i.tenantId));
-    for (const tenantId of affectedTenants) {
-      this.pubSub.publish(tenantId, { event: 'status-update' })
-        .catch(err => this.logger.error(`pubSub status-update failed: ${err?.message ?? err}`));
+    const results = await Promise.allSettled(ops);
+    for (const r of results) if (r.status === 'rejected') this.logger.error(`campaign flush (${status}): ${r.reason?.message ?? r.reason}`);
+  }
+
+  private async emitMessageStatuses(group: Buffered[], status: string) {
+    let rows: { id: string; conversationId: string; businessId: string | null; status: string; waMessageId: string | null }[];
+    try {
+      rows = await this.prisma.message.findMany({
+        where:  { waMessageId: { in: group.map(g => g.waMessageId) } },
+        select: { id: true, conversationId: true, businessId: true, status: true, waMessageId: true },
+      });
+    } catch (err: any) {
+      this.logger.error(`message status lookup: ${err.message}`);
+      return;
+    }
+    const byWa = new Map(group.map(g => [g.waMessageId, g]));
+    const perBusiness = new Map<string, RtStatusUpdate[]>();
+    for (const row of rows) {
+      if (!row.businessId) continue;
+      const b = byWa.get(row.waMessageId ?? '');
+      const update: RtStatusUpdate = { messageId: row.id, conversationId: row.conversationId, status: row.status };
+      if (b?.errorCode !== undefined && status === 'failed') {
+        update.errorCode  = b.errorCode;
+        update.errorTitle = b.errorTitle;
+      }
+      const list = perBusiness.get(row.businessId) ?? [];
+      list.push(update);
+      perBusiness.set(row.businessId, list);
+    }
+    for (const [businessId, updates] of perBusiness) {
+      this.realtime.toBusiness(businessId, 'message:status', { updates });
+    }
+  }
+
+  private async emitCampaignProgress(campaignId: string) {
+    try {
+      const c = await this.prisma.campaign.findUnique({
+        where:  { id: campaignId },
+        select: {
+          id: true, businessId: true, status: true, totalCount: true, sentCount: true, deliveredCount: true,
+          readCount: true, repliedCount: true, failedCount: true, costMinor: true, completedAt: true,
+        },
+      });
+      if (!c) return;
+      this.realtime.toBusiness(c.businessId, 'campaign:progress', {
+        id: c.id, status: c.status, totalCount: c.totalCount, sentCount: c.sentCount,
+        deliveredCount: c.deliveredCount, readCount: c.readCount, repliedCount: c.repliedCount,
+        failedCount: c.failedCount, costMinor: c.costMinor, completedAt: c.completedAt?.toISOString() ?? null,
+      });
+    } catch (err: any) {
+      this.logger.warn(`campaign:progress emit failed ${campaignId}: ${err.message}`);
     }
   }
 }
