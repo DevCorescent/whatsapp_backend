@@ -258,18 +258,30 @@ export class ContactsService {
     contacts: Array<{
       name?: string; phone: string; email?: string; company?: string;
       designation?: string; location?: string; source?: string; notes?: string;
-      tags?: string[];
+      tags?: string[]; customFields?: Record<string, string>;
     }>,
     importTags: string[] = [],
     dryRun = false,
+    opts: { mode?: 'skip' | 'update'; importId?: string; fileName?: string; sheetName?: string } = {},
   ) {
+    const mode  = opts.mode === 'update' ? 'update' : 'skip';
     const valid = contacts.filter(c => c.phone?.trim());
+
+    const existingRows = valid.length
+      ? await this.prisma.contact.findMany({
+          where:  { businessId: scope.businessId, phone: { in: valid.map(c => c.phone) } },
+          select: { id: true, phone: true, customFields: true },
+        })
+      : [];
+    const existingByPhone = new Map(existingRows.map(r => [r.phone, r]));
+
     if (dryRun) {
+      const existingCount = valid.filter(c => existingByPhone.has(c.phone)).length;
       return {
-        total:   valid.length,
-        created: valid.length,
-        skipped: contacts.length - valid.length,
-        sample:  valid.slice(0, 3).map(c => ({ name: c.name, phone: c.phone })),
+        total:         valid.length,
+        newCount:      valid.length - existingCount,
+        existingCount,
+        sample:        valid.slice(0, 3).map(c => ({ name: c.name, phone: c.phone })),
       };
     }
 
@@ -277,38 +289,129 @@ export class ContactsService {
     const errors: { ref?: string; reason: string }[] = [];
     for (const item of valid) {
       try {
-        const allTags = [...new Set([...(item.tags ?? []), ...importTags])];
-        const existing = await this.prisma.contact.findUnique({
-          where: { phone_businessId: { phone: item.phone, businessId: scope.businessId } },
-          select: { id: true },
-        });
-        const contact = await this.prisma.contact.upsert({
-          where:  { phone_businessId: { phone: item.phone, businessId: scope.businessId } },
-          create: {
-            name:        item.name ?? item.phone,
-            phone:       item.phone,
-            email:       item.email,
-            company:     item.company,
-            designation: item.designation,
-            location:    item.location,
-            source:      item.source ?? 'import',
-            notes:       item.notes,
-            tenantId:    scope.tenantId,
-            businessId:  scope.businessId,
-          },
-          update: {
-            ...(item.name  && { name: item.name }),
-            ...(item.email && { email: item.email }),
-          },
-        });
-        if (allTags.length) await this.syncTagsAdd(scope, contact.id, allTags);
-        if (existing) updated++; else created++;
+        const allTags  = [...new Set([...(item.tags ?? []), ...importTags])];
+        const existing = existingByPhone.get(item.phone);
+        const custom   = item.customFields && Object.keys(item.customFields).length ? item.customFields : undefined;
+
+        if (existing && mode === 'skip') { skipped++; continue; }
+
+        let contactId: string;
+        if (existing) {
+          const prevCustom = (existing.customFields ?? {}) as Record<string, unknown>;
+          await this.prisma.contact.update({
+            where: { id: existing.id },
+            data: {
+              ...(item.name        && { name:        item.name }),
+              ...(item.email       && { email:       item.email }),
+              ...(item.company     && { company:     item.company }),
+              ...(item.designation && { designation: item.designation }),
+              ...(item.location    && { location:    item.location }),
+              ...(item.source      && { source:      item.source }),
+              ...(item.notes       && { notes:       item.notes }),
+              ...(custom           && { customFields: { ...prevCustom, ...custom } as any }),
+            },
+          });
+          contactId = existing.id;
+          updated++;
+        } else {
+          const row = await this.prisma.contact.create({
+            data: {
+              name:         item.name ?? item.phone,
+              phone:        item.phone,
+              email:        item.email,
+              company:      item.company,
+              designation:  item.designation,
+              location:     item.location,
+              source:       item.source ?? 'import',
+              notes:        item.notes,
+              customFields: custom as any,
+              tenantId:     scope.tenantId,
+              businessId:   scope.businessId,
+            },
+            select: { id: true },
+          });
+          contactId = row.id;
+          created++;
+        }
+        if (allTags.length) await this.syncTagsAdd(scope, contactId, allTags);
       } catch (err: any) {
         failed++;
         errors.push({ ref: item.phone, reason: String(err.message).slice(0, 200) });
       }
     }
+
+    if (opts.importId) {
+      await this.recordImport(scope, opts.importId, {
+        mode, fileName: opts.fileName, sheetName: opts.sheetName,
+        total: valid.length, created, updated, skipped, failed,
+      });
+    }
+
     return { total: valid.length, created, updated, skipped, failed, errors };
+  }
+
+  // ── Import history ─────────────────────────────────────────────────────────
+
+  /** One row per import run; each client batch adds its counts to the same id. */
+  private async recordImport(
+    scope: TenantScope,
+    importId: string,
+    counts: { mode: string; fileName?: string; sheetName?: string; total: number; created: number; updated: number; skipped: number; failed: number },
+  ) {
+    const existing = await this.prisma.contactImport.findFirst({
+      where: { id: importId, businessId: scope.businessId },
+      select: { id: true },
+    });
+    if (existing) {
+      await this.prisma.contactImport.update({
+        where: { id: importId },
+        data: {
+          total:   { increment: counts.total },
+          created: { increment: counts.created },
+          updated: { increment: counts.updated },
+          skipped: { increment: counts.skipped },
+          failed:  { increment: counts.failed },
+        },
+      });
+      return;
+    }
+    await this.prisma.contactImport.create({
+      data: {
+        id:         importId,
+        tenantId:   scope.tenantId,
+        businessId: scope.businessId,
+        userId:     scope.userId,
+        fileName:   counts.fileName,
+        sheetName:  counts.sheetName,
+        mode:       counts.mode,
+        total:      counts.total,
+        created:    counts.created,
+        updated:    counts.updated,
+        skipped:    counts.skipped,
+        failed:     counts.failed,
+      },
+    }).catch(err => {
+      // Two batches of the same run can race on the first insert; fold the loser in.
+      if (err?.code !== 'P2002') throw err;
+      return this.recordImport(scope, importId, counts);
+    });
+  }
+
+  async listImports(scope: TenantScope, limit = 20) {
+    const rows = await this.prisma.contactImport.findMany({
+      where:   { businessId: scope.businessId },
+      orderBy: { createdAt: 'desc' },
+      take:    Math.min(100, limit),
+    });
+    const userIds = [...new Set(rows.map(r => r.userId).filter((id): id is string => !!id))];
+    const users = userIds.length
+      ? await this.prisma.user.findMany({ where: { id: { in: userIds } }, select: { id: true, name: true, email: true } })
+      : [];
+    const byId = new Map(users.map(u => [u.id, u]));
+    return rows.map(r => ({
+      ...r,
+      importedBy: r.userId ? (byId.get(r.userId) ?? null) : null,
+    }));
   }
 
   // ── Sources ────────────────────────────────────────────────────────────────

@@ -232,6 +232,7 @@ model Tenant {
   quickReplies         QuickReply[]
   whatsAppIntegrations WhatsAppIntegration[]
   webhookEndpoints     WebhookEndpoint[]
+  contactImports       ContactImport[]
 
   @@index([parentId])
   @@index([referredById])
@@ -285,6 +286,7 @@ model Business {
   flowRuns         FlowRun[]
   tags             Tag[]
   quickReplies     QuickReply[]
+  contactImports   ContactImport[]
 
   // Multiple WhatsApp numbers/integrations per business
   whatsappIntegrations WhatsAppIntegration[]
@@ -498,6 +500,34 @@ model Contact {
   @@index([tenantId])
   @@index([businessId])
   @@map("contacts")
+}
+
+// ─── CONTACT IMPORT (one row per spreadsheet import run) ─────────────────────
+//
+// The client sends a file in batches of 500 under one `id`; each batch upserts
+// this row and adds its counts, so the record is complete once the last batch lands.
+
+model ContactImport {
+  id         String   @id
+  tenantId   String
+  businessId String
+  userId     String?
+  fileName   String?
+  sheetName  String?
+  mode       String   @default("skip")
+  total      Int      @default(0)
+  created    Int      @default(0)
+  updated    Int      @default(0)
+  skipped    Int      @default(0)
+  failed     Int      @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  business Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, createdAt])
+  @@map("contact_imports")
 }
 
 // ─── TAG ──────────────────────────────────────────────────────────────────────

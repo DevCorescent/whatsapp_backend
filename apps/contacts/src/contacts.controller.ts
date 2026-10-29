@@ -47,6 +47,12 @@ export class ContactsController {
     return this.svc.listTags(scope);
   }
 
+  @Get('imports')
+  @ApiOperation({ summary: 'Recent spreadsheet import runs for this business' })
+  listImports(@CurrentTenant() scope: TenantScope, @Query('limit') limit?: string) {
+    return this.svc.listImports(scope, limit ? Number(limit) : undefined);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get a single contact' })
   findOne(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
@@ -77,7 +83,12 @@ export class ContactsController {
     const contacts: any[] = body.contacts ?? body.rows ?? [];
     const importTags: string[] = body.importTags ?? [];
     const dryRun: boolean = body.dryRun === true;
-    return this.svc.importContactsV2(scope, contacts, importTags, dryRun);
+    return this.svc.importContactsV2(scope, contacts, importTags, dryRun, {
+      mode:      body.mode,
+      importId:  typeof body.importId  === 'string' ? body.importId.slice(0, 64)   : undefined,
+      fileName:  typeof body.fileName  === 'string' ? body.fileName.slice(0, 255)  : undefined,
+      sheetName: typeof body.sheetName === 'string' ? body.sheetName.slice(0, 255) : undefined,
+    });
   }
 
   @Patch(':id')

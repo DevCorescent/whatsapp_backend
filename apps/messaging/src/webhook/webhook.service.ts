@@ -267,7 +267,7 @@ export class WebhookService {
       businessId:         identity.businessId,
       conversationId:     conversation.id,
       contactId:          contactRow.id,
-      content,
+      content:            content ?? '',
       interactiveReplyId: (message as any).interactive?.list_reply?.id
                        ?? (message as any).interactive?.button_reply?.id
                        ?? null,
