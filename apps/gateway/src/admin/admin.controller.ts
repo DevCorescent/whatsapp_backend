@@ -133,14 +133,16 @@ export class AdminController {
   }
 
   @Post('tenants/:id/wallet')
-  @ApiOperation({ summary: 'Adjust wallet balance for a tenant (super admin)' })
+  @ApiOperation({ summary: 'Add or deduct wallet credit for a tenant — signed paise (super admin)' })
   adjustWallet(
     @CurrentTenant() scope: TenantScope,
     @Param('id') tenantId: string,
-    @Body('amount') amount: number,
+    @Body('amountMinor') amountMinor: number | undefined,
+    @Body('amount') amount: number | undefined,
     @Body('note') note: string,
   ) {
-    return this.svc.adminAdjustWallet(scope, tenantId, amount, note);
+    // The panel sends `amountMinor`; `amount` is accepted for older callers.
+    return this.svc.adminAdjustWallet(scope, tenantId, amountMinor ?? amount ?? NaN, note);
   }
 
   @Post('tenants/:id/plan')

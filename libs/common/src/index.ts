@@ -18,3 +18,5 @@ export * from './notifications/notifications.service';
 export * from './notifications/notifications.module';
 export * from './rates/message-rates.service';
 export * from './rates/message-rates.module';
+export * from './wallet/wallet.service';
+export * from './wallet/wallet.module';

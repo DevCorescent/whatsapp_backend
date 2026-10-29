@@ -494,7 +494,9 @@ export class BillingService {
     return {
       success: true,
       data: {
-        balanceMinor:             wallet.balanceMinor,
+        // A balance is never negative (DB CHECK + WalletService); clamped here so even a
+        // legacy row from before that invariant can't render as debt.
+        balanceMinor:             Math.max(0, wallet.balanceMinor),
         lowBalanceThresholdMinor: wallet.lowBalanceThresholdMinor,
         currency:                 (wallet as { currency?: string }).currency ?? 'INR',
         canTopUp:                 Boolean(process.env['RAZORPAY_KEY_ID'] && process.env['RAZORPAY_KEY_SECRET']),

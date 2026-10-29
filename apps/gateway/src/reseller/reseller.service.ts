@@ -2,7 +2,7 @@ import {
   Injectable, NotFoundException, ForbiddenException, BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope, MessageRatesService } from '@lib/common';
+import { TenantScope, MessageRatesService, WalletService } from '@lib/common';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 
@@ -11,6 +11,7 @@ export class ResellerService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly rates:  MessageRatesService,
+    private readonly wallet: WalletService,
   ) {}
 
   private async guardReseller(scope: TenantScope) {
@@ -240,10 +241,18 @@ export class ResellerService {
       throw new BadRequestException(`Insufficient wallet balance. Need ₹${(feeMinor / 100).toFixed(2)}, have ₹${(balance / 100).toFixed(2)}`);
     }
 
-    await this.prisma.$transaction(async (tx) => {
-      await tx.wallet.update({ where: { tenantId: scope.tenantId }, data: { balanceMinor: { decrement: feeMinor } } });
-      await (tx as any).whiteLabelConfig.update({ where: { tenantId: scope.tenantId }, data: { feeDueSince: null } });
+    // All-or-nothing: a part-paid monthly fee would leave the account neither paid nor
+    // owing. The debit also writes the statement line this path used to skip entirely.
+    const movement = await this.wallet.debit(scope.tenantId, feeMinor, {
+      description:   'White-label monthly fee',
+      referenceType: 'white_label_fee',
+      createdById:   scope.userId,
+      allowPartial:  false,
     });
+    if (movement.shortfallMinor > 0) {
+      throw new BadRequestException(`Insufficient wallet balance. Need ₹${(feeMinor / 100).toFixed(2)}, have ₹${(movement.balanceMinor / 100).toFixed(2)}`);
+    }
+    await (this.prisma as any).whiteLabelConfig.update({ where: { tenantId: scope.tenantId }, data: { feeDueSince: null } });
 
     return { ok: true, paidMinor: feeMinor };
   }
@@ -466,7 +475,7 @@ export class ResellerService {
         status:      c.status,
         createdAt:   (c.createdAt as Date).toISOString(),
       })),
-      walletBalanceMinor: (client.wallet as any)?.balanceMinor ?? 0,
+      walletBalanceMinor: Math.max(0, (client.wallet as any)?.balanceMinor ?? 0),
     };
   }
 
@@ -861,21 +870,13 @@ export class ResellerService {
       select: { id: true },
     });
     if (!client) throw new NotFoundException('Client not found');
-    if (body.amountMinor <= 0) throw new BadRequestException('Amount must be positive');
 
-    const wallet = await this.prisma.wallet.findUnique({ where: { tenantId: scope.tenantId } });
-    if (!wallet || wallet.balanceMinor < body.amountMinor) {
-      throw new BadRequestException('Insufficient wallet balance');
-    }
-
-    await this.prisma.$transaction(async (tx) => {
-      await tx.wallet.update({ where: { tenantId: scope.tenantId }, data: { balanceMinor: { decrement: body.amountMinor } } });
-      await tx.wallet.upsert({
-        where:  { tenantId: clientTenantId },
-        create: { tenantId: clientTenantId, balanceMinor: body.amountMinor },
-        update: { balanceMinor: { increment: body.amountMinor } },
-      });
+    // Both legs plus a statement line on each side, in one transaction. This used to move
+    // the money with no WalletTransaction anywhere, so neither account could explain it.
+    const moved = await this.wallet.transfer(scope.tenantId, clientTenantId, body.amountMinor, {
+      description: body.note?.trim() || 'Wallet transfer',
+      createdById: scope.userId,
     });
-    return { ok: true, amountMinor: body.amountMinor };
+    return { ok: true, amountMinor: moved.amountMinor, balanceMinor: moved.fromBalanceMinor };
   }
 }

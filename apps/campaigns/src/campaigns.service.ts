@@ -239,7 +239,7 @@ export class CampaignsService {
           units:              matched,
           unitPriceMinor,
           estimatedCostMinor: matched * unitPriceMinor,
-          balanceMinor:       wallet?.balanceMinor ?? 0,
+          balanceMinor:       Math.max(0, wallet?.balanceMinor ?? 0),
         },
       };
     }

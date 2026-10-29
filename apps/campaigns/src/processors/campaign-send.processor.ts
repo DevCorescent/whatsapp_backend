@@ -2,7 +2,9 @@ import { Processor, Process } from '@nestjs/bull';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bull';
 import { PrismaService } from '@lib/prisma';
-import { WebhookDispatchService, NotificationsService, MessageRatesService, MANAGER_ROLES, decryptSecret } from '@lib/common';
+import {
+  WebhookDispatchService, NotificationsService, MessageRatesService, WalletService, MANAGER_ROLES, decryptSecret,
+} from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
 import { CampaignProgressService } from '../campaign-progress.service';
 
@@ -35,6 +37,7 @@ export class CampaignSendProcessor {
     private readonly progress:  CampaignProgressService,
     private readonly notifications: NotificationsService,
     private readonly rates:     MessageRatesService,
+    private readonly wallet:    WalletService,
   ) {}
 
   private async getCampaignData(campaignId: string): Promise<CampaignData | null> {
@@ -182,45 +185,31 @@ export class CampaignSendProcessor {
         data:  { sentCount: { increment: 1 } },
       });
 
-      // Debit wallet per message sent — failure is non-fatal (logged, not re-thrown).
-      // The price is this customer's own, falling back to its reseller's and then the
-      // platform's (MessageRatesService).
+      // Charge the wallet for the message just sent — failure is non-fatal (logged, not
+      // re-thrown): the message is already with Meta, so a billing problem must not retry
+      // the send. The price is this customer's own, falling back to its reseller's and
+      // then the platform's (MessageRatesService).
       try {
         const priceMinor = await this.rates.priceFor(campaign.tenantId, campaign.template?.category);
         if (priceMinor > 0) {
-          await this.prisma.$transaction(async (tx) => {
-            const wallet = await tx.wallet.findUnique({
-              where:  { tenantId: campaign.tenantId },
-              select: { balanceMinor: true },
-            });
-            const newBalance = (wallet?.balanceMinor ?? 0) - priceMinor;
-
-            await tx.walletTransaction.create({
-              data: {
-                tenantId:          campaign.tenantId,
-                type:              'DEBIT',
-                amountMinor:       priceMinor,
-                balanceAfterMinor: newBalance,
-                description:       `Campaign message: ${campaignId}`,
-                idempotencyKey:    `campaign-debit:${recipientId}`,
-              },
-            });
-
-            await tx.wallet.update({
-              where: { tenantId: campaign.tenantId },
-              data:  { balanceMinor: { decrement: priceMinor } },
-            });
-
-            await tx.campaignContact.update({
-              where: { id: recipientId },
-              data:  { costMinor: priceMinor },
-            });
-
-            await tx.campaign.update({
-              where: { id: campaignId },
-              data:  { costMinor: { increment: priceMinor } },
-            });
+          const movement = await this.wallet.debit(campaign.tenantId, priceMinor, {
+            description:    `Campaign message: ${campaignId}`,
+            referenceType: 'campaign_message',
+            referenceId:   recipientId,
+            idempotencyKey: `campaign-debit:${recipientId}`,
           });
+          const charged = Math.abs(movement.appliedMinor);
+          if (charged > 0) {
+            await this.prisma.$transaction([
+              this.prisma.campaignContact.update({ where: { id: recipientId }, data: { costMinor: charged } }),
+              this.prisma.campaign.update({ where: { id: campaignId }, data: { costMinor: { increment: charged } } }),
+            ]);
+          }
+          if (movement.shortfallMinor > 0) {
+            this.logger.warn(
+              `Wallet short by ${movement.shortfallMinor} paise for ${recipientId} (campaign ${campaignId}) — charged ${charged}`,
+            );
+          }
         }
       } catch (walletErr: any) {
         this.logger.warn(`Wallet debit skipped for ${recipientId}: ${walletErr.message}`);

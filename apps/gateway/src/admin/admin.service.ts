@@ -2,7 +2,9 @@ import {
   Injectable, NotFoundException, ForbiddenException, BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope, PERMISSIONS, accountCeiling, roleDefaults, resolvePermission, MessageRatesService } from '@lib/common';
+import {
+  TenantScope, PERMISSIONS, accountCeiling, roleDefaults, resolvePermission, MessageRatesService, WalletService,
+} from '@lib/common';
 import * as bcrypt from 'bcryptjs';
 
 // ── CMS section metadata (mirrored from lib/cms/sections.ts — no Next.js imports) ──
@@ -33,6 +35,7 @@ export class AdminService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly rates:  MessageRatesService,
+    private readonly wallet: WalletService,
   ) {}
 
   private guard(scope: TenantScope) {
@@ -247,41 +250,66 @@ export class AdminService {
 
   // ── Wallet ─────────────────────────────────────────────────────────────────
 
+  /**
+   * Flat on purpose: the panel reads `balanceMinor` and `transactions` straight off the
+   * payload. It used to come back as `{ wallet, transactions }`, so the balance rendered
+   * as NaN, and an account that had never been topped up 404'd instead of showing zero.
+   */
   async adminGetTenantWallet(scope: TenantScope, tenantId: string) {
     this.guard(scope);
-    const wallet = await this.prisma.wallet.findUnique({ where: { tenantId } });
-    if (!wallet) throw new NotFoundException('Wallet not found for tenant');
+    const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId }, select: { id: true } });
+    if (!tenant) throw new NotFoundException('Account not found');
+
+    const wallet = await this.wallet.ensure(tenantId);
     const transactions = await this.prisma.walletTransaction.findMany({
       where:   { tenantId },
       orderBy: { createdAt: 'desc' },
       take:    20,
     });
-    return { wallet, transactions };
+    return {
+      balanceMinor:             Math.max(0, wallet.balanceMinor),
+      currency:                 wallet.currency,
+      lowBalanceThresholdMinor: wallet.lowBalanceThresholdMinor,
+      transactions,
+    };
   }
 
+  /**
+   * Add or take credit by hand. A positive `amount` adds, a negative one deducts — the
+   * operator is free to enter either. Deducting more than the balance empties the wallet
+   * rather than putting it into debt, and the shortfall is reported back so the UI can
+   * say what actually happened.
+   */
   async adminAdjustWallet(scope: TenantScope, tenantId: string, amount: number, note: string) {
     this.guard(scope);
-    const existing = await this.prisma.wallet.findUnique({ where: { tenantId } });
-    const currentBalance = existing?.balanceMinor ?? 0;
-    const newBalance = currentBalance + amount;
+    const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId }, select: { id: true } });
+    if (!tenant) throw new NotFoundException('Account not found');
+    const reason = (note ?? '').trim();
+    if (!reason) throw new BadRequestException('Add a note so the adjustment can be explained later');
 
-    const wallet = await this.prisma.wallet.upsert({
-      where:  { tenantId },
-      create: { tenantId, balanceMinor: newBalance },
-      update: { balanceMinor: newBalance },
+    const movement = await this.wallet.adjust(tenantId, amount, {
+      description: reason,
+      createdById: scope.userId,
+      referenceType: 'admin_adjustment',
     });
 
-    const tx = await this.prisma.walletTransaction.create({
+    await this.prisma.auditLog.create({
       data: {
-        tenantId,
-        type:             'ADJUSTMENT',
-        amountMinor:      amount,
-        balanceAfterMinor: newBalance,
-        description:      note,
-      } as any,
+        tenantId:   scope.tenantId,
+        userId:     scope.userId,
+        action:     'WALLET_ADJUSTED',
+        resource:   'wallet',
+        resourceId: tenantId,
+        metadata:   { requestedMinor: Math.round(amount), appliedMinor: movement.appliedMinor, shortfallMinor: movement.shortfallMinor, note: reason },
+      },
     });
 
-    return { wallet, transaction: tx };
+    return {
+      wallet:         { tenantId, balanceMinor: movement.balanceMinor },
+      appliedMinor:   movement.appliedMinor,
+      shortfallMinor: movement.shortfallMinor,
+      balanceMinor:   movement.balanceMinor,
+    };
   }
 
   // ── Business Categories ────────────────────────────────────────────────────
@@ -865,7 +893,7 @@ export class AdminService {
         isActive:    r.isActive,
         clients:     r._count.children,
         brand:       r.whiteLabel ?? null,
-        walletMinor: r.wallet?.balanceMinor ?? 0,
+        walletMinor: Math.max(0, r.wallet?.balanceMinor ?? 0),
         fee: wlc ? {
           feeMinor,
           isOverride:      wlc.feeOverrideMinor !== null && wlc.feeOverrideMinor !== undefined,
@@ -931,23 +959,14 @@ export class AdminService {
       const platConfig = await (this.prisma as any).platformConfig.findUnique({ where: { id: 'platform' } });
       const feeMinor   = (wlConfig?.feeOverrideMinor as number | null | undefined) ?? (platConfig?.whiteLabelFeeMinor as number | undefined) ?? 0;
       if (feeMinor > 0) {
-        const wallet     = await this.prisma.wallet.findUnique({ where: { tenantId } });
-        const newBalance = (wallet?.balanceMinor ?? 0) - feeMinor;
-        await this.prisma.wallet.upsert({
-          where:  { tenantId },
-          create: { tenantId, balanceMinor: newBalance },
-          update: { balanceMinor: newBalance },
+        const movement = await this.wallet.debit(tenantId, feeMinor, {
+          description:   'White-label monthly fee',
+          referenceType: 'white_label_fee',
+          createdById:   scope.userId,
         });
-        await this.prisma.walletTransaction.create({
-          data: {
-            tenantId,
-            type:              'DEBIT',
-            amountMinor:       -feeMinor,
-            balanceAfterMinor: newBalance,
-            description:       'White-label monthly fee',
-          } as any,
-        });
-        outcome = `charged_${feeMinor}`;
+        outcome = movement.shortfallMinor > 0
+          ? `charged_${Math.abs(movement.appliedMinor)}_short_${movement.shortfallMinor}`
+          : `charged_${feeMinor}`;
       } else {
         outcome = 'no_fee_configured';
       }
