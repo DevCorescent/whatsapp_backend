@@ -276,16 +276,16 @@ export class WebhookService {
   private extractContent(message: WAMessage): string {
     switch (message.type) {
       case 'text':        return message.text?.body ?? '';
-      case 'image':       return message.image?.caption ?? '[image]';
-      case 'video':       return message.video?.caption ?? '[video]';
-      case 'audio':       return '[audio]';
-      case 'document':    return message.document?.caption ?? message.document?.filename ?? '[document]';
-      case 'sticker':     return '[sticker]';
-      case 'location':    return `[location: ${message.location?.name ?? `${message.location?.latitude},${message.location?.longitude}`}]`;
-      case 'interactive': return message.interactive?.button_reply?.title ?? message.interactive?.list_reply?.title ?? '[interactive]';
-      case 'button':      return message.button?.text ?? '[button]';
-      case 'reaction':    return `[reaction: ${message.reaction?.emoji}]`;
-      default:            return `[${message.type}]`;
+      case 'image':       return message.image?.caption?.trim()      || '📷 Photo';
+      case 'video':       return message.video?.caption?.trim()      || '🎥 Video';
+      case 'audio':       return '🎵 Voice message';
+      case 'document':    return message.document?.caption?.trim() || message.document?.filename || '📄 Document';
+      case 'sticker':     return '😊 Sticker';
+      case 'location':    return `📍 ${message.location?.name ?? 'Location'}`;
+      case 'interactive': return message.interactive?.button_reply?.title ?? message.interactive?.list_reply?.title ?? '💬 Interactive';
+      case 'button':      return message.button?.text ?? '🔘 Button reply';
+      case 'reaction':    return `${message.reaction?.emoji ?? '👍'} Reaction`;
+      default:            return '📎 Attachment';
     }
   }
 

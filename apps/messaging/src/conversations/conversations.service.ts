@@ -200,7 +200,12 @@ export class ConversationsService {
       where: { id: conversationId },
       data:  {
         lastMessageAt:      new Date(),
-        lastMessagePreview: payload.text?.slice(0, 100) ?? '(media)',
+        lastMessagePreview: payload.text?.slice(0, 100)
+          ?? (payload.mediaType === 'image'    ? '📷 Photo'
+            : payload.mediaType === 'video'    ? '🎥 Video'
+            : payload.mediaType === 'audio'    ? '🎵 Voice message'
+            : payload.mediaType === 'document' ? '📄 Document'
+            :                                    '📎 Attachment'),
       },
     });
 
