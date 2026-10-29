@@ -1,14 +1,15 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Response } from 'express';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope } from '@lib/common';
+import { TenantScope, LeadQualificationService } from '@lib/common';
 
 @Injectable()
 export class AiService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly qualification: LeadQualificationService,
   ) {}
 
   // ── Provider helpers ────────────────────────────────────────────────────────
@@ -192,70 +193,68 @@ export class AiService {
 
   // ── Qualify ─────────────────────────────────────────────────────────────────
 
+  /**
+   * Score a conversation as a lead.
+   *
+   * Delegates to the shared qualification service rather than prompting the model itself.
+   * It used to have its own prompt that asked the model for a score directly, stored only
+   * the score and the rating, threw away the budget and timeline it had just extracted,
+   * and wrote to every lead for that contact across the whole tenant regardless of
+   * business. All of that is one implementation now, driven by the workspace's own
+   * criteria and weights.
+   */
   async qualify(scope: TenantScope, input: { conversationId?: string; leadId?: string }) {
     await this.checkAiAccess(scope);
+
     let conversationId = input.conversationId;
 
-    // If leadId is provided, resolve it to the most recent conversation for that lead's contact
+    // A lead resolves to the most recent conversation with that contact.
     if (!conversationId && input.leadId) {
       const lead = await this.prisma.lead.findFirst({
-        where:  { id: input.leadId, tenantId: scope.tenantId },
+        where:  { id: input.leadId, tenantId: scope.tenantId, businessId: scope.businessId },
         select: { contactId: true },
       });
       if (!lead) throw new NotFoundException('Lead not found');
 
-      const latestConversation = await this.prisma.conversation.findFirst({
+      const latest = await this.prisma.conversation.findFirst({
         where:   { contactId: lead.contactId, businessId: scope.businessId },
         orderBy: { updatedAt: 'desc' },
         select:  { id: true },
       });
-      if (!latestConversation) throw new NotFoundException('No conversation found for this lead');
-      conversationId = latestConversation.id;
+      if (!latest) throw new NotFoundException('There is no conversation with this contact to read');
+      conversationId = latest.id;
     }
+    if (!conversationId) throw new NotFoundException('Give either a conversation or a lead');
 
-    if (!conversationId) throw new NotFoundException('conversationId or leadId is required');
-
-    // Load conversation separately to obtain contactId for the write-back
     const conversation = await this.prisma.conversation.findFirst({
-      where:  { id: conversationId, businessId: scope.businessId },
-      select: { id: true, contactId: true },
+      where:  { id: conversationId, tenantId: scope.tenantId, businessId: scope.businessId },
+      select: { id: true },
     });
     if (!conversation) throw new NotFoundException('Conversation not found');
 
-    const messages = await this.loadMessages(conversationId, scope.businessId, 20);
-    const history  = this.buildChatHistory(messages);
-
-    const sys = `You are a CRM sales analyst. Analyze the conversation and return ONLY valid JSON:
-{
-  "bantBudget": "what you know about their budget",
-  "bantAuthority": "who makes the decision",
-  "bantNeed": "what problem they want to solve",
-  "bantTimeline": "when they want to act",
-  "score": 0,
-  "scoreLabel": "COLD|WARM|HOT|QUALIFIED",
-  "reasoning": "one sentence"
-}`;
-
-    const raw    = await this.callAi(sys, history.map((m) => `${m.role}: ${m.content}`).join('\n'), { json: true });
-    const result = this.safeParseJson(raw, {
-      bantBudget:    'Unknown', bantAuthority: 'Unknown',
-      bantNeed:      'Unknown', bantTimeline:  'Unknown',
-      score: 0, scoreLabel: 'COLD', reasoning: 'Insufficient data.',
-    });
-
+    const result = await this.qualification.qualify(conversationId, { force: true, userId: scope.userId });
     await this.incrementAiUsage(scope);
 
-    // Write qualification result back to the Lead record
-    await this.prisma.lead.updateMany({
-      where: { contactId: conversation.contactId, tenantId: scope.tenantId },
-      data:  {
-        score:           result.score ?? 0,
-        scoreLabel:      result.scoreLabel ?? 'COLD',
-        isDecisionMaker: (result.bantAuthority ?? 'Unknown') !== 'Unknown',
-      },
-    });
+    if (!result.leadId) {
+      throw new BadRequestException(result.reason ?? 'The conversation could not be scored');
+    }
 
-    return { success: true, data: result };
+    const lead = await this.prisma.lead.findUnique({ where: { id: result.leadId } });
+    return {
+      status:     result.status,
+      leadId:     result.leadId,
+      score:      lead?.aiScore ?? lead?.score ?? 0,
+      scoreLabel: lead?.scoreLabel ?? 'COLD',
+      confidence: lead?.aiConfidence ?? null,
+      summary:    lead?.aiSummary ?? null,
+      intent:     lead?.aiIntent ?? null,
+      nextStep:   lead?.aiNextStep ?? null,
+      budget:     lead?.budget ?? null,
+      authority:  lead?.authority ?? null,
+      need:       lead?.requirement ?? null,
+      timeline:   lead?.timeline ?? null,
+      breakdown:  lead?.aiBreakdown ?? null,
+    };
   }
 
   // ── Sentiment ───────────────────────────────────────────────────────────────
