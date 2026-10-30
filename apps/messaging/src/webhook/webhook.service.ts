@@ -234,10 +234,20 @@ export class WebhookService {
       },
     });
 
-    let conversation = await this.prisma.conversation.findFirst({
+    // Someone who writes to two of the workspace's numbers is having two separate
+    // conversations, and every reply goes back out through the number it arrived on. So
+    // the thread is found per number: folding them together would answer from whichever
+    // number happened to be on the older thread.
+    const threads = await this.prisma.conversation.findMany({
       where:   { tenantId: identity.tenantId, businessId: identity.businessId, contactId: contact.id },
       orderBy: { createdAt: 'desc' },
     });
+
+    let conversation =
+      threads.find((t) => t.whatsappIntegrationId === identity.whatsappIntegrationId) ??
+      // A thread from before the number was recorded belongs to whoever answers it first.
+      threads.find((t) => t.whatsappIntegrationId === null);
+
     if (!conversation) {
       conversation = await this.prisma.conversation.create({
         data: {
@@ -248,6 +258,11 @@ export class WebhookService {
           isAiActive:            false,
           status:                'OPEN',
         },
+      });
+    } else if (!conversation.whatsappIntegrationId && identity.whatsappIntegrationId) {
+      conversation = await this.prisma.conversation.update({
+        where: { id: conversation.id },
+        data:  { whatsappIntegrationId: identity.whatsappIntegrationId },
       });
     }
     return { contact, conversation };
