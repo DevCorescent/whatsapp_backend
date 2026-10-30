@@ -141,6 +141,33 @@ async function buildWhere(
 export class SegmentsService {
   constructor(private readonly prisma: PrismaService) {}
 
+  /**
+   * A stored segment as the app reads it.
+   *
+   * The rules live inside the `filters` column, and a segment is a live query rather than
+   * a fixed list, so how many contacts it matches is only known by running it. Both are
+   * lifted out here so every endpoint returns the same shape.
+   */
+  private async toView(
+    scope: TenantScope,
+    segment: { id: string; name: string; description: string | null; filters: unknown; createdAt: Date; updatedAt: Date },
+  ) {
+    const filters = segment.filters as { rules?: unknown } | null;
+    // A row written before validation, or edited by hand, may hold anything.
+    const rules = (Array.isArray(filters?.rules) ? filters.rules : []) as SegmentRule[];
+    const where = await buildWhere(this.prisma, scope.tenantId, scope.businessId, rules);
+
+    return {
+      id:          segment.id,
+      name:        segment.name,
+      description: segment.description,
+      rules,
+      count:       await this.prisma.contact.count({ where }),
+      createdAt:   segment.createdAt,
+      updatedAt:   segment.updatedAt,
+    };
+  }
+
   async list(
     scope: TenantScope,
     query: { page?: number; limit?: number; search?: string },
@@ -151,17 +178,18 @@ export class SegmentsService {
     const where: any = { tenantId: scope.tenantId, businessId: scope.businessId };
     if (query.search) where.name = { contains: query.search, mode: 'insensitive' };
 
-    const [segments, total] = await Promise.all([
+    const [rows, total] = await Promise.all([
       this.prisma.segment.findMany({ where, skip, take: limit, orderBy: { createdAt: 'desc' } }),
       this.prisma.segment.count({ where }),
     ]);
+    const segments = await Promise.all(rows.map((row) => this.toView(scope, row)));
     return { segments, total, page, limit };
   }
 
   async create(scope: TenantScope, data: { name: string; description?: string; filters: unknown }) {
     if (!data.name?.trim()) throw new BadRequestException('name is required');
     const filters = validateFilters(data.filters);
-    return this.prisma.segment.create({
+    const created = await this.prisma.segment.create({
       data: {
         tenantId:    scope.tenantId,
         businessId:  scope.businessId,
@@ -171,6 +199,7 @@ export class SegmentsService {
         createdById: scope.userId,
       },
     });
+    return this.toView(scope, created);
   }
 
   async update(
@@ -180,7 +209,7 @@ export class SegmentsService {
   ) {
     await this.findOne(scope, id);
     const filters = data.filters !== undefined ? validateFilters(data.filters) : undefined;
-    return this.prisma.segment.update({
+    const updated = await this.prisma.segment.update({
       where: { id },
       data: {
         ...(data.name        !== undefined && { name: data.name.trim() }),
@@ -188,6 +217,7 @@ export class SegmentsService {
         ...(filters          !== undefined && { filters: filters as any }),
       },
     });
+    return this.toView(scope, updated);
   }
 
   async remove(scope: TenantScope, id: string) {
