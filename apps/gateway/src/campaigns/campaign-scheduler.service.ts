@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
-import { PrismaService } from '@lib/prisma';
+import { PrismaService, isTransientDbError } from '@lib/prisma';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
 import { CampaignProgressService } from '../../../../apps/campaigns/src/campaign-progress.service';
 
@@ -24,11 +24,27 @@ export class CampaignSchedulerService {
 
   // ── Cron: every minute ────────────────────────────────────────────────────
 
+  /**
+   * A tick that cannot reach the database is not an incident.
+   *
+   * This runs every minute, so an unhandled rejection here printed a full stack trace
+   * each time the connection dropped — which on a serverless database is often enough to
+   * bury everything else in the log. The next tick is a minute away and will pick up any
+   * campaign this one missed, so one line is the right amount to say.
+   */
   @Cron(CronExpression.EVERY_MINUTE)
   async scheduledRun() {
-    const result = await this.runScheduler();
-    if (result.found > 0 || result.errors.length > 0) {
-      this.logger.log(`Scheduler tick: found=${result.found} launched=${result.launched} errors=${result.errors.length}`);
+    try {
+      const result = await this.runScheduler();
+      if (result.found > 0 || result.errors.length > 0) {
+        this.logger.log(`Scheduler tick: found=${result.found} launched=${result.launched} errors=${result.errors.length}`);
+      }
+    } catch (err) {
+      if (isTransientDbError(err)) {
+        this.logger.warn('Database unreachable this tick; the next one will pick up anything due.');
+        return;
+      }
+      this.logger.error(`Scheduler tick failed: ${(err as Error).message}`);
     }
   }
 
@@ -36,13 +52,13 @@ export class CampaignSchedulerService {
     const errors: string[] = [];
     let launched = 0;
 
-    const due = await this.prisma.campaign.findMany({
+    const due = await this.prisma.withRetry(() => this.prisma.campaign.findMany({
       where: {
         status:      'SCHEDULED',
         scheduledAt: { lte: new Date() },
       },
       select: { id: true, tenantId: true, businessId: true, name: true, scheduledAt: true },
-    });
+    }), 'campaign scheduler');
 
     if (due.length === 0) return { found: 0, launched: 0, errors: [] };
 
