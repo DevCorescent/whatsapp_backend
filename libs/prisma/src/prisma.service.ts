@@ -26,6 +26,14 @@ export class PrismaService
   constructor() {
     const adapter = new PrismaPg({
       connectionString: process.env['DATABASE_URL'],
+      // A serverless Postgres sits behind a pooler that drops quiet connections, and the
+      // default pool gives one up after ten seconds. Anything on a slower rhythm than
+      // that — the once-a-minute schedulers above all — then pays a fresh TLS handshake
+      // every time, which is both slow and the moment a connection error happens.
+      // Holding the socket open across those gaps costs nothing and avoids the reconnect.
+      keepAlive:                  true,
+      keepAliveInitialDelayMillis: 10_000,
+      idleTimeoutMillis:          90_000,
     });
     super({ adapter });
   }
