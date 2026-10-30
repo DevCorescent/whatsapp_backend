@@ -29,7 +29,7 @@ export class ConversationsService {
 
   async findAll(scope: TenantScope, query: {
     page?: number; limit?: number; status?: string; search?: string;
-    assignedToId?: string; isAiActive?: boolean;
+    assignedToId?: string; isAiActive?: boolean; whatsappIntegrationId?: string;
   }) {
     const page  = Math.max(1, query.page ?? 1);
     const limit = Math.min(100, query.limit ?? 30);
@@ -39,6 +39,9 @@ export class ConversationsService {
     if (query.status)        where.status      = query.status;
     if (query.assignedToId)  where.assignedToId = query.assignedToId;
     if (query.isAiActive != null) where.isAiActive = query.isAiActive;
+    // A workspace can connect several WhatsApp numbers, and a thread belongs to the one
+    // it arrived on. Filtering by it is how someone works one number's inbox at a time.
+    if (query.whatsappIntegrationId) where.whatsappIntegrationId = query.whatsappIntegrationId;
     if (query.search) {
       where.contact = { OR: [
         { name:  { contains: query.search, mode: 'insensitive' } },
@@ -53,6 +56,11 @@ export class ConversationsService {
         include: {
           contact:    { select: { id: true, name: true, phone: true, avatarUrl: true } },
           assignedTo: { select: { id: true, name: true, email: true } },
+          // Which number the thread is on, so the list can label it when there is
+          // more than one and a reply's origin is not obvious.
+          whatsappIntegration: {
+            select: { id: true, displayName: true, phoneNumber: true },
+          },
         },
       }),
       this.prisma.conversation.count({ where }),

@@ -84,6 +84,8 @@ export class TemplateSyncProcessor {
         where: { id: templateId },
         data:  {
           waTemplateId: json.id,
+          // The account it now lives in, so it is only offered for numbers that can send it.
+          wabaId:       integration.whatsappBusinessId,
           status:       json.status ?? 'PENDING',
           lastSyncedAt: new Date(),
         },

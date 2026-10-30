@@ -66,6 +66,7 @@ export class TemplatesService {
 
   async findAll(scope: TenantScope, query: {
     page?: number; limit?: number; status?: string; category?: string; search?: string;
+    whatsappIntegrationId?: string;
   }) {
     const page  = Math.max(1, query.page ?? 1);
     const limit = Math.min(100, query.limit ?? 20);
@@ -76,6 +77,19 @@ export class TemplatesService {
     if (query.category) where.category = query.category;
     if (query.search) {
       where.name = { contains: query.search, mode: 'insensitive' };
+    }
+
+    // Templates belong to a WhatsApp account, and a number can only send its own.
+    // Rows with no account recorded are left in: they predate the column, and hiding
+    // a template somebody is already using would be worse than showing one extra.
+    if (query.whatsappIntegrationId) {
+      const integration = await this.prisma.whatsAppIntegration.findFirst({
+        where:  { id: query.whatsappIntegrationId, businessId: scope.businessId },
+        select: { whatsappBusinessId: true },
+      });
+      if (integration?.whatsappBusinessId) {
+        where.OR = [{ wabaId: integration.whatsappBusinessId }, { wabaId: null }];
+      }
     }
 
     const [templates, total] = await Promise.all([
@@ -194,6 +208,7 @@ export class TemplatesService {
         addSecurityRecommendation: template.addSecurityRecommendation,
         codeExpirationMinutes:     template.codeExpirationMinutes,
         messageSendTtlSeconds:     template.messageSendTtlSeconds,
+        wabaId:          template.wabaId,
         variables:       template.variables,
         headerVariables: template.headerVariables,
         status:          'PENDING',
@@ -320,6 +335,7 @@ export class TemplatesService {
             addSecurityRecommendation: parsed.addSecurityRecommendation ?? false,
             codeExpirationMinutes:     parsed.codeExpirationMinutes ?? null,
             messageSendTtlSeconds:     parsed.messageSendTtlSeconds ?? null,
+            wabaId:          integration.whatsappBusinessId,
             waTemplateId:    t.id,
             status:          t.status,
             lastSyncedAt:    new Date(),
@@ -343,6 +359,7 @@ export class TemplatesService {
             addSecurityRecommendation: parsed.addSecurityRecommendation ?? false,
             codeExpirationMinutes:     parsed.codeExpirationMinutes ?? null,
             messageSendTtlSeconds:     parsed.messageSendTtlSeconds ?? null,
+            wabaId:       integration.whatsappBusinessId,
             waTemplateId: t.id,
             status:       t.status,
             lastSyncedAt: new Date(),

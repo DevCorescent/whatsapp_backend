@@ -23,6 +23,7 @@ export class ConversationsController {
     @Query('search')       search?: string,
     @Query('assignedToId') assignedToId?: string,
     @Query('isAiActive')   isAiActive?: string,
+    @Query('whatsappIntegrationId') whatsappIntegrationId?: string,
   ) {
     return this.svc.findAll(scope, {
       page:         page  ? Number(page)  : undefined,
@@ -31,6 +32,7 @@ export class ConversationsController {
       search,
       assignedToId,
       isAiActive:   isAiActive != null ? isAiActive === 'true' : undefined,
+      whatsappIntegrationId,
     });
   }
 

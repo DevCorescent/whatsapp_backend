@@ -25,6 +25,7 @@ export class TemplatesController {
     @Query('status')   status?: string,
     @Query('category') category?: string,
     @Query('search')   search?: string,
+    @Query('whatsappIntegrationId') whatsappIntegrationId?: string,
   ) {
     return this.svc.findAll(scope, {
       page:     page  ? Number(page)  : undefined,
@@ -32,6 +33,7 @@ export class TemplatesController {
       status,
       category,
       search,
+      whatsappIntegrationId,
     });
   }
 

@@ -1130,6 +1130,10 @@ model MessageTemplate {
   codeExpirationMinutes     Int?
   /// How long Meta keeps retrying delivery before giving up.
   messageSendTtlSeconds     Int?
+  /// The WhatsApp account this template lives in. A workspace can connect numbers from
+  /// more than one account, and a template can only be sent from a number in its own —
+  /// Meta answers 132001 otherwise. Null on rows that predate this.
+  wabaId          String?
   waTemplateId    String?
   status          String    @default("PENDING")
   rejectionReason String?
