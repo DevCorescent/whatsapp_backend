@@ -370,7 +370,47 @@ export class SettingsService {
     displayName?: string; accessToken?: string; verifyToken?: string;
     appSecret?: string; isActive?: boolean; isDefault?: boolean;
   }) {
-    await this.getIntegration(scope, id); // 404 guard
+    const existing = await this.getIntegration(scope, id); // 404 guard
+
+    // A business has exactly one default number, enforced by a partial unique index.
+    // Promoting one therefore has to demote the other in the same transaction, or the
+    // insert collides and the whole request fails.
+    if (data.isDefault === true) {
+      return this.prisma.$transaction(async (tx) => {
+        await tx.whatsAppIntegration.updateMany({
+          where: { businessId: existing.businessId, isDefault: true, id: { not: id } },
+          data:  { isDefault: false },
+        });
+        return tx.whatsAppIntegration.update({ where: { id }, data });
+      });
+    }
+
+    // Removing the last default would leave the business with none, and every path that
+    // looks one up — template import, status refresh — would start failing.
+    if (data.isDefault === false && existing.isDefault) {
+      throw new BadRequestException(
+        'Make another number the default instead. A workspace always needs one.',
+      );
+    }
+
+    // Switching off the number that is currently the default has the same effect.
+    if (data.isActive === false && existing.isDefault) {
+      const replacement = await this.prisma.whatsAppIntegration.findFirst({
+        where:  { businessId: existing.businessId, isActive: true, id: { not: id } },
+        select: { id: true },
+      });
+      if (!replacement) {
+        throw new BadRequestException(
+          'This is the only active number. Connect another before switching it off.',
+        );
+      }
+      return this.prisma.$transaction(async (tx) => {
+        await tx.whatsAppIntegration.update({ where: { id }, data: { ...data, isDefault: false } });
+        await tx.whatsAppIntegration.update({ where: { id: replacement.id }, data: { isDefault: true } });
+        return tx.whatsAppIntegration.findUnique({ where: { id } });
+      });
+    }
+
     return this.prisma.whatsAppIntegration.update({ where: { id }, data });
   }
 
