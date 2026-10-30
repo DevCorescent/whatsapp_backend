@@ -26,6 +26,7 @@ export * from './suppression/suppression.service';
 export * from './suppression/suppression.module';
 export * from './templates/template-spec';
 export * from './templates/template-payload';
+export * from './templates/template-account';
 export * from './notifications/notification-prefs';
 export * from './notifications/notifications.service';
 export * from './notifications/notifications.module';

@@ -2,7 +2,9 @@ import { Processor, Process } from '@nestjs/bull';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bull';
 import { PrismaService } from '@lib/prisma';
-import { buildCreatePayload, decryptSecret, toSpec, validateTemplate } from '@lib/common';
+import {
+  buildCreatePayload, decryptSecret, pickTemplateAccount, toSpec, validateTemplate,
+} from '@lib/common';
 import { QUEUE_TEMPLATE_SYNC } from '@lib/queue';
 
 interface TemplateSyncJob {
@@ -24,11 +26,22 @@ export class TemplateSyncProcessor {
     const template = await this.prisma.messageTemplate.findUnique({ where: { id: templateId } });
     if (!template) return;
 
-    const integration = await this.prisma.whatsAppIntegration.findFirst({
-      where: { businessId, isActive: true },
-    });
+    // Submit through the account the template belongs to. Picking any connected number
+    // would create the template in the wrong WhatsApp account, where no number the
+    // workspace meant to send from can use it.
+    const integration = pickTemplateAccount(
+      await this.prisma.whatsAppIntegration.findMany({ where: { businessId, isActive: true } }),
+      template.wabaId,
+    );
     if (!integration?.accessToken) {
-      this.logger.warn(`No active integration for business ${businessId}, skipping template sync`);
+      const reason = template.wabaId
+        ? "This template's WhatsApp account is no longer connected"
+        : 'No WhatsApp number is connected to this workspace';
+      await this.prisma.messageTemplate.update({
+        where: { id: templateId },
+        data:  { status: 'REJECTED', rejectionReason: reason },
+      });
+      this.logger.warn(`Template ${templateId} not submitted: ${reason}`);
       return;
     }
 

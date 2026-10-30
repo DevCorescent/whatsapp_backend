@@ -5,7 +5,8 @@ import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { PrismaService } from '@lib/prisma';
 import {
-  TenantScope, decryptSecret, parseMetaTemplate, toSpec, validateTemplate, StorageService,
+  TenantScope, decryptSecret, parseMetaTemplate, pickTemplateAccount, toSpec, validateTemplate,
+  StorageService,
 } from '@lib/common';
 import { QUEUE_TEMPLATE_SYNC } from '@lib/queue';
 
@@ -29,6 +30,8 @@ export interface TemplateWriteInput {
   addSecurityRecommendation?: boolean;
   codeExpirationMinutes?: number | null;
   messageSendTtlSeconds?: number | null;
+  /** The WhatsApp account to submit it to, when the builder picked a number. */
+  wabaId?: string | null;
 }
 
 /**
@@ -49,6 +52,7 @@ function writableFields(data: TemplateWriteInput) {
     addSecurityRecommendation: data.addSecurityRecommendation,
     codeExpirationMinutes:     data.codeExpirationMinutes,
     messageSendTtlSeconds:     data.messageSendTtlSeconds,
+    wabaId:                    data.wabaId,
   };
 }
 
@@ -80,15 +84,19 @@ export class TemplatesService {
     }
 
     // Templates belong to a WhatsApp account, and a number can only send its own.
-    // Rows with no account recorded are left in: they predate the column, and hiding
-    // a template somebody is already using would be worse than showing one extra.
     if (query.whatsappIntegrationId) {
       const integration = await this.prisma.whatsAppIntegration.findFirst({
         where:  { id: query.whatsappIntegrationId, businessId: scope.businessId },
         select: { whatsappBusinessId: true },
       });
       if (integration?.whatsappBusinessId) {
-        where.OR = [{ wabaId: integration.whatsappBusinessId }, { wabaId: null }];
+        where.OR = [
+          { wabaId: integration.whatsappBusinessId },
+          // A row with no account recorded predates the column or has never synced, so it
+          // stays in rather than hiding a template somebody is already using. Not a dead
+          // one, though: no number can send that, so it belongs to no number's list.
+          { wabaId: null, status: { not: 'DISABLED' } },
+        ];
       }
     }
 
@@ -223,11 +231,20 @@ export class TemplatesService {
   async refreshStatus(scope: TenantScope, id: string) {
     const template = await this.findOne(scope, id);
 
-    const integration = await this.prisma.whatsAppIntegration.findFirst({
-      where: { businessId: scope.businessId, isDefault: true, isActive: true },
-    });
+    // Meta scopes templates to one account, so a status has to be read from the account
+    // the template actually lives in.
+    const integration = pickTemplateAccount(
+      await this.prisma.whatsAppIntegration.findMany({
+        where: { businessId: scope.businessId, isActive: true },
+      }),
+      template.wabaId,
+    );
     if (!integration?.accessToken) {
-      throw new NotFoundException('No active default WhatsApp integration found');
+      throw new NotFoundException(
+        template.wabaId
+          ? "This template's WhatsApp account is no longer connected"
+          : 'No active WhatsApp integration found',
+      );
     }
 
     const accessToken = decryptSecret(integration.accessToken);
@@ -245,7 +262,19 @@ export class TemplatesService {
 
     const remote = json?.data?.[0];
     if (!remote) {
-      return { updated: false, status: template.status };
+      // A draft that was never submitted is simply not there yet. One that has a Meta id
+      // and is now absent was deleted in WhatsApp Manager, and saying it is still
+      // approved would offer a template every send fails on.
+      if (!res.ok || !template.waTemplateId) return { updated: false, status: template.status };
+      const gone = await this.prisma.messageTemplate.update({
+        where: { id },
+        data:  {
+          status:          'DISABLED',
+          rejectionReason: 'This template no longer exists in WhatsApp Manager.',
+          lastSyncedAt:    new Date(),
+        },
+      });
+      return { updated: true, status: gone.status };
     }
 
     const updated = await this.prisma.messageTemplate.update({
@@ -253,6 +282,8 @@ export class TemplatesService {
       data:  {
         status:          remote.status ?? template.status,
         waTemplateId:    remote.id     ?? template.waTemplateId,
+        // Found in this account, so record it if it was unknown.
+        wabaId:          template.wabaId ?? integration.whatsappBusinessId,
         rejectionReason: remote.rejection_reason ?? null,
         lastSyncedAt:    new Date(),
       },
@@ -262,26 +293,96 @@ export class TemplatesService {
 
   // ── Import all templates from Meta ─────────────────────────────────────────
 
+  /**
+   * Pulls every template from every WhatsApp account the workspace has connected.
+   *
+   * Each account is read with its own token, and every row records the account it came
+   * from, so a number is only ever offered templates it can actually send.
+   */
   async importFromMeta(scope: TenantScope) {
-    const integration = await this.prisma.whatsAppIntegration.findFirst({
-      where: { businessId: scope.businessId, isDefault: true, isActive: true },
-    });
-    if (!integration?.accessToken) {
-      throw new NotFoundException('No active default WhatsApp integration found');
+    const integrations = (await this.prisma.whatsAppIntegration.findMany({
+      where:   { businessId: scope.businessId, isActive: true },
+      orderBy: { isDefault: 'desc' },
+    })).filter((i) => i.whatsappBusinessId && i.accessToken);
+
+    if (!integrations.length) {
+      throw new NotFoundException('No active WhatsApp integration found');
     }
 
-    const accessToken = decryptSecret(integration.accessToken);
-    if (!accessToken) throw new NotFoundException('Could not decrypt WhatsApp access token');
-    this.logger.log(`importFromMeta businessId=${scope.businessId} wabaId=${integration.whatsappBusinessId} tokenPrefix=${accessToken.slice(0, 8)}...`);
-
     // Keep the local cards: Meta returns each card's upload handle but not the public
-    // media URL we send with, so a re-import would otherwise strip it.
+    // media URL we send with, so a re-import would otherwise strip it. The account is
+    // kept too, because a template name is unique per workspace while two accounts may
+    // each hold one — the first account to claim a name keeps it.
     const existing = new Map(
       (await this.prisma.messageTemplate.findMany({
         where:  { businessId: scope.businessId },
-        select: { name: true, cards: true },
+        select: { name: true, cards: true, wabaId: true },
       })).map((t) => [t.name, t]),
     );
+
+    let created = 0;
+    let updated = 0;
+    const seen = new Set<string>();
+    const failed: string[] = [];
+
+    for (const integration of integrations) {
+      try {
+        const counts = await this.importAccount(scope, integration, existing, seen);
+        created += counts.created;
+        updated += counts.updated;
+      } catch (err: any) {
+        // One unreachable account must not lose the templates of the others.
+        this.logger.error(`importFromMeta failed for ${integration.whatsappBusinessId}: ${err.message}`);
+        failed.push(integration.displayName ?? integration.phoneNumber ?? 'a number');
+      }
+    }
+
+    if (failed.length === integrations.length) {
+      throw new NotFoundException(`Couldn't reach WhatsApp for ${failed.join(', ')}`);
+    }
+
+    // A template that once synced but is in none of the accounts was deleted in WhatsApp
+    // Manager. Leaving it approved offers a template every send would fail on. Only safe
+    // when every account answered, or templates of an unread account would be condemned.
+    let retired = 0;
+    if (!failed.length) {
+      const gone = await this.prisma.messageTemplate.updateMany({
+        where: {
+          businessId: scope.businessId,
+          name:       { notIn: [...seen] },
+          status:     { in: ['APPROVED', 'PENDING', 'PAUSED'] },
+          NOT:        { waTemplateId: null },
+        },
+        data: {
+          status:          'DISABLED',
+          rejectionReason: 'This template no longer exists in WhatsApp Manager.',
+        },
+      });
+      retired = gone.count;
+      if (retired) this.logger.log(`importFromMeta retired ${retired} template(s) Meta no longer has`);
+    }
+
+    return {
+      success: true, created, updated,
+      ...(retired ? { retired } : {}),
+      ...(failed.length ? { failed } : {}),
+    };
+  }
+
+  /**
+   * One account's templates. `existing` is read and updated across accounts, and every
+   * name Meta returned is added to `seen` — including ones skipped here, since they do
+   * exist at Meta.
+   */
+  private async importAccount(
+    scope: TenantScope,
+    integration: { whatsappBusinessId: string | null; accessToken: string | null },
+    existing: Map<string, { name: string; cards: unknown; wabaId: string | null }>,
+    seen: Set<string>,
+  ) {
+    const accessToken = decryptSecret(integration.accessToken ?? '');
+    if (!accessToken) throw new NotFoundException('Could not decrypt WhatsApp access token');
+    this.logger.log(`importFromMeta businessId=${scope.businessId} wabaId=${integration.whatsappBusinessId} tokenPrefix=${accessToken.slice(0, 8)}...`);
 
     const version = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
     let nextUrl: string | null =
@@ -297,16 +398,28 @@ export class TemplatesService {
       });
       const json = await res.json() as any;
       this.logger.log(`importFromMeta ← status=${res.status} count=${json?.data?.length ?? 0} hasNext=${!!json?.paging?.next} error=${JSON.stringify(json?.error ?? null)}`);
+      // An expired token or a revoked account answers here, and silently importing
+      // nothing would look like success.
+      if (!res.ok) throw new Error(json?.error?.message ?? `Meta returned ${res.status}`);
 
       const templates: any[] = json?.data ?? [];
 
       for (const t of templates) {
+        seen.add(t.name);
+
         const parsed = parseMetaTemplate(t);
         // An authentication template has no body text of its own — Meta writes it.
         if (!parsed.body && parsed.category?.toUpperCase() !== 'AUTHENTICATION') continue;
 
         const previous = existing.get(t.name);
-        const previousCards: any[] = Array.isArray(previous?.cards) ? previous!.cards as any[] : [];
+        // A name already held by another account can't be stored twice, and overwriting
+        // would move the row — and every campaign pointing at it — to this account.
+        if (previous?.wabaId && previous.wabaId !== integration.whatsappBusinessId) {
+          this.logger.warn(`Skipping "${t.name}": the name is already used by account ${previous.wabaId}`);
+          continue;
+        }
+
+        const previousCards: any[] = Array.isArray(previous?.cards) ? previous.cards as any[] : [];
         const cards = parsed.cards?.map((card, i) => ({
           ...card,
           headerUrl: card.headerUrl ?? previousCards[i]?.headerUrl ?? null,
@@ -366,18 +479,16 @@ export class TemplatesService {
           },
         });
 
-        if (previous) {
-          updated++;
-        } else {
-          created++;
-          existing.set(t.name, { name: t.name, cards: (cards ?? null) as any });
-        }
+        if (previous) updated++; else created++;
+        existing.set(t.name, {
+          name: t.name, cards: cards ?? null, wabaId: integration.whatsappBusinessId,
+        });
       }
 
       nextUrl = json?.paging?.next ?? null;
     }
 
-    return { success: true, created, updated };
+    return { created, updated };
   }
 
   // ── Sync all pending templates ─────────────────────────────────────────────
