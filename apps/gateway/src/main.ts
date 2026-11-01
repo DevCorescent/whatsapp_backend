@@ -57,8 +57,21 @@ async function bootstrap() {
 
   // Security
   app.use(helmet());
+  // The REST API is reached from the app's own origin and from every white-label
+  // brand's, so a single origin string would refuse all but one of them. A list, the
+  // platform root's subdomains, and localhost are all accepted; with nothing configured
+  // it stays open, which is what a local run needs.
+  const allowedOrigins = (process.env.FRONTEND_URL ?? '').split(',').map((o) => o.trim()).filter(Boolean);
+  const root = (process.env.PLATFORM_ROOT_DOMAIN ?? '').trim().toLowerCase();
   app.enableCors({
-    origin: process.env.FRONTEND_URL ?? '*',
+    origin: (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
+      if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) return cb(null, true);
+      let host = '';
+      try { host = new URL(origin).hostname.toLowerCase(); } catch { /* malformed */ }
+      const local = host === 'localhost' || host === '127.0.0.1';
+      const brand = Boolean(root) && (host === root || host.endsWith('.' + root));
+      cb(null, local || brand);
+    },
     credentials: true,
   });
 

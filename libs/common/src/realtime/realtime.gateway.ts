@@ -17,15 +17,47 @@ export interface SocketIdentity {
 
 export const REALTIME_NAMESPACE = '/rt';
 
-function allowedOrigins(): (string | RegExp)[] | boolean {
-  const list = (process.env.FRONTEND_URL ?? '').split(',').map(s => s.trim()).filter(Boolean);
-  if (list.length === 0) return true;
-  return [...list, /^https?:\/\/localhost(:\d+)?$/];
+/**
+ * Whether a page at this origin may open a socket.
+ *
+ * The browser connects to this server directly rather than through the app's own
+ * origin, so every address the app is served from has to be allowed — and that is more
+ * than one. FRONTEND_URL takes a comma-separated list, and a white-label reseller is
+ * served from its own subdomain of the platform root. Without that last case a brand's
+ * dashboard loads perfectly and then silently never receives an event, because the
+ * socket is the only cross-origin request it makes.
+ *
+ * A reseller's own custom domain cannot be known from configuration, so it belongs in
+ * FRONTEND_URL alongside the rest.
+ */
+function hostOf(origin: string): string {
+  try {
+    return new URL(origin).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function originAllowed(origin: string | undefined, cb: (err: Error | null, ok?: boolean) => void) {
+  // Same-origin requests and non-browser clients send no Origin at all.
+  if (!origin) return cb(null, true);
+
+  const list = (process.env.FRONTEND_URL ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (list.length === 0) return cb(null, true);
+  if (list.includes(origin)) return cb(null, true);
+
+  const host = hostOf(origin);
+  if (host === 'localhost' || host === '127.0.0.1') return cb(null, true);
+
+  const root = (process.env.PLATFORM_ROOT_DOMAIN ?? '').trim().toLowerCase();
+  if (root && (host === root || host.endsWith('.' + root))) return cb(null, true);
+
+  return cb(null, false);
 }
 
 @WebSocketGateway({
   namespace:  REALTIME_NAMESPACE,
-  cors:       { origin: allowedOrigins(), credentials: false },
+  cors:       { origin: originAllowed, credentials: false },
   transports: ['websocket', 'polling'],
   pingInterval: 25_000,
   pingTimeout:  20_000,
