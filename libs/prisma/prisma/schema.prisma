@@ -231,6 +231,7 @@ model Tenant {
   referredBy           Tenant?               @relation("AccountReferrals", fields: [referredById], references: [id], onDelete: SetNull)
   referrals            Tenant[]              @relation("AccountReferrals")
   whiteLabel           WhiteLabelConfig?
+  cmsSections          CmsSection[]
   resellerPlans        Plan[]                @relation("ResellerPlans")
   payments             Payment[]
   commissionsEarned    ResellerCommission[]  @relation("CommissionReseller")
@@ -2006,6 +2007,11 @@ model AuditLog {
 
 model CmsSection {
   id          String   @id @default(cuid())
+  /// Whose page this is. Null is the platform's own site; a white-label reseller's
+  /// tenant id is that brand's own copy, edited by the reseller and shown on its domain.
+  /// A section the reseller has never touched has no row, and the platform's defaults
+  /// stand in — so a brand starts out looking like the product, not like nothing.
+  tenantId    String?
   /// The page the section belongs to. Only "home" exists today.
   page        String   @default("home")
   /// Section key from lib/cms/sections.ts, e.g. "hero" or "pricing".
@@ -2024,7 +2030,10 @@ model CmsSection {
 
   items CmsItem[]
 
-  @@unique([page, key])
+  tenant Tenant? @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, page, key])
+  @@index([tenantId, page])
   @@map("cms_sections")
 }
 

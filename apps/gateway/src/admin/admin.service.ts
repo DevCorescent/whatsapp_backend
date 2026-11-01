@@ -43,6 +43,28 @@ export class AdminService {
     if (scope.role !== 'SUPER_ADMIN') throw new ForbiddenException('Super admin only');
   }
 
+  /**
+   * Who may edit a homepage: the platform's own, or a white-label brand's.
+   *
+   * The rest of this service is the platform operator's, so it guards on super admin
+   * alone. The CMS is the one part a reseller shares — it edits its own brand's copy,
+   * never the platform's, which `cmsOwner` enforces by scoping every row to the tenant.
+   */
+  private async guardCms(scope: TenantScope) {
+    if (scope.role === 'SUPER_ADMIN') return;
+    if (!['TENANT_OWNER', 'ADMIN'].includes(scope.role ?? '')) {
+      throw new ForbiddenException('Only a white-label reseller can edit its own website');
+    }
+    // The account type is not on the token, so it is read here rather than trusted.
+    const tenant = await this.prisma.tenant.findUnique({
+      where:  { id: scope.tenantId },
+      select: { accountType: true, resellerType: true },
+    });
+    if (tenant?.accountType !== 'RESELLER' || tenant.resellerType !== 'WHITE_LABEL') {
+      throw new ForbiddenException('Only a white-label reseller can edit its own website');
+    }
+  }
+
   // ── Tenants ────────────────────────────────────────────────────────────────
 
   async listTenants(
@@ -1012,6 +1034,17 @@ export class AdminService {
 
   // ── CMS helpers ──────────────────────────────────────────────────────────────
 
+  /**
+   * Whose homepage this request edits.
+   *
+   * A super admin edits the platform's own site, which has no tenant. A white-label
+   * reseller edits its brand's copy, scoped to its tenant. Both use the same editor and
+   * the same sections; only the row they land in differs.
+   */
+  private cmsOwner(scope: TenantScope): string | null {
+    return scope.role === 'SUPER_ADMIN' ? null : scope.tenantId;
+  }
+
   private buildEditorSection(
     key: string,
     section: null | { isActive: boolean; content: unknown; itemKinds?: string[]; items?: any[]; updatedAt?: Date },
@@ -1054,9 +1087,9 @@ export class AdminService {
   }
 
   async getCmsSections(scope: TenantScope) {
-    this.guard(scope);
+    await this.guardCms(scope);
     const storedSections = await (this.prisma as any).cmsSection.findMany({
-      where:   { page: 'home' },
+      where:   { tenantId: this.cmsOwner(scope), page: 'home' },
       include: { items: { select: { isActive: true } } },
     });
     const sectionMap = new Map<string, any>(storedSections.map((s: any) => [s.key, s]));
@@ -1082,18 +1115,19 @@ export class AdminService {
   }
 
   async getCmsSection(scope: TenantScope, key: string) {
-    this.guard(scope);
+    await this.guardCms(scope);
     const section = await (this.prisma as any).cmsSection.findFirst({
-      where:   { page: 'home', key },
+      where:   { tenantId: this.cmsOwner(scope), page: 'home', key },
       include: { items: { orderBy: { sortOrder: 'asc' } } },
     });
     return { success: true, data: this.buildEditorSection(key, section) };
   }
 
   async updateCmsSection(scope: TenantScope, key: string, payload: any) {
-    this.guard(scope);
+    await this.guardCms(scope);
     const itemKinds = Object.keys((payload.items as Record<string, unknown>) ?? {});
-    const existing  = await (this.prisma as any).cmsSection.findFirst({ where: { page: 'home', key } });
+    const owner     = this.cmsOwner(scope);
+    const existing  = await (this.prisma as any).cmsSection.findFirst({ where: { tenantId: owner, page: 'home', key } });
 
     const section = existing
       ? await (this.prisma as any).cmsSection.update({
@@ -1101,7 +1135,7 @@ export class AdminService {
           data:  { isActive: payload.isActive, content: payload.content, itemKinds, updatedById: scope.userId },
         })
       : await (this.prisma as any).cmsSection.create({
-          data: { page: 'home', key, isActive: payload.isActive ?? true, content: payload.content ?? {}, itemKinds, updatedById: scope.userId },
+          data: { tenantId: owner, page: 'home', key, isActive: payload.isActive ?? true, content: payload.content ?? {}, itemKinds, updatedById: scope.userId },
         });
 
     if (payload.items) {
@@ -1126,15 +1160,15 @@ export class AdminService {
     });
 
     const updated = await (this.prisma as any).cmsSection.findFirst({
-      where:   { page: 'home', key },
+      where:   { tenantId: owner, page: 'home', key },
       include: { items: { orderBy: { sortOrder: 'asc' } } },
     });
     return { success: true, data: this.buildEditorSection(key, updated) };
   }
 
   async deleteCmsSection(scope: TenantScope, key: string) {
-    this.guard(scope);
-    await (this.prisma as any).cmsSection.deleteMany({ where: { page: 'home', key } });
+    await this.guardCms(scope);
+    await (this.prisma as any).cmsSection.deleteMany({ where: { tenantId: this.cmsOwner(scope), page: 'home', key } });
     await this.prisma.auditLog.create({
       data: {
         tenantId: scope.tenantId,

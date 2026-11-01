@@ -85,9 +85,17 @@ export class GatewayService {
     });
   }
 
-  async getPublicCmsSections() {
+  /**
+   * The homepage content for a host.
+   *
+   * A white-label brand gets its own sections; anything it has not edited has no row and
+   * is filled in from the platform's defaults by the caller, so a new brand reads as the
+   * product rather than a blank page. Without a host this is the platform's own site.
+   */
+  async getPublicCmsSections(host?: string) {
+    const brand = host ? await this.getBrandForHost(host) : null;
     const rows = await (this.prisma as any).cmsSection.findMany({
-      where:   { page: 'home' },
+      where:   { tenantId: brand?.tenantId ?? null, page: 'home' },
       include: { items: { orderBy: { sortOrder: 'asc' } } },
     });
     return {

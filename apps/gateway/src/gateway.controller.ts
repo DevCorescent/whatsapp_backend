@@ -32,7 +32,7 @@ export class GatewayController {
 
   /** Public CMS sections for the marketing site (no auth required). */
   @Get('cms/sections/public')
-  getPublicCmsSections() {
-    return this.svc.getPublicCmsSections();
+  getPublicCmsSections(@Query('host') host?: string) {
+    return this.svc.getPublicCmsSections(host);
   }
 }
