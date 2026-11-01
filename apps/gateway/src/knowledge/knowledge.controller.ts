@@ -258,9 +258,9 @@ export class KnowledgeController {
   autosaveFlow(
     @CurrentTenant() scope: TenantScope,
     @Param('id') id: string,
-    @Body() body: { nodes: any; edges: any },
+    @Body() body: { nodes: any; edges: any; trigger?: string; keywords?: string[] },
   ) {
-    return this.svc.autosaveFlow(scope, id, body.nodes, body.edges);
+    return this.svc.autosaveFlow(scope, id, body);
   }
 
   @Get('flows/:id')

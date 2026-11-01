@@ -638,13 +638,38 @@ export class KnowledgeService {
     return { valid: errors.length === 0, errors };
   }
 
-  async autosaveFlow(scope: TenantScope, id: string, nodes: any, edges: any) {
+  /**
+   * Saves the canvas, and with it the trigger the start node carries.
+   *
+   * A flow is matched against its own `trigger` and `keywords` columns, not against its
+   * nodes, so the builder sends both back. Without that the keyword typed into the start
+   * node would be stored on the node, look saved, and never fire.
+   */
+  async autosaveFlow(
+    scope: TenantScope,
+    id: string,
+    body: { nodes: any; edges: any; trigger?: string; keywords?: string[] },
+  ) {
     await this.getFlow(scope, id);
-    const updated = await this.prisma.chatbotFlow.update({
+    const trigger = ['KEYWORD', 'INBOUND', 'FIRST_MESSAGE'].includes(body.trigger ?? '')
+      ? body.trigger
+      : undefined;
+
+    return this.prisma.chatbotFlow.update({
       where: { id },
-      data:  { nodes: nodes as any, edges: edges as any },
+      data: {
+        nodes: body.nodes as any,
+        edges: body.edges as any,
+        ...(trigger && { trigger }),
+        // Only a keyword trigger has keywords; the others are stored empty so a trigger
+        // changed away from KEYWORD cannot keep firing on an old word.
+        ...(trigger && {
+          keywords: trigger === 'KEYWORD'
+            ? (body.keywords ?? []).map((k) => k.trim()).filter(Boolean)
+            : [],
+        }),
+      },
     });
-    return updated;
   }
 
   // ── Send FAQ list as WhatsApp interactive message ────────────────────────────
