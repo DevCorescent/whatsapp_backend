@@ -15,12 +15,12 @@ export type HandoverReason =
 
 export const HANDOVER_REASON_LABELS: Record<HandoverReason, string> = {
   CUSTOMER_REQUEST:   'They asked for a person',
-  FLOW_NODE:          'The flow handed it over',
+  FLOW_NODE:          'The flow transferred it',
   AI_UNSURE:          'The AI was unsure',
   AFTER_REPLIES:      'Too many AI replies in a row',
   NEGATIVE_SENTIMENT: 'They sounded unhappy',
   OFF_HOURS:          'Outside business hours',
-  MANUAL:             'Handed over by a colleague',
+  MANUAL:             'Transferred by a colleague',
 };
 
 /** The phrasings that count as asking for a person when a business sets none of its own. */
@@ -192,7 +192,7 @@ Reply with JSON only, no prose:
     });
 
     const who = conversation.contact.name || conversation.contact.phone;
-    const reasonLabel = HANDOVER_REASON_LABELS[input.reason] ?? 'Handed over';
+    const reasonLabel = HANDOVER_REASON_LABELS[input.reason] ?? 'Transferred';
 
     if (config?.notifyAgent !== false && assignedToId) {
       void this.notifications.notify({
@@ -202,7 +202,7 @@ Reply with JSON only, no prose:
         type:       'HANDOVER_REQUESTED',
         title:      `${who} needs a person`,
         body:       input.note?.trim() || reasonLabel,
-        href:       `/inbox?conversationId=${conversation.id}`,
+        href:       `/inbox?c=${conversation.id}`,
         data:       { conversationId: conversation.id, handoverId: handover.id, reason: input.reason },
       });
     }
@@ -215,9 +215,9 @@ Reply with JSON only, no prose:
         businessId: conversation.businessId,
         recipients: { roles: MANAGER_ROLES },
         type:       'HANDOVER_REQUESTED',
-        title:      assignedToId ? `${who} handed to a colleague` : `${who} is waiting for a person`,
+        title:      assignedToId ? `${who} was transferred to a colleague` : `${who} is waiting for a person`,
         body:       assignedToId ? reasonLabel : `${reasonLabel}, and nobody was free to take it.`,
-        href:       assignedToId ? `/inbox?conversationId=${conversation.id}` : '/handovers',
+        href:       assignedToId ? `/inbox?c=${conversation.id}` : '/handovers',
         data:       { conversationId: conversation.id, handoverId: handover.id, reason: input.reason },
       });
     }
