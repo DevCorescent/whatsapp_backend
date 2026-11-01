@@ -291,11 +291,14 @@ export class AdminController {
   }
 
   @Patch('white-label/:tenantId')
-  @ApiOperation({ summary: 'Per-reseller white-label override (suspend, reactivate, fee override)' })
+  @ApiOperation({ summary: 'Per-reseller white-label override (address, suspend, reactivate, fee override)' })
   patchTenantWhiteLabel(
     @CurrentTenant() scope: TenantScope,
     @Param('tenantId') tenantId: string,
-    @Body() body: { action?: string; feeOverrideMinor?: number | null; reason?: string },
+    @Body() body: {
+      action?: string; feeOverrideMinor?: number | null; reason?: string;
+      domain?: string | null; subdomain?: string | null;
+    },
   ) {
     return this.svc.patchTenantWhiteLabel(scope, tenantId, body);
   }

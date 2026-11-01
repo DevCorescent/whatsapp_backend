@@ -972,11 +972,42 @@ export class AdminService {
   async patchTenantWhiteLabel(
     scope: TenantScope,
     tenantId: string,
-    data: { action?: string; feeOverrideMinor?: number | null; reason?: string },
+    data: {
+      action?: string; feeOverrideMinor?: number | null; reason?: string;
+      domain?: string | null; subdomain?: string | null;
+    },
   ) {
     this.guard(scope);
 
     let outcome = 'updated';
+
+    // Where the brand answers. A reseller sets this on its own Branding page, but an
+    // operator setting up an account, or fixing a mistyped domain for someone who cannot,
+    // had no way to do it at all — the admin table showed the address and nothing more.
+    if (data.domain !== undefined || data.subdomain !== undefined) {
+      const domain    = data.domain?.trim().toLowerCase()    || null;
+      const subdomain = data.subdomain?.trim().toLowerCase() || null;
+
+      // Both are unique across the platform, so a clash has to be refused rather than
+      // let through to a constraint error that says nothing useful.
+      for (const [field, value] of [['domain', domain], ['subdomain', subdomain]] as const) {
+        if (!value) continue;
+        const taken = await (this.prisma as any).whiteLabelConfig.findFirst({
+          where:  { [field]: value, tenantId: { not: tenantId } },
+          select: { tenantId: true },
+        });
+        if (taken) throw new BadRequestException(`That ${field} is already used by another reseller.`);
+      }
+
+      await (this.prisma as any).whiteLabelConfig.update({
+        where: { tenantId },
+        data:  {
+          ...(data.domain    !== undefined && { domain }),
+          ...(data.subdomain !== undefined && { subdomain }),
+        },
+      });
+      outcome = 'address_set';
+    }
 
     if (data.feeOverrideMinor !== undefined) {
       await (this.prisma as any).whiteLabelConfig.update({
