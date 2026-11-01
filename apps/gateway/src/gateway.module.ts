@@ -2,12 +2,13 @@ import { Module, Logger } from '@nestjs/common';
 import { GatewayController } from './gateway.controller';
 import { GatewayService } from './gateway.service';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { BullModule } from '@nestjs/bull';
+import { BullModule, type BullRootModuleOptions } from '@nestjs/bull';
 import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from '@lib/prisma';
 import {
   RealtimeModule, StorageModule, NotificationsCoreModule, MessageRatesModule,
   WalletModule as WalletCoreModule, PermissionsModule, SuppressionModule, LlmModule, HandoverModule,
+  sharedBullClients,
 } from '@lib/common';
 
 // Core
@@ -74,23 +75,32 @@ import { CallsModule }        from './calls/calls.module';
 
         logger.log(`Connecting to Redis host=${host} port=${port} tls=${useTls} password=${password ? `set(${password.length}ch)` : 'not set'}`);
 
-        return {
-          redis: {
-            host,
-            port: Number(port),
-            password,
-            tls:                  useTls ? { servername: host } : undefined,
-            connectTimeout:       10_000,
-            enableReadyCheck:     false,
-            maxRetriesPerRequest: null as any,
-            retryStrategy: (times: number) => {
-              const delay = Math.min(times * 200, 5_000);
-              if (times === 1 || times % 10 === 0) {
-                logger.error(`Redis retry #${times} in ${delay}ms — check REDIS_HOST/PORT/PASSWORD/TLS env vars`);
-              }
-              return delay;
-            },
+        const options = {
+          host,
+          port: Number(port),
+          password,
+          tls:                  useTls ? { servername: host } : undefined,
+          connectTimeout:       10_000,
+          enableReadyCheck:     false,
+          maxRetriesPerRequest: null as any,
+          retryStrategy: (times: number) => {
+            const delay = Math.min(times * 200, 5_000);
+            if (times === 1 || times % 10 === 0) {
+              logger.error(`Redis retry #${times} in ${delay}ms — check REDIS_HOST/PORT/PASSWORD/TLS env vars`);
+            }
+            return delay;
           },
+        };
+
+        // Every queue in this process shares one connection for commands and one for
+        // subscriptions, instead of opening three of its own.
+        //
+        // Bull carries its own nested copy of ioredis, so the client built here is the
+        // same class reached by a different path and the two sets of declarations do not
+        // line up. The behaviour is identical; only the types disagree.
+        return {
+          redis: options,
+          createClient: sharedBullClients(options, logger) as unknown as BullRootModuleOptions['createClient'],
         };
       },
     }),
