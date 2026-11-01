@@ -23,6 +23,16 @@ export class IntegrationsController {
 
   // ── WhatsApp integrations ────────────────────────────────────────────────────
 
+  /**
+   * Which numbers this workspace has connected.
+   *
+   * Managing an integration is a settings job, but *knowing which numbers exist* is not:
+   * the inbox filters by number, a template belongs to one, and a campaign sends from
+   * one — so an agent who can see conversations needs this list. The response has
+   * already had its tokens and secrets stripped. Without this the dashboard asked for it
+   * on every page load and every role below admin got a 403 in the console.
+   */
+  @RequiresPermission('conversations.view')
   @Get('whatsapp')
   listWhatsApp(
     @CurrentTenant() scope: TenantScope,
