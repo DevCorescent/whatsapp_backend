@@ -6,7 +6,11 @@ import type {
   FlowDocument,
   FlowNode,
   HandoffNodeData,
+  LeadStageNodeData,
   MenuNodeData,
+  NotifyNodeData,
+  QualifyLeadNodeData,
+  TagNodeData,
   MessageNodeData,
   QuestionNodeData,
   TemplateNodeData,
@@ -57,6 +61,14 @@ export interface EngineExecutors {
   callApi?: (node: ApiNodeData, vars: FlowVariables) => Promise<string>;
   /** Generate an AI reply for an AI node. Returns the reply text. */
   callAi?: (node: AiPrompt, vars: FlowVariables) => Promise<string>;
+  /** Grade the conversation. Returns the score and its label. */
+  qualifyLead?: (node: QualifyLeadNodeData) => Promise<{ score: number; label: string } | null>;
+  /** Add or remove tags on the contact. */
+  tagContact?: (node: TagNodeData) => Promise<void>;
+  /** Move the contact's lead to a stage. */
+  setLeadStage?: (node: LeadStageNodeData) => Promise<void>;
+  /** Tell someone on the team about this conversation. */
+  notifyTeam?: (node: NotifyNodeData, vars: FlowVariables) => Promise<void>;
 }
 
 interface AiPrompt {
@@ -74,7 +86,11 @@ export type EngineActionType =
   | "ai"
   | "handoff"
   | "template"
-  | "menu";
+  | "menu"
+  | "qualify_lead"
+  | "tag"
+  | "lead_stage"
+  | "notify";
 
 export interface EngineAction {
   type: EngineActionType;
@@ -91,6 +107,8 @@ export interface EngineAction {
   template?: { templateName?: string; language?: string; headerVar?: string; bodyVars?: string[] };
   /** The interactive payload and its plain-text fallback, for a menu action. */
   menu?: { interactive: Record<string, unknown>; text: string; mode: "buttons" | "list" };
+  /** What a side-effect node did, for the preview and the run log. */
+  effect?: { summary: string };
 }
 
 export type EngineStatus = "awaiting_input" | "ended" | "dead_end" | "error";
@@ -302,6 +320,69 @@ export async function runFlowStep(doc: FlowDocument, opts: RunOptions = {}): Pro
           }
         }
         actions.push({ type: "ai", nodeId: node.id, text });
+        currentId = nextNodeId(doc, node.id);
+        break;
+      }
+      case "qualify_lead": {
+        const d = node.data as QualifyLeadNodeData;
+        const scoreVar = d.saveScoreAs || "lead_score";
+        const labelVar = d.saveLabelAs || "lead_label";
+        let summary = "Scoring is unavailable here";
+        if (opts.executors?.qualifyLead) {
+          try {
+            const graded = await opts.executors.qualifyLead(d);
+            if (graded) {
+              // Into variables rather than into a branch: a condition node downstream can
+              // test them, and a flow that only wants the score recorded needs no edge.
+              variables[scoreVar] = String(graded.score);
+              variables[labelVar] = graded.label;
+              summary = `Scored ${graded.score} (${graded.label})`;
+            } else {
+              summary = "Not enough conversation to score yet";
+            }
+          } catch {
+            summary = "Scoring failed; the flow carried on";
+          }
+        }
+        actions.push({ type: "qualify_lead", nodeId: node.id, effect: { summary } });
+        currentId = nextNodeId(doc, node.id);
+        break;
+      }
+      case "tag": {
+        const d = node.data as TagNodeData;
+        const tags = (d.tags ?? []).filter(Boolean);
+        if (tags.length && opts.executors?.tagContact) {
+          // A failed tag must not strand the customer mid-conversation.
+          try { await opts.executors.tagContact(d); } catch { /* carry on */ }
+        }
+        actions.push({
+          type: "tag", nodeId: node.id,
+          effect: { summary: tags.length ? `${d.action === "remove" ? "Removed" : "Added"} ${tags.join(", ")}` : "No tags set" },
+        });
+        currentId = nextNodeId(doc, node.id);
+        break;
+      }
+      case "lead_stage": {
+        const d = node.data as LeadStageNodeData;
+        if (d.stageName && opts.executors?.setLeadStage) {
+          try { await opts.executors.setLeadStage(d); } catch { /* carry on */ }
+        }
+        actions.push({
+          type: "lead_stage", nodeId: node.id,
+          effect: { summary: d.stageName ? `Moved to ${d.stageName}` : "No stage set" },
+        });
+        currentId = nextNodeId(doc, node.id);
+        break;
+      }
+      case "notify": {
+        const d = node.data as NotifyNodeData;
+        if (opts.executors?.notifyTeam) {
+          try { await opts.executors.notifyTeam(d, variables); } catch { /* carry on */ }
+        }
+        actions.push({
+          type: "notify", nodeId: node.id,
+          effect: { summary: `Notified ${d.target === "managers" ? "managers" : d.target === "department" ? (d.departmentName || "a department") : "the assignee"}` },
+        });
         currentId = nextNodeId(doc, node.id);
         break;
       }

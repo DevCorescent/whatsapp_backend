@@ -10,6 +10,7 @@ import { PrismaService } from '@lib/prisma';
 import { Prisma } from '@prisma/client';
 import {
   decryptSecret, MessageEventsService, HandoverService, LeadQualificationService, LlmService,
+  NotificationsService, MANAGER_ROLES,
 } from '@lib/common';
 import { runFlowStep } from './chatbot/engine';
 import { toFlowDocument } from './chatbot/types';
@@ -74,6 +75,7 @@ export class InboundPipelineService {
     private readonly handover: HandoverService,
     private readonly qualification: LeadQualificationService,
     private readonly llm: LlmService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   // ── Entry point ─────────────────────────────────────────────────────────────
@@ -307,6 +309,18 @@ export class InboundPipelineService {
   }
 
   /** Score the conversation when the business's trigger says to, never blocking a reply. */
+  /** The people in a named department, for a flow's notify node. */
+  private async departmentMemberIds(businessId: string, name?: string): Promise<string[]> {
+    const wanted = name?.trim();
+    const department = await this.prisma.department.findFirst({
+      where: wanted
+        ? { businessId, enabled: true, name: { equals: wanted, mode: 'insensitive' } }
+        : { businessId, enabled: true, isDefault: true },
+      select: { members: { select: { userId: true } } },
+    });
+    return department?.members.map((m) => m.userId) ?? [];
+  }
+
   private async maybeQualify(conversationId: string, trigger: 'AFTER_MESSAGES' | 'ON_HANDOVER' | 'ON_CLOSE'): Promise<void> {
     try {
       if (!(await this.qualification.isDue(conversationId, trigger))) return;
@@ -398,6 +412,93 @@ export class InboundPipelineService {
         callAi: async (node, nodeVars) => {
           const prompt = node.prompt ?? 'Answer the customer message helpfully.';
           return this.callAi(prompt, nodeVars, node.model, node.temperature);
+        },
+
+        // Graded here rather than after the run, so the score is in the variables by the
+        // time a condition node downstream asks about it. `force` because the author put
+        // the node there deliberately — the usual every-N-messages throttle would make a
+        // flow silently skip its own step.
+        qualifyLead: async () => {
+          const graded = await this.qualification.qualify(conversation.id, { force: true });
+          return graded.score != null && graded.label
+            ? { score: graded.score, label: graded.label }
+            : null;
+        },
+
+        tagContact: async (node) => {
+          const names = (node.tags ?? []).map((t) => t.trim()).filter(Boolean);
+          if (!names.length) return;
+
+          if (node.action === 'remove') {
+            await this.prisma.contactTag.deleteMany({
+              where: { contactId: contact.id, tag: { name: { in: names } } },
+            });
+            return;
+          }
+
+          for (const name of names) {
+            // A tag the author typed may not exist yet; naming one in a flow is as good
+            // as creating it.
+            const tag = await this.prisma.tag.upsert({
+              where:  { name_businessId: { name, businessId: conversation.businessId } },
+              create: { name, businessId: conversation.businessId, tenantId: conversation.tenantId },
+              update: {},
+            });
+            await this.prisma.contactTag.upsert({
+              where:  { contactId_tagId: { contactId: contact.id, tagId: tag.id } },
+              create: { contactId: contact.id, tagId: tag.id },
+              update: {},
+            });
+          }
+        },
+
+        setLeadStage: async (node) => {
+          const name = node.stageName?.trim();
+          if (!name) return;
+          const stage = await this.prisma.pipelineStage.findFirst({
+            where:  { businessId: conversation.businessId, name: { equals: name, mode: 'insensitive' } },
+            select: { id: true },
+          });
+          if (!stage) {
+            this.logger.warn(`Flow stage "${name}" does not exist in business ${conversation.businessId}`);
+            return;
+          }
+          const lead = await this.prisma.lead.findFirst({
+            where:   { contactId: contact.id, businessId: conversation.businessId },
+            orderBy: { createdAt: 'desc' },
+            select:  { id: true },
+          });
+          if (!lead) return;
+          await this.prisma.lead.update({ where: { id: lead.id }, data: { stageId: stage.id } });
+        },
+
+        notifyTeam: async (node, nodeVars) => {
+          const who = contact.name || contact.phone;
+          const render = (t?: string) =>
+            (t ?? '').replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, k) => nodeVars[k] ?? '');
+
+          let recipients: { roles: typeof MANAGER_ROLES } | { userIds: string[] };
+          if (node.target === 'managers') {
+            recipients = { roles: MANAGER_ROLES };
+          } else {
+            const userIds = node.target === 'department'
+              ? await this.departmentMemberIds(conversation.businessId, node.departmentName)
+              : conversation.assignedToId ? [conversation.assignedToId] : [];
+            // Nobody to tell is not an error, but it is not a notification either.
+            if (userIds.length === 0) return;
+            recipients = { userIds };
+          }
+
+          await this.notifications.notify({
+            tenantId:   conversation.tenantId,
+            businessId: conversation.businessId,
+            recipients,
+            type:       'SYSTEM',
+            title:      render(node.title) || `${who} needs attention`,
+            body:       render(node.body) || null,
+            href:       `/inbox?c=${conversation.id}`,
+            data:       { conversationId: conversation.id, flowId: flow.id },
+          });
         },
       },
     });

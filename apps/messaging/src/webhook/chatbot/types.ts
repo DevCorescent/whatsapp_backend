@@ -19,6 +19,10 @@ export type NodeKind =
   | "delay"
   | "set_variable"
   | "handoff"
+  | "qualify_lead"
+  | "tag"
+  | "lead_stage"
+  | "notify"
   | "ai"
   | "end";
 
@@ -215,6 +219,43 @@ export interface EndNodeData {
   label?: string;
 }
 
+/**
+ * Scores the conversation with the lead-qualification model and keeps the result in the
+ * flow's variables, so an ordinary condition node can branch on it. Branching is left to
+ * `condition` rather than built in here: a flow that only wants to record the score
+ * should not have to draw an unused edge.
+ */
+export interface QualifyLeadNodeData {
+  label?: string;
+  /** Variable to hold the 0-100 score. Defaults to `lead_score`. */
+  saveScoreAs?: string;
+  /** Variable to hold COLD / WARM / HOT / QUALIFIED. Defaults to `lead_label`. */
+  saveLabelAs?: string;
+}
+
+/** Adds or removes tags on the contact the flow is talking to. */
+export interface TagNodeData {
+  label?: string;
+  action?: "add" | "remove";
+  tags?: string[];
+}
+
+/** Moves this contact's lead to a stage of the pipeline. */
+export interface LeadStageNodeData {
+  label?: string;
+  /** Matched against the stage name, so a renamed stage keeps working by id. */
+  stageName?: string;
+}
+
+/** Tells someone on the team that this conversation wants attention. */
+export interface NotifyNodeData {
+  label?: string;
+  target?: "assignee" | "managers" | "department";
+  departmentName?: string;
+  title?: string;
+  body?: string;
+}
+
 export interface NodeDataMap {
   start: StartNodeData;
   message: MessageNodeData;
@@ -226,6 +267,10 @@ export interface NodeDataMap {
   delay: DelayNodeData;
   set_variable: SetVariableNodeData;
   handoff: HandoffNodeData;
+  qualify_lead: QualifyLeadNodeData;
+  tag: TagNodeData;
+  lead_stage: LeadStageNodeData;
+  notify: NotifyNodeData;
   ai: AiNodeData;
   end: EndNodeData;
 }
