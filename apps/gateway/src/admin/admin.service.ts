@@ -4,6 +4,7 @@ import {
 import { PrismaService } from '@lib/prisma';
 import {
   TenantScope, PERMISSIONS, accountCeiling, roleDefaults, resolvePermission, MessageRatesService, WalletService,
+  decryptSecret,
 } from '@lib/common';
 import * as bcrypt from 'bcryptjs';
 
@@ -93,14 +94,23 @@ export class AdminService {
     ]);
 
     const tenantIds = rows.map(t => t.id);
+
+    // Counted over each tenant's own billing period rather than the calendar month.
+    // The number is shown against the plan's monthly allowance, and an allowance resets
+    // when the subscription renews — not on the first of the month. Counting by calendar
+    // month also made every tenant read zero on the 1st, which looks like a broken column
+    // rather than a reset. A tenant with no subscription has no period, so it falls back
+    // to the month.
     const msgCounts = tenantIds.length
-      ? await this.prisma.message.groupBy({
-          by:    ['tenantId'],
-          where: { tenantId: { in: tenantIds }, createdAt: { gte: startOfMonth } },
-          _count: { _all: true },
-        })
+      ? await this.prisma.$queryRaw<{ tenantId: string; n: bigint }[]>`
+          SELECT m."tenantId", COUNT(*) AS n
+            FROM "messages" m
+            LEFT JOIN "subscriptions" s ON s."tenantId" = m."tenantId"
+           WHERE m."tenantId" = ANY(${tenantIds})
+             AND m."createdAt" >= COALESCE(s."currentPeriodStart", ${startOfMonth})
+           GROUP BY m."tenantId"`
       : [];
-    const msgByTenant = new Map(msgCounts.map(r => [r.tenantId, r._count._all]));
+    const msgByTenant = new Map(msgCounts.map(r => [r.tenantId, Number(r.n)]));
 
     const data = rows.map(t => ({
       id:             t.id,
@@ -1283,13 +1293,144 @@ export class AdminService {
 
   // ── Tenant WhatsApp ───────────────────────────────────────────────────────────
 
+  /**
+   * A tenant's WhatsApp setup, grouped the way it is actually organised: per business,
+   * each with its connected numbers, whatever is still stored at business level from
+   * before numbers were their own rows, and how its templates stand with Meta.
+   *
+   * The secrets themselves are deliberately absent. This used to return whole
+   * integration rows, which put the encrypted token and app secret into the browser of
+   * anyone with the page open — useless to read, and one copied response away from being
+   * somewhere it should not be. A token is handed over only by asking, through
+   * `revealWhatsAppToken`, which records who asked.
+   */
   async getTenantWhatsApp(scope: TenantScope, tenantId: string) {
     this.guard(scope);
-    return this.prisma.whatsAppIntegration.findMany({
-      where: { tenantId },
-      include: { business: { select: { id: true, name: true } } },
-      orderBy: { createdAt: 'desc' },
+
+    const businesses = await this.prisma.business.findMany({
+      where:   { tenantId },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true, name: true,
+        whatsappPhoneNumber: true, whatsappPhoneNumberId: true,
+        whatsappBusinessId: true, whatsappAccessToken: true,
+      },
     });
+    const businessIds = businesses.map((b) => b.id);
+
+    const [numbers, templateCounts, conversationCounts, lastMessages] = await Promise.all([
+      this.prisma.whatsAppIntegration.findMany({
+        where:   { businessId: { in: businessIds } },
+        orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+      }),
+      this.prisma.messageTemplate.groupBy({
+        by: ['businessId', 'status'],
+        where: { businessId: { in: businessIds } },
+        _count: { _all: true },
+      }),
+      this.prisma.conversation.groupBy({
+        by: ['whatsappIntegrationId'],
+        where: { businessId: { in: businessIds } },
+        _count: { _all: true },
+      }),
+      this.prisma.conversation.groupBy({
+        by: ['whatsappIntegrationId'],
+        where: { businessId: { in: businessIds } },
+        _max: { lastMessageAt: true },
+      }),
+    ]);
+
+    const chats = new Map(conversationCounts.map((c) => [c.whatsappIntegrationId, c._count._all]));
+    const lastAt = new Map(lastMessages.map((c) => [c.whatsappIntegrationId, c._max.lastMessageAt]));
+
+    return {
+      businesses: businesses.map((b) => {
+        const statuses = templateCounts.filter((t) => t.businessId === b.id);
+        const of = (...want: string[]) =>
+          statuses.filter((t) => want.includes(t.status)).reduce((n, t) => n + t._count._all, 0);
+
+        return {
+          id:   b.id,
+          name: b.name,
+          numbers: numbers.filter((n) => n.businessId === b.id).map((n) => {
+            const token = decryptSecret(n.accessToken ?? '');
+            return {
+              id:                     n.id,
+              displayName:            n.displayName,
+              phoneNumber:            n.phoneNumber,
+              phoneNumberId:          n.phoneNumberId,
+              whatsappBusinessId:     n.whatsappBusinessId,
+              qualityRating:          n.qualityRating,
+              codeVerificationStatus: n.codeVerificationStatus,
+              isActive:               n.isActive,
+              isDefault:              n.isDefault,
+              createdAt:              n.createdAt,
+              conversations:          chats.get(n.id) ?? 0,
+              lastMessageAt:          lastAt.get(n.id) ?? null,
+              // Enough to tell two tokens apart in a support conversation, not enough to
+              // use. A stored token that will not decrypt usually means ENCRYPTION_KEY
+              // changed, which is worth showing rather than reading as "no token".
+              hasToken:      Boolean(n.accessToken),
+              tokenReadable: Boolean(token),
+              tokenHint:     token ? `…${token.slice(-6)}` : null,
+              hasAppSecret:  Boolean(n.appSecret),
+            };
+          }),
+          // Credentials from before each number had its own row. Still used as a
+          // fallback at send time, so an operator needs to know they are there.
+          legacy: b.whatsappPhoneNumberId
+            ? {
+                phoneNumber:        b.whatsappPhoneNumber,
+                phoneNumberId:      b.whatsappPhoneNumberId,
+                whatsappBusinessId: b.whatsappBusinessId,
+                hasToken:           Boolean(b.whatsappAccessToken),
+              }
+            : null,
+          templates: {
+            approved: of('APPROVED'),
+            inReview: of('PENDING', 'SUBMITTED'),
+            other:    of('DRAFT', 'REJECTED', 'DISABLED'),
+          },
+        };
+      }),
+      // Nothing is configured platform-wide per tenant; the field is kept so the panel
+      // can say so rather than guess.
+      accountSettings: null,
+    };
+  }
+
+  /**
+   * Hands over one access token, and writes down who asked for it.
+   *
+   * Reading a customer's credential is sometimes the only way to tell them why Meta is
+   * refusing their messages, but it is still reading a customer's credential — so it is
+   * a separate, deliberate request rather than a field on a page, and it leaves a trail.
+   */
+  async revealWhatsAppToken(scope: TenantScope, tenantId: string, integrationId: string) {
+    this.guard(scope);
+    const row = await this.prisma.whatsAppIntegration.findFirst({
+      where:  { id: integrationId, tenantId },
+      select: { id: true, accessToken: true, displayName: true, phoneNumberId: true },
+    });
+    if (!row) throw new NotFoundException('That WhatsApp number is not on this account');
+
+    const token = decryptSecret(row.accessToken ?? '');
+    if (!token) {
+      throw new NotFoundException('This token cannot be read — it may predate the current encryption key');
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        tenantId:   scope.tenantId,
+        userId:     scope.userId,
+        action:     'WHATSAPP_TOKEN_REVEALED',
+        resource:   'whatsAppIntegration',
+        resourceId: row.id,
+        metadata:   { ofTenantId: tenantId, phoneNumberId: row.phoneNumberId, number: row.displayName },
+      },
+    });
+
+    return { token };
   }
 
   async adminWhatsAppAction(scope: TenantScope, tenantId: string, action: string) {

@@ -399,6 +399,16 @@ export class AdminController {
     return this.svc.getTenantWhatsApp(scope, id);
   }
 
+  @Post('tenants/:id/whatsapp/:integrationId/reveal-token')
+  @ApiOperation({ summary: "Reveal one WhatsApp access token (super admin, audited)" })
+  revealWhatsAppToken(
+    @CurrentTenant() scope: TenantScope,
+    @Param('id') id: string,
+    @Param('integrationId') integrationId: string,
+  ) {
+    return this.svc.revealWhatsAppToken(scope, id, integrationId);
+  }
+
   @Post('tenants/:id/whatsapp')
   @ApiOperation({ summary: 'Admin WhatsApp action for a tenant (super admin)' })
   adminWhatsAppAction(
