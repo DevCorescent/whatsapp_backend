@@ -5,6 +5,7 @@ import helmet from 'helmet';
 import { RedisIoAdapter } from '@lib/common';
 import { GatewayModule } from './gateway.module';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
+import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 
 // Prevent ioredis retry errors from crashing the process when Redis is
 // temporarily or permanently unreachable (e.g. TCP blocked on free-tier Upstash).
@@ -85,6 +86,8 @@ async function bootstrap() {
 
   // Wrap all responses in { success, data, pagination? } to match Next.js API shape
   app.useGlobalInterceptors(new TransformInterceptor());
+  // One shape for every failure, so the sentence a refusal carries reaches the screen.
+  app.useGlobalFilters(new HttpExceptionFilter());
 
   // Swagger — available at /api/docs
   const config = new DocumentBuilder()

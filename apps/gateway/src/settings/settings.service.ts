@@ -5,8 +5,47 @@ import { PrismaService } from '@lib/prisma';
 import {
   TenantScope, decryptSecret, encryptSecret, sanitizeWhatsAppToken, isMetaAccessToken,
   MessageRatesService, PermissionsService, PERMISSIONS, INVITABLE_ROLES, TEAM_ADMIN_ROLES,
+  MailService,
   accountCeiling, roleDefaults, resolvePermission, isInvitableRole,
 } from '@lib/common';
+
+/** The role names a person would recognise, rather than the stored value. */
+const ROLE_LABELS: Record<string, string> = {
+  ADMIN:          'Administrator',
+  MANAGER:        'Manager',
+  MARKETING_USER: 'Marketing',
+  AGENT:          'Agent',
+};
+
+/**
+ * The note sent when somebody is added to a workspace.
+ *
+ * It carries no password and no link that grants anything: the recipient already has an
+ * account, and this only tells them where the new workspace appears.
+ */
+function inviteEmail(d: {
+  name: string; workspace: string; role: string; rejoined: boolean; appUrl: string;
+}): string {
+  const action = d.rejoined ? 'been given access again to' : 'been added to';
+  const button = d.appUrl
+    ? `<p style="margin:26px 0"><a href="${d.appUrl}/login" style="background:#0B6E4F;color:#fff;padding:11px 20px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block">Open ${d.workspace}</a></p>`
+    : '';
+  return `
+<div style="font-family:Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#1A2B32;max-width:560px">
+  <p>Hi ${escapeHtml(d.name)},</p>
+  <p>You have ${action} <strong>${escapeHtml(d.workspace)}</strong> as <strong>${escapeHtml(d.role)}</strong>.</p>
+  <p>Sign in with the password you already use. ${escapeHtml(d.workspace)} will appear in the
+     workspace switcher at the bottom of the sidebar, alongside any others you belong to.</p>
+  ${button}
+  <p style="color:#5B6B73;font-size:13px">If you were not expecting this, you can ignore this message &mdash;
+     nothing about your existing access has changed.</p>
+</div>`.trim();
+}
+
+function escapeHtml(v: string): string {
+  return v.replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
+}
 
 @Injectable()
 export class SettingsService {
@@ -15,6 +54,7 @@ export class SettingsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly rates:  MessageRatesService,
+    private readonly mail: MailService,
     private readonly permissions: PermissionsService,
   ) {}
 
@@ -59,7 +99,10 @@ export class SettingsService {
       this.getBusiness(scope),
       this.prisma.tenantSettings.findUnique({
         where:  { tenantId: scope.tenantId },
-        select: { timezone: true, businessHoursStart: true, businessHoursEnd: true, businessDays: true },
+        select: {
+          timezone: true, businessHoursStart: true, businessHoursEnd: true, businessDays: true,
+          smtpHost: true, smtpPort: true, smtpUser: true, smtpFrom: true, smtpPass: true,
+        },
       }),
     ]);
 
@@ -74,6 +117,13 @@ export class SettingsService {
       businessHoursStart: (ts as any)?.businessHoursStart ?? null,
       businessHoursEnd:   (ts as any)?.businessHoursEnd ?? null,
       businessDays:       (ts as any)?.businessDays ?? null,
+      smtpHost:           (ts as any)?.smtpHost ?? null,
+      smtpPort:           (ts as any)?.smtpPort ?? null,
+      smtpUser:           (ts as any)?.smtpUser ?? null,
+      smtpFrom:           (ts as any)?.smtpFrom ?? null,
+      // The password itself never comes back; the form only needs to know one is stored
+      // so it can leave the field blank without clearing what is saved.
+      smtpPassSet:        Boolean((ts as any)?.smtpPass),
       logo:               (biz as any).logoUrl,
       autoReply:          (biz as any).autoReply,
       autoReplyDelay:     (biz as any).autoReplyDelay,
@@ -644,7 +694,20 @@ export class SettingsService {
     const email = (data.email ?? '').trim().toLowerCase();
     if (!email) throw new BadRequestException('An email address is required');
 
-    const role = isInvitableRole(data.role) ? data.role! : 'AGENT';
+    // Refused rather than quietly downgraded. Asking for a role that cannot be handed
+    // out used to produce an AGENT, so an owner who meant to add an administrator added
+    // an agent instead and had no way of knowing.
+    const requested = (data.role ?? 'AGENT').trim().toUpperCase();
+    if (!isInvitableRole(requested)) {
+      throw new BadRequestException(
+        requested === 'SUPER_ADMIN'
+          ? 'A super admin runs the platform and cannot be added to a workspace.'
+          : requested === 'TENANT_OWNER'
+            ? 'A workspace has exactly one owner, so that role cannot be given out.'
+            : `"${requested}" is not a role you can assign. Choose one of: ${INVITABLE_ROLES.join(', ')}.`,
+      );
+    }
+    const role = requested;
 
     // Their account anywhere on the platform — the identity we attach to this workspace.
     const identity = await this.prisma.user.findFirst({
@@ -689,7 +752,26 @@ export class SettingsService {
         });
 
     this.permissions.invalidate(member.id);
-    return { ...member, rejoined: Boolean(existing), usesExistingPassword: true };
+
+    // Told, not just added. The address is already a platform account, so this says where
+    // to find the new workspace rather than carrying any credential.
+    const workspace = await this.prisma.tenant.findUnique({
+      where:  { id: scope.tenantId },
+      select: { name: true },
+    });
+    const emailed = await this.mail.send(scope.tenantId, {
+      to:      email,
+      subject: `You have been added to ${workspace?.name ?? 'a workspace'}`,
+      html: inviteEmail({
+        name:      member.name ?? email,
+        workspace: workspace?.name ?? 'a workspace',
+        role:      ROLE_LABELS[role] ?? role,
+        rejoined:  Boolean(existing),
+        appUrl:    (process.env['APP_URL'] ?? process.env['FRONTEND_URL'] ?? '').split(',')[0].replace(/\/+$/, ''),
+      }),
+    });
+
+    return { ...member, rejoined: Boolean(existing), usesExistingPassword: true, emailed };
   }
 
   async updateTeamMember(scope: TenantScope, userId: string, data: {

@@ -8,7 +8,7 @@ import { PrismaModule } from '@lib/prisma';
 import {
   RealtimeModule, StorageModule, NotificationsCoreModule, MessageRatesModule,
   WalletModule as WalletCoreModule, PermissionsModule, SuppressionModule, LlmModule, HandoverModule,
-  sharedBullClients,
+  MailModule, sharedBullClients,
 } from '@lib/common';
 
 // Core
@@ -115,6 +115,7 @@ import { CallsModule }        from './calls/calls.module';
     SuppressionModule,
     LlmModule,
     HandoverModule,
+    MailModule,
 
     // Auth & API access
     AuthModule,

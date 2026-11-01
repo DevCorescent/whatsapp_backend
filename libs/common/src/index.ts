@@ -34,3 +34,5 @@ export * from './rates/message-rates.service';
 export * from './rates/message-rates.module';
 export * from './wallet/wallet.service';
 export * from './wallet/wallet.module';
+export * from './mail/mail.service';
+export * from './mail/mail.module';

@@ -2,7 +2,7 @@ import {
   Injectable, NotFoundException, ForbiddenException, BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope, MessageRatesService, WalletService } from '@lib/common';
+import { TenantScope, MessageRatesService, WalletService, encryptSecret } from '@lib/common';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 
@@ -769,10 +769,19 @@ export class ResellerService {
     smtpPass?: string | null; smtpFrom?: string | null;
   }) {
     await this.guardReseller(scope);
+
+    // The password is stored encrypted, as everywhere else. This path had been writing it
+    // in clear, so the same column held two formats and a reseller's mail password sat
+    // readable in the database. A blank value leaves the stored one alone, so saving the
+    // rest of the form does not wipe a password the field never shows.
+    const { smtpPass, ...rest } = data;
+    const payload: Record<string, unknown> = { ...rest };
+    if (smtpPass?.trim()) payload.smtpPass = encryptSecret(smtpPass.trim());
+
     await this.prisma.tenantSettings.upsert({
       where:  { tenantId: scope.tenantId },
-      create: { tenantId: scope.tenantId, ...data } as any,
-      update: data as any,
+      create: { tenantId: scope.tenantId, ...payload } as any,
+      update: payload as any,
     });
     return { ok: true };
   }
