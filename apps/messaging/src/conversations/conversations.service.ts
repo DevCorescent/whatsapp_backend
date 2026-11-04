@@ -5,6 +5,7 @@ import { PrismaService } from '@lib/prisma';
 import {
   TenantScope, decryptSecret, MessageEventsService, NotificationsService,
   HandoverService, LeadQualificationService,
+  parseSendError, classifySendError, describeSendError, isKnownSendError,
 } from '@lib/common';
 
 const WA_API_VERSION = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
@@ -328,9 +329,24 @@ export class ConversationsService {
     const responseText = await res.text();
     if (!res.ok) {
       this.logger.error(`sendWhatsApp ← Meta ${res.status} ${res.statusText}: ${responseText.slice(0, 600)}`);
-      let reason = responseText;
-      try { reason = JSON.parse(responseText)?.error?.message ?? responseText; } catch { /* raw */ }
-      throw new BadRequestException(`WhatsApp API error: ${reason}`);
+      // Meta's own wording names Graph objects by id ("Object with ID '130...' does not
+      // exist"), which tells an agent staring at a chat window nothing it can act on.
+      // The shared rules turn the known failures into a sentence that names the fix.
+      let body: unknown = null;
+      try { body = JSON.parse(responseText); } catch { /* not JSON — keep the raw text */ }
+      const parsed = parseSendError(res.status, body);
+      if (parsed.code != null) {
+        const rule = classifySendError(parsed.code, parsed.subcode);
+        // A code we recognise already carries the sentence worth showing, and Meta's own
+        // wording would only add Graph object ids to it. An unrecognised code is the
+        // opposite: our reason says nothing, so Meta's message is all the agent has.
+        throw new BadRequestException(
+          isKnownSendError(parsed.code, parsed.subcode)
+            ? rule.reason
+            : describeSendError(parsed, rule),
+        );
+      }
+      throw new BadRequestException(`WhatsApp API error: ${responseText.slice(0, 300)}`);
     }
     try {
       return (JSON.parse(responseText)?.messages?.[0]?.id as string | undefined) ?? null;

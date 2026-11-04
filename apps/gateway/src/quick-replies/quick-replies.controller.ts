@@ -3,7 +3,7 @@ import {
   Body, Param, Query, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission, requireFields,} from '@lib/common';
 import { QuickRepliesService } from './quick-replies.service';
 
 @ApiTags('quick-replies')
@@ -30,6 +30,7 @@ export class QuickRepliesController {
     @CurrentTenant() scope: TenantScope,
     @Body() body: { shortcode: string; content: string },
   ) {
+    requireFields(body, ['shortcode', 'content']);
     return this.svc.create(scope, body);
   }
 

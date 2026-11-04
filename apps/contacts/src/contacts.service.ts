@@ -1,10 +1,16 @@
-import { Injectable, NotFoundException, ConflictException, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, ConflictException, BadRequestException, Optional } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
 import { TenantScope } from '@lib/common';
+import { InboundPipelineService } from '../../../apps/messaging/src/webhook/inbound-pipeline.service';
 
 @Injectable()
 export class ContactsService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(ContactsService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly flowPipeline?: InboundPipelineService,
+  ) {}
 
   // ── List ───────────────────────────────────────────────────────────────────
 
@@ -30,14 +36,14 @@ export class ContactsService {
       where.tags = { some: { tag: { name: { equals: query.tag, mode: 'insensitive' } } } };
     }
 
-    const [contacts, total] = await Promise.all([
+    const [contacts, total] = await this.prisma.withRetry(() => Promise.all([
       this.prisma.contact.findMany({
         where, skip, take: limit,
         orderBy: { createdAt: 'desc' },
         include: { tags: { include: { tag: true } } },
       }),
       this.prisma.contact.count({ where }),
-    ]);
+    ]), 'contacts list');
 
     return { contacts, total, page, limit };
   }
@@ -84,7 +90,22 @@ export class ContactsService {
     });
 
     if (tags?.length) await this.syncTags(scope, contact.id, tags);
+    this.dispatchContactCreated(scope, contact);
     return this.findOne(scope, contact.id);
+  }
+
+  private dispatchContactCreated(
+    scope: TenantScope,
+    contact: { id: string; name: string; phone: string },
+  ) {
+    if (!this.flowPipeline) return;
+    void this.flowPipeline.triggerFlowForEvent({
+      tenantId: scope.tenantId,
+      businessId: scope.businessId,
+      contactId: contact.id,
+      trigger: 'CONTACT_CREATED',
+      variables: { contactName: contact.name, contactPhone: contact.phone },
+    }).catch((err) => this.logger.warn(`Could not trigger contact-created flow for ${contact.id}: ${(err as Error).message}`));
   }
 
   // ── Update ─────────────────────────────────────────────────────────────────
@@ -135,11 +156,16 @@ export class ContactsService {
 
     for (const item of contacts) {
       try {
-        await this.prisma.contact.upsert({
+        const existing = await this.prisma.contact.findUnique({
+          where: { phone_businessId: { phone: item.phone, businessId: scope.businessId } },
+          select: { id: true },
+        });
+        const contact = await this.prisma.contact.upsert({
           where:  { phone_businessId: { phone: item.phone, businessId: scope.businessId } },
           create: { ...item, tenantId: scope.tenantId, businessId: scope.businessId },
           update: {},
         });
+        if (!existing) this.dispatchContactCreated(scope, contact);
         created++;
       } catch {
         skipped++;
@@ -236,11 +262,16 @@ export class ContactsService {
 
     for (const item of mapped) {
       try {
+        const existing = await this.prisma.contact.findUnique({
+          where: { phone_businessId: { phone: item.phone, businessId: scope.businessId } },
+          select: { id: true },
+        });
         const contact = await this.prisma.contact.upsert({
           where:  { phone_businessId: { phone: item.phone, businessId: scope.businessId } },
           create: { name: item.name, phone: item.phone, email: item.email, company: item.company, source: item.source, tenantId: scope.tenantId, businessId: scope.businessId },
           update: {},
         });
+        if (!existing) this.dispatchContactCreated(scope, contact);
         if (item.tags.length) {
           await this.syncTagsAdd(scope, contact.id, item.tags);
         }
@@ -332,6 +363,11 @@ export class ContactsService {
           });
           contactId = row.id;
           created++;
+          this.dispatchContactCreated(scope, {
+            id: row.id,
+            name: item.name ?? item.phone,
+            phone: item.phone,
+          });
         }
         if (allTags.length) await this.syncTagsAdd(scope, contactId, allTags);
       } catch (err: any) {

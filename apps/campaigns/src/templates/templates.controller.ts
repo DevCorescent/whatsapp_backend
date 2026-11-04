@@ -1,7 +1,6 @@
 import {
   Controller, Get, Post, Patch, Delete,
-  Body, Param, Query, UseGuards, HttpCode, HttpStatus,
-} from '@nestjs/common';
+  Body, Param, Query, UseGuards, HttpCode, HttpStatus, BadRequestException,} from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiConsumes } from '@nestjs/swagger';
 import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { UseInterceptors, UploadedFile } from '@nestjs/common';
@@ -123,6 +122,7 @@ export class TemplatesController {
     @CurrentTenant() scope: TenantScope,
     @UploadedFile() file: any,
   ) {
+    if (!file) throw new BadRequestException('A file is required.');
     return this.svc.uploadHeaderMedia(scope, file);
   }
 }

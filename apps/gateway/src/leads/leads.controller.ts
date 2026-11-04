@@ -4,7 +4,7 @@ import {
 } from '@nestjs/common';
 import { Response } from 'express';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission, requireFields,} from '@lib/common';
 import { LeadsService } from './leads.service';
 
 @ApiTags('leads')
@@ -27,6 +27,7 @@ export class LeadsController {
   @RequiresPermission('settings.manage')
   @ApiOperation({ summary: 'Bulk upsert pipeline stages' })
   bulkUpdateStages(@CurrentTenant() scope: TenantScope, @Body() body: any) {
+    requireFields(body, ['stages']);
     return this.svc.bulkUpdateStages(scope, body);
   }
 
@@ -97,6 +98,7 @@ export class LeadsController {
   @RequiresPermission('contacts.import')
   @ApiOperation({ summary: 'Bulk import leads' })
   importLeads(@CurrentTenant() scope: TenantScope, @Body() body: any) {
+    requireFields(body, ['leads']);
     return this.svc.importLeads(scope, body);
   }
 

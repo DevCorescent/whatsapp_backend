@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Body, Param, Query, UseGuards, HttpCode, HttpStatus,
+  Controller, Get, Post, Body, Param, Query, UseGuards, HttpCode, HttpStatus, Logger,
 } from '@nestjs/common';
 import { ApiTags, ApiSecurity, ApiOperation } from '@nestjs/swagger';
 import {
@@ -7,15 +7,19 @@ import {
 } from '@lib/common';
 import { PrismaService } from '@lib/prisma';
 import { ApiKeyGuard } from './api-key.guard';
+import { InboundPipelineService } from '../../../../apps/messaging/src/webhook/inbound-pipeline.service';
 
 @ApiTags('v1 (Public API)')
 @ApiSecurity('api-key')
 @UseGuards(ApiKeyGuard)
 @Controller('v1')
 export class V1Controller {
+  private readonly logger = new Logger(V1Controller.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly events: MessageEventsService,
+    private readonly flowPipeline: InboundPipelineService,
   ) {}
 
   // ── Contacts ───────────────────────────────────────────────────────────────
@@ -49,7 +53,11 @@ export class V1Controller {
   async upsertContact(@CurrentTenant() scope: TenantScope, @Body() body: any) {
     const { phone, name, email, company, source } = body;
     if (!phone || !name) return { error: 'phone and name are required' };
-    return this.prisma.contact.upsert({
+    const existing = await this.prisma.contact.findUnique({
+      where: { phone_businessId: { phone, businessId: scope.businessId } },
+      select: { id: true },
+    });
+    const contact = await this.prisma.contact.upsert({
       where:  { phone_businessId: { phone, businessId: scope.businessId } },
       create: {
         phone, name, email, company, source: source ?? 'api',
@@ -57,6 +65,16 @@ export class V1Controller {
       },
       update: { name, email, company },
     });
+    if (!existing) {
+      void this.flowPipeline.triggerFlowForEvent({
+        tenantId: scope.tenantId,
+        businessId: scope.businessId,
+        contactId: contact.id,
+        trigger: 'CONTACT_CREATED',
+        variables: { contactName: contact.name, contactPhone: contact.phone },
+      }).catch((err) => this.logger.warn(`Could not trigger contact-created flow for ${contact.id}: ${(err as Error).message}`));
+    }
+    return contact;
   }
 
   // ── Messages ───────────────────────────────────────────────────────────────

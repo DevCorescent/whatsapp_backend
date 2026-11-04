@@ -58,6 +58,14 @@ export class BillingController {
     return this.svc.checkout(scope, planId);
   }
 
+  @Post('renew')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @ApiOperation({ summary: 'Create a payment order to renew the current plan early' })
+  renewSubscription(@CurrentTenant() scope: TenantScope) {
+    return this.svc.createRenewalOrder(scope);
+  }
+
   /**
    * POST /billing/verify-payment — verify a Razorpay payment signature and
    * activate the subscription or apply a plan change.
@@ -74,6 +82,7 @@ export class BillingController {
       razorpay_signature:  string;
       planId?:             string;
       planChangeId?:       string;
+      renewSubscription?:  boolean;
     },
   ) {
     return this.svc.verifyRazorpayPayment(scope, body);

@@ -1,8 +1,20 @@
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Optional } from '@nestjs/common';
+import { createHash, randomBytes } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '@lib/prisma';
 import { TenantScope, MessageEventsService } from '@lib/common';
 import { AiService } from '../ai/ai.service';
+
+const FLOW_TRIGGER_TYPES = [
+  'KEYWORD',
+  'INBOUND',
+  'FIRST_MESSAGE',
+  'CONTACT_CREATED',
+  'LEAD_CREATED',
+  'LEAD_STATUS_CHANGED',
+  'LEAD_CLOSED',
+  'WEBHOOK',
+] as const;
 
 @Injectable()
 export class KnowledgeService {
@@ -460,6 +472,22 @@ export class KnowledgeService {
     return flow;
   }
 
+  async generateFlowWebhookToken(scope: TenantScope, id: string) {
+    await this.getFlow(scope, id);
+
+    const token = randomBytes(32).toString('base64url');
+    await this.prisma.chatbotFlow.update({
+      where: { id },
+      data: {
+        trigger: 'WEBHOOK',
+        keywords: [],
+        webhookTokenHash: createHash('sha256').update(token).digest('hex'),
+      },
+    });
+
+    return { url: `/api/flow-webhook/${token}` };
+  }
+
   async createFlow(scope: TenantScope, data: {
     name: string; description?: string; trigger: string;
     keywords?: string[]; nodes: unknown; edges: unknown;
@@ -485,13 +513,21 @@ export class KnowledgeService {
     publishedNodes?: unknown; publishedEdges?: unknown; isDraft?: boolean;
   }) {
     await this.getFlow(scope, id);
+    const trigger = data.trigger && FLOW_TRIGGER_TYPES.includes(data.trigger as (typeof FLOW_TRIGGER_TYPES)[number])
+      ? data.trigger
+      : undefined;
     return this.prisma.chatbotFlow.update({
       where: { id },
       data:  {
         name:           data.name,
         description:    data.description,
-        trigger:        data.trigger,
-        keywords:       data.keywords,
+        ...(trigger && { trigger }),
+        ...(trigger && {
+          keywords: trigger === 'KEYWORD'
+            ? (data.keywords ?? []).map((keyword) => keyword.trim()).filter(Boolean)
+            : [],
+        }),
+        ...(trigger && trigger !== 'WEBHOOK' && { webhookTokenHash: null }),
         nodes:          data.nodes as any,
         edges:          data.edges as any,
         isActive:       data.isActive,
@@ -651,7 +687,7 @@ export class KnowledgeService {
     body: { nodes: any; edges: any; trigger?: string; keywords?: string[] },
   ) {
     await this.getFlow(scope, id);
-    const trigger = ['KEYWORD', 'INBOUND', 'FIRST_MESSAGE'].includes(body.trigger ?? '')
+    const trigger = FLOW_TRIGGER_TYPES.includes(body.trigger as (typeof FLOW_TRIGGER_TYPES)[number])
       ? body.trigger
       : undefined;
 
@@ -661,6 +697,7 @@ export class KnowledgeService {
         nodes: body.nodes as any,
         edges: body.edges as any,
         ...(trigger && { trigger }),
+        ...(trigger && trigger !== 'WEBHOOK' && { webhookTokenHash: null }),
         // Only a keyword trigger has keywords; the others are stored empty so a trigger
         // changed away from KEYWORD cannot keep firing on an old word.
         ...(trigger && {

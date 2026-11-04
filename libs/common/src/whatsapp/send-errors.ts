@@ -110,6 +110,27 @@ const RULES: Record<number, SendErrorRule> = {
   132016: { action: 'ABORT', reason: 'WhatsApp disabled this template permanently. Build a new one.' },
   132018: { action: 'ABORT', reason: 'WhatsApp rejected the template’s variables.' },
   132068: { action: 'ABORT', reason: 'The flow on this template is blocked.' },
+
+  // ── The request itself is not valid for this account ──────────────────────
+  // Meta's catch-all "invalid parameter". Whatever is wrong is wrong identically for
+  // every recipient, so retrying is pointless — hence ABORT rather than the RETRY an
+  // unrecognised code would otherwise get. See SUBCODE_RULES for the specific cases.
+  100: { action: 'ABORT', reason: 'WhatsApp rejected one of the values in this request.' },
+};
+
+/**
+ * Rules that need Meta's subcode as well as its code, keyed `code:subcode`. Checked
+ * before RULES, so a subcode we recognise wins over the broader code's answer.
+ */
+const SUBCODE_RULES: Record<string, SendErrorRule> = {
+  // The sending number (or its WhatsApp Business Account) is not visible to the app
+  // that issued the token: it was deleted, moved to another app, or — for one of Meta's
+  // free test numbers — recycled. The credentials are intact; the number is gone, so no
+  // amount of retrying brings it back and every send from it fails the same way.
+  '100:33': {
+    action: 'ABORT',
+    reason: 'This WhatsApp number is no longer connected in Meta. Reconnect it in Settings.',
+  },
 };
 
 const UNKNOWN: SendErrorRule = {
@@ -120,6 +141,8 @@ const UNKNOWN: SendErrorRule = {
 /** The error Meta sent, flattened out of the Graph response. */
 export interface ParsedSendError {
   code: number | null;
+  /** Meta's `error_subcode`, which separates the many meanings of a broad code like 100. */
+  subcode: number | null;
   title: string | null;
   /** Meta's own message, which is more specific than our reason and worth keeping. */
   message: string | null;
@@ -136,6 +159,7 @@ export function parseSendError(httpStatus: number, body: unknown): ParsedSendErr
   const code = typeof error.code === 'number' ? error.code : null;
   return {
     code,
+    subcode: typeof error.error_subcode === 'number' ? error.error_subcode : null,
     title: error.error_user_title ?? error.type ?? null,
     message: error.message ?? null,
     details: error.error_data?.details ?? error.error_user_msg ?? null,
@@ -143,14 +167,29 @@ export function parseSendError(httpStatus: number, body: unknown): ParsedSendErr
   };
 }
 
-export function classifySendError(code: number | null | undefined): SendErrorRule {
+/**
+ * @param subcode Meta's `error_subcode` when the caller has it. Callers reading a code
+ *   back from a stored column have only the code, which still resolves correctly.
+ */
+export function classifySendError(
+  code: number | null | undefined,
+  subcode?: number | null,
+): SendErrorRule {
   if (code == null) return UNKNOWN;
+  if (subcode != null) {
+    const specific = SUBCODE_RULES[`${code}:${subcode}`];
+    if (specific) return specific;
+  }
   return RULES[code] ?? UNKNOWN;
 }
 
 /** Whether we have a considered answer for this code, or are falling back to a retry. */
-export function isKnownSendError(code: number | null | undefined): boolean {
-  return code != null && code in RULES;
+export function isKnownSendError(
+  code: number | null | undefined,
+  subcode?: number | null,
+): boolean {
+  if (code == null) return false;
+  return (subcode != null && `${code}:${subcode}` in SUBCODE_RULES) || code in RULES;
 }
 
 /**

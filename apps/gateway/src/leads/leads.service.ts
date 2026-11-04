@@ -1,5 +1,6 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
+import { InboundPipelineService } from '../../../../apps/messaging/src/webhook/inbound-pipeline.service';
 import {
   TenantScope, LeadQualificationService, CRITERIA, DEFAULT_WEIGHTS, scoreLabelFor,
 } from '@lib/common';
@@ -11,9 +12,12 @@ import {
 
 @Injectable()
 export class LeadsService {
+  private readonly logger = new Logger(LeadsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly qualification: LeadQualificationService,
+    private readonly flowPipeline: InboundPipelineService,
   ) {}
 
   // ── Pipeline Stages ─────────────────────────────────────────────────────────
@@ -280,7 +284,7 @@ export class LeadsService {
     if (!stage) throw new BadRequestException('Stage not found or does not belong to tenant');
 
     const score = 0;
-    return this.prisma.lead.create({
+    const lead = await this.prisma.lead.create({
       data: {
         tenantId:        scope.tenantId,
         businessId:      scope.businessId,
@@ -301,6 +305,12 @@ export class LeadsService {
         notes:           body.notes,
       },
     });
+    this.dispatchFlowTrigger(scope, lead.contactId, 'LEAD_CREATED', {
+      leadId: lead.id,
+      leadTitle: lead.title,
+      leadStage: stage.name,
+    });
+    return lead;
   }
 
   async getLead(scope: TenantScope, id: string) {
@@ -329,6 +339,8 @@ export class LeadsService {
     const lead = await this.getLead(scope, id);
 
     const data: any = {};
+    let nextStageName: string | undefined;
+    let closesLead = false;
     if (body.title        !== undefined) data.title        = body.title;
     if (body.value        !== undefined) data.value        = body.value;
     if (body.assignedToId !== undefined) data.assignedToId = body.assignedToId;
@@ -352,12 +364,44 @@ export class LeadsService {
       });
       if (!stage) throw new BadRequestException('Stage not found or does not belong to tenant');
       data.stageId = body.stageId;
+      nextStageName = stage.name;
       if (stage.outcome === 'WON' || stage.outcome === 'LOST') {
         data.closedAt = new Date();
+        closesLead = !lead.closedAt;
       }
     }
 
-    return this.prisma.lead.update({ where: { id }, data });
+    const updated = await this.prisma.lead.update({ where: { id }, data });
+    if (body.stageId !== undefined && body.stageId !== lead.stageId) {
+      const variables = {
+        leadId: lead.id,
+        leadTitle: updated.title,
+        previousStage: lead.stage?.name ?? '',
+        leadStage: nextStageName ?? '',
+      };
+      this.dispatchFlowTrigger(scope, lead.contactId, 'LEAD_STATUS_CHANGED', variables);
+      if (closesLead) this.dispatchFlowTrigger(scope, lead.contactId, 'LEAD_CLOSED', variables);
+    }
+    return updated;
+  }
+
+  private async dispatchFlowTrigger(
+    scope: TenantScope,
+    contactId: string,
+    trigger: 'CONTACT_CREATED' | 'LEAD_CREATED' | 'LEAD_STATUS_CHANGED' | 'LEAD_CLOSED',
+    variables: Record<string, string>,
+  ): Promise<void> {
+    try {
+      await this.flowPipeline.triggerFlowForEvent({
+        tenantId: scope.tenantId,
+        businessId: scope.businessId,
+        contactId,
+        trigger,
+        variables,
+      });
+    } catch (err) {
+      this.logger.warn(`Could not trigger ${trigger} flow for lead contact ${contactId}: ${(err as Error).message}`);
+    }
   }
 
   async deleteLead(scope: TenantScope, id: string) {
@@ -403,6 +447,10 @@ export class LeadsService {
         const stageId = item.stageId ?? defaultStage?.id;
         if (!stageId) throw new Error('No stage specified and no default stage configured');
 
+        const existingContact = await this.prisma.contact.findUnique({
+          where: { phone_businessId: { phone: item.phone, businessId: scope.businessId } },
+          select: { id: true },
+        });
         const contact = await this.prisma.contact.upsert({
           where:  { phone_businessId: { phone: item.phone, businessId: scope.businessId } },
           create: {
@@ -414,7 +462,14 @@ export class LeadsService {
           update: {},
         });
 
-        await this.prisma.lead.create({
+        if (!existingContact) {
+          await this.dispatchFlowTrigger(scope, contact.id, 'CONTACT_CREATED', {
+            contactName: contact.name,
+            contactPhone: contact.phone,
+          });
+        }
+
+        const lead = await this.prisma.lead.create({
           data: {
             tenantId:   scope.tenantId,
             businessId: scope.businessId,
@@ -426,6 +481,11 @@ export class LeadsService {
             value:      item.value,
             notes:      item.notes,
           },
+        });
+        await this.dispatchFlowTrigger(scope, contact.id, 'LEAD_CREATED', {
+          leadId: lead.id,
+          leadTitle: lead.title,
+          leadStage: stageId,
         });
         created++;
       } catch (err: any) {

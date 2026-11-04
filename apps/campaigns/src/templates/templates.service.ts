@@ -86,17 +86,20 @@ export class TemplatesService {
     // Templates belong to a WhatsApp account, and a number can only send its own.
     if (query.whatsappIntegrationId) {
       const integration = await this.prisma.whatsAppIntegration.findFirst({
-        where:  { id: query.whatsappIntegrationId, businessId: scope.businessId },
+        where:  {
+          id: query.whatsappIntegrationId,
+          tenantId: scope.tenantId,
+          businessId: scope.businessId,
+          isActive: true,
+        },
         select: { whatsappBusinessId: true },
       });
       if (integration?.whatsappBusinessId) {
-        where.OR = [
-          { wabaId: integration.whatsappBusinessId },
-          // A row with no account recorded predates the column or has never synced, so it
-          // stays in rather than hiding a template somebody is already using. Not a dead
-          // one, though: no number can send that, so it belongs to no number's list.
-          { wabaId: null, status: { not: 'DISABLED' } },
-        ];
+        where.wabaId = integration.whatsappBusinessId;
+      } else {
+        // A missing, inactive, or unconfigured integration must never fall back to
+        // showing every account's templates.
+        where.id = { in: [] };
       }
     }
 

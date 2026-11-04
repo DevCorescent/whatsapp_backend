@@ -271,7 +271,7 @@ export class CampaignSendProcessor {
     parsed: ParsedSendError;
   }): Promise<void> {
     const { job, campaignId, recipientId, tenantId, businessId, phone, parsed } = ctx;
-    const rule = classifySendError(parsed.code);
+    const rule = classifySendError(parsed.code, parsed.subcode);
     const reason = describeSendError(parsed, rule);
 
     this.logger.warn(

@@ -7,6 +7,7 @@ import {
   MessageRatesService, PermissionsService, PERMISSIONS, INVITABLE_ROLES, TEAM_ADMIN_ROLES,
   MailService,
   accountCeiling, roleDefaults, resolvePermission, isInvitableRole,
+  parseSendError, classifySendError, isKnownSendError,
 } from '@lib/common';
 
 /** The role names a person would recognise, rather than the stored value. */
@@ -361,7 +362,9 @@ export class SettingsService {
   async listIntegrations(scope: TenantScope, businessId?: string) {
     const bizId = businessId ?? scope.businessId;
 
-    const [business, integrations] = await Promise.all([
+    // This is the page someone opens to check their numbers, so a dropped pooled socket
+    // here reads as "my numbers are gone". Worth the retry.
+    const [business, integrations] = await this.prisma.withRetry(() => Promise.all([
       this.prisma.business.findFirst({
         where: { id: bizId, tenantId: scope.tenantId },
         select: { id: true, name: true, whatsappPhoneNumberId: true, whatsappAccessToken: true },
@@ -370,7 +373,7 @@ export class SettingsService {
         where: { tenantId: scope.tenantId, businessId: bizId },
         orderBy: [{ isActive: 'desc' }, { isDefault: 'desc' }, { createdAt: 'asc' }],
       }),
-    ]);
+    ]), 'listIntegrations');
 
     if (!business) throw new NotFoundException('Business not found');
 
@@ -578,8 +581,14 @@ export class SettingsService {
       this.logger.log(`testIntegration ← Meta ${res.status}: ${JSON.stringify(json).slice(0, 300)}`);
 
       if (!res.ok) {
-        const errMsg = json?.error?.message ?? `Meta ${res.status}`;
-        this.logger.warn(`testIntegration Meta error — code=${json?.error?.code} msg=${errMsg}`);
+        // Same rules the send path uses, so a number that fails here fails there with
+        // the same sentence rather than two different descriptions of one problem.
+        const parsed = parseSendError(res.status, json);
+        const rule   = classifySendError(parsed.code, parsed.subcode);
+        const errMsg = isKnownSendError(parsed.code, parsed.subcode)
+          ? rule.reason
+          : (json?.error?.message ?? `Meta ${res.status}`);
+        this.logger.warn(`testIntegration Meta error — code=${parsed.code} subcode=${parsed.subcode} msg=${errMsg}`);
         return { ok: false, error: errMsg, phoneNumber: null, qualityRating: null };
       }
 
@@ -610,9 +619,12 @@ export class SettingsService {
   }
 
   async getWhatsAppHealth(scope: TenantScope) {
-    const integrations = await this.prisma.whatsAppIntegration.findMany({
-      where: { tenantId: scope.tenantId, businessId: scope.businessId, isActive: true },
-    });
+    const integrations = await this.prisma.withRetry(
+      () => this.prisma.whatsAppIntegration.findMany({
+        where: { tenantId: scope.tenantId, businessId: scope.businessId, isActive: true },
+      }),
+      'getWhatsAppHealth',
+    );
 
     const apiVersion = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
 

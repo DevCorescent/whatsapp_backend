@@ -3,7 +3,7 @@ import {
   Body, Param, Query, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission, requireFields,} from '@lib/common';
 import { ChatbotService } from './chatbot.service';
 import { KnowledgeService } from '../knowledge/knowledge.service';
 
@@ -30,6 +30,7 @@ export class ChatbotController {
     @CurrentTenant() scope: TenantScope,
     @Body() body: { conversationId: string; message: string },
   ) {
+    requireFields(body, ['conversationId', 'message']);
     return this.svc.respondChatbot(scope, body);
   }
 
@@ -90,6 +91,12 @@ export class ChatbotController {
     @Body() body: { nodes: any; edges: any; trigger?: string; keywords?: string[] },
   ) {
     return this.knowledge.autosaveFlow(scope, id, body);
+  }
+
+  @Post('flows/:id/webhook-token')
+  @ApiOperation({ summary: 'Generate or rotate a custom flow webhook URL' })
+  generateFlowWebhookToken(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
+    return this.knowledge.generateFlowWebhookToken(scope, id);
   }
 
   @Get('flows/:id')

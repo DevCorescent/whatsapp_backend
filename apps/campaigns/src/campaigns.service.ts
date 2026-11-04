@@ -136,10 +136,38 @@ export class CampaignsService {
       scheduledAt,
       headerMediaId,
       headerMediaUrl,
-      whatsappIntegrationId,
+      whatsappIntegrationId: requestedIntegrationId,
       ttlSeconds,
       dryRun            = false,
     } = data;
+
+    const integration = await this.prisma.whatsAppIntegration.findFirst({
+      where: {
+        ...(requestedIntegrationId
+          ? { id: requestedIntegrationId }
+          : {}),
+        tenantId: scope.tenantId,
+        businessId: scope.businessId,
+        isActive: true,
+      },
+      orderBy: { isDefault: 'desc' },
+      select: { id: true, whatsappBusinessId: true },
+    });
+    if (!integration?.whatsappBusinessId) {
+      throw new BadRequestException('Select an active WhatsApp number with a connected business account');
+    }
+
+    const template = await this.prisma.messageTemplate.findFirst({
+      where: { id: templateId, tenantId: scope.tenantId, businessId: scope.businessId },
+      select: { status: true, category: true, wabaId: true },
+    });
+    if (!template || template.status !== 'APPROVED') {
+      throw new BadRequestException('Choose an approved WhatsApp template');
+    }
+    if (template.wabaId !== integration.whatsappBusinessId) {
+      throw new BadRequestException('This template does not belong to the selected WhatsApp number');
+    }
+    const whatsappIntegrationId = integration.id;
 
     // ── 1. Gather raw phone numbers ─────────────────────────────────────────
     let rawNumbers: string[] = [];
@@ -217,10 +245,10 @@ export class CampaignsService {
 
     // ── 5. Dry-run: return preview + cost estimate ──────────────────────────
     if (dryRun) {
-      const [wallet, template] = await Promise.all([
-        this.prisma.wallet.findUnique({ where: { tenantId: scope.tenantId }, select: { balanceMinor: true } }),
-        templateId ? this.prisma.messageTemplate.findUnique({ where: { id: templateId }, select: { category: true } }) : Promise.resolve(null),
-      ]);
+      const wallet = await this.prisma.wallet.findUnique({
+        where: { tenantId: scope.tenantId },
+        select: { balanceMinor: true },
+      });
 
       // Quote the price this customer will actually be charged (own → reseller → platform).
       const unitPriceMinor = await this.rates.priceFor(scope.tenantId, template?.category);

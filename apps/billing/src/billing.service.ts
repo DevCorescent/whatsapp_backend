@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
 import { TenantScope, MessageRatesService } from '@lib/common';
+import { nextRenewalPeriod } from './renewal-period';
 
 @Injectable()
 export class BillingService {
@@ -161,6 +162,55 @@ export class BillingService {
     };
   }
 
+  async createRenewalOrder(scope: TenantScope) {
+    const sub = await this.prisma.subscription.findUnique({
+      where: { tenantId: scope.tenantId },
+      include: { plan: true },
+    });
+    if (!sub?.plan) throw new NotFoundException('Subscription not found');
+    if (sub.currentPeriodEnd <= new Date() || ['EXPIRED', 'PAST_DUE'].includes(sub.status)) {
+      throw new BadRequestException('This plan has expired. Choose a plan to subscribe again.');
+    }
+
+    const price = Number(sub.billingCycle === 'ANNUAL' ? sub.plan.priceAnnual : sub.plan.priceMonthly);
+    if (price <= 0) throw new BadRequestException('Free plans do not need an early renewal');
+
+    const razorpayKeyId = process.env['RAZORPAY_KEY_ID'];
+    const razorpaySecret = process.env['RAZORPAY_KEY_SECRET'];
+    if (!razorpayKeyId || !razorpaySecret) throw new BadRequestException('Razorpay not configured');
+
+    const authHeader = Buffer.from(`${razorpayKeyId}:${razorpaySecret}`).toString('base64');
+    const res = await fetch('https://api.razorpay.com/v1/orders', {
+      method: 'POST',
+      headers: { Authorization: `Basic ${authHeader}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        amount: Math.round(price * 100),
+        currency: 'INR',
+        receipt: `renew-${scope.tenantId}-${Date.now()}`,
+        notes: {
+          tenantId: scope.tenantId,
+          planId: sub.planId,
+          kind: 'RENEWAL',
+          billingCycle: sub.billingCycle,
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      throw new BadRequestException(`Razorpay error: ${err}`);
+    }
+
+    const order = await res.json() as any;
+    return {
+      orderId: order.id,
+      amount: order.amount,
+      currency: (order.currency as string).toUpperCase(),
+      keyId: razorpayKeyId,
+      planName: (sub.plan as any).displayName ?? sub.plan.name,
+    };
+  }
+
   // ── Verify Razorpay payment ────────────────────────────────────────────────
 
   async verifyRazorpayPayment(
@@ -171,6 +221,7 @@ export class BillingService {
       razorpay_signature:  string;
       planId?:             string;
       planChangeId?:       string;
+      renewSubscription?:  boolean;
     },
   ) {
     const crypto = await import('crypto');
@@ -187,6 +238,100 @@ export class BillingService {
     if (body.planChangeId) {
       const result = await this.checkoutPlanChange(scope, body.planChangeId);
       return { applied: true, subscription: result };
+    }
+
+    if (body.renewSubscription) {
+      if (!body.planId) throw new BadRequestException('planId is required for renewal');
+      const alreadyApplied = await this.prisma.planRenewalPayment.findUnique({
+        where: { razorpayPaymentId: body.razorpay_payment_id },
+      });
+      if (alreadyApplied) {
+        if (alreadyApplied.tenantId !== scope.tenantId) {
+          throw new BadRequestException('This payment has already been applied');
+        }
+        return { applied: true, renewed: true, alreadyApplied: true };
+      }
+
+      const razorpayKeyId = process.env['RAZORPAY_KEY_ID'];
+      const razorpaySecret = process.env['RAZORPAY_KEY_SECRET'];
+      if (!razorpayKeyId || !razorpaySecret) throw new BadRequestException('Razorpay not configured');
+
+      const authHeader = Buffer.from(`${razorpayKeyId}:${razorpaySecret}`).toString('base64');
+      const orderResponse = await fetch(
+        `https://api.razorpay.com/v1/orders/${encodeURIComponent(body.razorpay_order_id)}`,
+        { headers: { Authorization: `Basic ${authHeader}` }, cache: 'no-store' },
+      );
+      if (!orderResponse.ok) throw new BadRequestException('Unable to verify renewal order');
+      const order = await orderResponse.json() as {
+        amount: number;
+        currency: string;
+        status: string;
+        notes?: Record<string, string>;
+      };
+      const currentSubscription = await this.prisma.subscription.findUnique({
+        where: { tenantId: scope.tenantId },
+        include: { plan: true },
+      });
+      if (!currentSubscription?.plan || currentSubscription.planId !== body.planId) {
+        throw new BadRequestException('The active plan changed before renewal completed. Please try again.');
+      }
+      const renewalPrice = Number(
+        currentSubscription.billingCycle === 'ANNUAL'
+          ? currentSubscription.plan.priceAnnual
+          : currentSubscription.plan.priceMonthly,
+      );
+      if (
+        order.status !== 'paid' ||
+        order.currency !== 'INR' ||
+        order.amount !== Math.round(renewalPrice * 100) ||
+        order.notes?.tenantId !== scope.tenantId ||
+        order.notes?.planId !== body.planId ||
+        order.notes?.kind !== 'RENEWAL' ||
+        order.notes?.billingCycle !== currentSubscription.billingCycle
+      ) {
+        throw new BadRequestException('Payment does not match this subscription renewal');
+      }
+
+      try {
+        const sub = await this.prisma.$transaction(async (tx) => {
+          await tx.planRenewalPayment.create({
+            data: {
+              tenantId: scope.tenantId,
+              razorpayPaymentId: body.razorpay_payment_id,
+            },
+          });
+          await tx.$queryRaw`SELECT "tenantId" FROM "subscriptions" WHERE "tenantId" = ${scope.tenantId} FOR UPDATE`;
+          const current = await tx.subscription.findUnique({
+            where: { tenantId: scope.tenantId },
+          });
+          if (!current || current.planId !== body.planId || current.billingCycle !== order.notes?.billingCycle) {
+            throw new BadRequestException('The active plan changed before renewal completed. Please try again.');
+          }
+          const now = new Date();
+          const period = nextRenewalPeriod(current.currentPeriodEnd, current.billingCycle, now);
+          return tx.subscription.update({
+            where: { tenantId: scope.tenantId },
+            data: {
+              status: 'ACTIVE',
+              cancelAtPeriodEnd: false,
+              cancelledAt: null,
+              currentPeriodStart: current.currentPeriodEnd > now ? current.currentPeriodStart : period.startsAt,
+              currentPeriodEnd: period.endsAt,
+            },
+          });
+        });
+        return { applied: true, renewed: true, subscription: sub };
+      } catch (err) {
+        if ((err as { code?: string })?.code === 'P2002') {
+          const payment = await this.prisma.planRenewalPayment.findUnique({
+            where: { razorpayPaymentId: body.razorpay_payment_id },
+          });
+          if (payment?.tenantId === scope.tenantId) {
+            return { applied: true, renewed: true, alreadyApplied: true };
+          }
+        }
+        throw err;
+      }
     }
 
     if (body.planId) {

@@ -1,6 +1,7 @@
 import {
   ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logger,
 } from '@nestjs/common';
+import { isTransientDbError } from '@lib/prisma';
 import type { Response } from 'express';
 
 /**
@@ -18,12 +19,69 @@ import type { Response } from 'express';
  *
  * `message` is kept alongside it so anything already reading that keeps working.
  */
+/**
+ * Prisma failures that are really the caller's doing, and the answer each deserves.
+ *
+ * Deliberately narrow: only the codes whose cause is unambiguously the request. Anything
+ * else stays a 500, because guessing that a server fault is the caller's would hide real
+ * bugs — the opposite mistake, and the worse one.
+ */
+function mapPrismaError(err: unknown): { status: number; message: string } | null {
+  const name = (err as { name?: string })?.name;
+  if (name === 'PrismaClientValidationError') {
+    return { status: HttpStatus.BAD_REQUEST, message: 'The request is missing required information.' };
+  }
+  if (name !== 'PrismaClientKnownRequestError') return null;
+
+  const code = (err as { code?: string })?.code;
+  switch (code) {
+    case 'P2025': return { status: HttpStatus.NOT_FOUND,  message: 'That record does not exist.' };
+    case 'P2002': return { status: HttpStatus.CONFLICT,   message: 'That already exists.' };
+    case 'P2003': return { status: HttpStatus.BAD_REQUEST, message: 'That refers to something that does not exist.' };
+    case 'P2000': return { status: HttpStatus.BAD_REQUEST, message: 'One of the values is too long.' };
+    case 'P2011': return { status: HttpStatus.BAD_REQUEST, message: 'A required value was left empty.' };
+    default:      return null;
+  }
+}
+
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger('HttpException');
 
   catch(exception: unknown, host: ArgumentsHost): void {
     const res = host.switchToHttp().getResponse<Response>();
+
+    // A serverless Postgres drops quiet connections, so a page can fail for a second and
+    // work on a reload. Reported as a 500 "something went wrong on our side" it reads as
+    // a bug and sends people looking for data they think they have lost — which is worse
+    // than the outage. It is honest about being temporary, and names nothing internal.
+    if (!(exception instanceof HttpException) && isTransientDbError(exception)) {
+      this.logger.warn(`Database briefly unreachable: ${(exception as Error)?.message?.split('\n')[0]}`);
+      res.status(HttpStatus.SERVICE_UNAVAILABLE).json({
+        success: false,
+        error:   'The database is briefly unreachable. Nothing is lost — try again in a moment.',
+        message: 'The database is briefly unreachable. Nothing is lost — try again in a moment.',
+        statusCode: HttpStatus.SERVICE_UNAVAILABLE,
+        retryable: true,
+      });
+      return;
+    }
+
+    // A request the caller got wrong is not a server fault. Most controllers here accept
+    // a plain object rather than a decorated DTO, so the global ValidationPipe has nothing
+    // to check and a missing field travels all the way down to Prisma, which throws. Left
+    // alone that surfaces as 500 "something went wrong on our side" — telling an integrator
+    // the server is broken when their payload is simply incomplete.
+    const mapped = mapPrismaError(exception);
+    if (mapped) {
+      res.status(mapped.status).json({
+        success: false,
+        error:   mapped.message,
+        message: mapped.message,
+        statusCode: mapped.status,
+      });
+      return;
+    }
 
     const status = exception instanceof HttpException
       ? exception.getStatus()

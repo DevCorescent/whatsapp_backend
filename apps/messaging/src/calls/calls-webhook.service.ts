@@ -7,6 +7,7 @@ import {
 } from '@lib/common';
 import { QUEUE_CALLS } from '@lib/queue';
 import { WebhookService } from '../webhook/webhook.service';
+import { InboundPipelineService } from '../webhook/inbound-pipeline.service';
 import type { WACall, WAChangeValue, WAContact } from '../webhook/webhook.types';
 import { CallsService, OFFER_TTL_SEC, RING_TIMEOUT_MS } from './calls.service';
 
@@ -26,6 +27,7 @@ export class CallsWebhookService {
     private readonly events:        MessageEventsService,
     private readonly notifications: NotificationsService,
     private readonly webhook:       WebhookService,
+    private readonly pipeline:      InboundPipelineService,
     private readonly calls:         CallsService,
     @InjectQueue(QUEUE_CALLS) private readonly queue: Queue<CallTimeoutJob>,
   ) {}
@@ -70,7 +72,7 @@ export class CallsWebhookService {
     const phone = call.from ?? waContact?.wa_id;
     if (!phone) return;
 
-    const { contact, conversation } = await this.webhook.resolveContactAndConversation(
+    const { contact, conversation, contactCreated } = await this.webhook.resolveContactAndConversation(
       identity, phone, { name: waContact?.profile?.name, waId: waContact?.bsuid ?? waContact?.username ?? waContact?.wa_id },
     );
 
@@ -141,6 +143,17 @@ export class CallsWebhookService {
 
     await this.queue.add('timeout', { callId: row.id }, { delay: RING_TIMEOUT_MS + 15_000, removeOnComplete: true, removeOnFail: true })
       .catch(err => this.logger.warn(`call timeout enqueue failed: ${err?.message ?? err}`));
+
+    if (contactCreated) {
+      void this.pipeline.triggerFlowForEvent({
+        tenantId: identity.tenantId,
+        businessId: identity.businessId,
+        contactId: contact.id,
+        conversationId: conversation.id,
+        trigger: 'CONTACT_CREATED',
+        variables: { contactName: contact.name, contactPhone: contact.phone },
+      }).catch((err) => this.logger.warn(`Could not trigger contact-created flow for ${contact.id}: ${(err as Error).message}`));
+    }
   }
 
   private async onTerminate(call: WACall, errors?: WAChangeValue['errors']) {

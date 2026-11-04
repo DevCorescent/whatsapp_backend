@@ -224,7 +224,9 @@ export class AiService {
       if (!latest) throw new NotFoundException('There is no conversation with this contact to read');
       conversationId = latest.id;
     }
-    if (!conversationId) throw new NotFoundException('Give either a conversation or a lead');
+    // Naming neither a conversation nor a lead is a malformed request, not a missing
+    // record — answering 404 tells the caller the endpoint is wrong, which it is not.
+    if (!conversationId) throw new BadRequestException('Give either a conversation or a lead');
 
     const conversation = await this.prisma.conversation.findFirst({
       where:  { id: conversationId, tenantId: scope.tenantId, businessId: scope.businessId },

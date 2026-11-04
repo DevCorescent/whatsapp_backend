@@ -3,7 +3,7 @@ import {
   Body, Param, Query, UseGuards,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission, requireFields,} from '@lib/common';
 import { ResellerService } from './reseller.service';
 
 @ApiTags('reseller')
@@ -145,6 +145,7 @@ export class ResellerController {
       basePlanId: string; priceMonthly: number; priceAnnual?: number;
     },
   ) {
+    requireFields(body, ['displayName', 'basePlanId', 'priceMonthly']);
     return this.svc.createPlan(scope, body);
   }
 

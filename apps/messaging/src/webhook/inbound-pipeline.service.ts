@@ -4,10 +4,11 @@
  * Called fire-and-forget from WebhookService after a new inbound message is saved.
  * Mirrors lib/inbound.ts in the Next.js app.
  */
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '@lib/prisma';
 import { Prisma } from '@prisma/client';
+import { createHash } from 'node:crypto';
 import {
   decryptSecret, MessageEventsService, HandoverService, LeadQualificationService, LlmService,
   NotificationsService, MANAGER_ROLES,
@@ -87,6 +88,7 @@ export class InboundPipelineService {
     contactId:              string;
     content:                string;
     interactiveReplyId:     string | null;
+    contactCreated?:        boolean;
   }): Promise<void> {
     const [conversation, contact] = await Promise.all([
       this.prisma.conversation.findUnique({ where: { id: opts.conversationId } }),
@@ -127,6 +129,18 @@ export class InboundPipelineService {
         if (creds) await this.sendText(creds, contact.phone, optInReply).catch(() => {});
       }
       return;
+    }
+
+    if (opts.contactCreated) {
+      const triggered = await this.triggerFlowForEvent({
+        tenantId: opts.tenantId,
+        businessId: opts.businessId,
+        contactId: contact.id,
+        conversationId: conversation.id,
+        trigger: 'CONTACT_CREATED',
+        variables: { contactName: contact.name, contactPhone: contact.phone },
+      });
+      if (triggered.triggered) return;
     }
 
     this.logger.log(`Pipeline start conv=${opts.conversationId} creds=${creds ? 'ok' : 'null'}`);
@@ -333,6 +347,158 @@ export class InboundPipelineService {
     }
   }
 
+  async triggerFlowForEvent(opts: {
+    tenantId: string;
+    businessId: string;
+    contactId: string;
+    conversationId?: string;
+    trigger: 'CONTACT_CREATED' | 'LEAD_CREATED' | 'LEAD_STATUS_CHANGED' | 'LEAD_CLOSED';
+    variables?: FlowVariables;
+  }) {
+    const flow = await this.prisma.chatbotFlow.findFirst({
+      where: {
+        tenantId: opts.tenantId,
+        businessId: opts.businessId,
+        trigger: opts.trigger,
+        isActive: true,
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    if (!flow) return { triggered: false };
+
+    const contact = await this.prisma.contact.findFirst({
+      where: { id: opts.contactId, tenantId: opts.tenantId, businessId: opts.businessId },
+    });
+    if (!contact) throw new NotFoundException('Contact not found for flow trigger');
+
+    const conversation = opts.conversationId
+      ? await this.prisma.conversation.findFirst({
+          where: {
+            id: opts.conversationId,
+            tenantId: opts.tenantId,
+            businessId: opts.businessId,
+            contactId: opts.contactId,
+          },
+        })
+      : undefined;
+    if (opts.conversationId && !conversation) return { triggered: false };
+
+    return this.startTriggeredFlow(flow, contact, opts.variables ?? {}, conversation);
+  }
+
+  async triggerWebhookFlow(
+    token: string,
+    body: { contactId?: string; phone?: string; name?: string; variables?: Record<string, unknown> },
+  ) {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new NotFoundException('Webhook not found');
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      throw new BadRequestException('A JSON request body is required');
+    }
+    const tokenHash = createHash('sha256').update(token).digest('hex');
+    const flow = await this.prisma.chatbotFlow.findUnique({ where: { webhookTokenHash: tokenHash } });
+    if (!flow || !flow.isActive || flow.trigger !== 'WEBHOOK') {
+      throw new NotFoundException('Webhook not found');
+    }
+
+    const contactId = typeof body?.contactId === 'string' ? body.contactId.trim() : '';
+    const phone = typeof body?.phone === 'string' ? body.phone.trim() : '';
+    if (!contactId && !phone) {
+      throw new BadRequestException('contactId or phone is required');
+    }
+    if (phone && !/^\+?[0-9][0-9\s().-]{4,30}$/.test(phone)) {
+      throw new BadRequestException('phone must be a valid phone number');
+    }
+
+    let contact = contactId
+      ? await this.prisma.contact.findFirst({
+          where: { id: contactId, tenantId: flow.tenantId, businessId: flow.businessId },
+        })
+      : null;
+
+    if (!contact && phone) {
+      contact = await this.prisma.contact.upsert({
+        where: { phone_businessId: { phone, businessId: flow.businessId } },
+        create: {
+          tenantId: flow.tenantId,
+          businessId: flow.businessId,
+          phone,
+          name: typeof body.name === 'string' && body.name.trim()
+            ? body.name.trim().slice(0, 120)
+            : phone,
+          source: 'WEBHOOK',
+        },
+        update: {},
+      });
+    }
+    if (!contact) throw new NotFoundException('Contact not found for this flow');
+
+    const variables: FlowVariables = {};
+    if (body.variables && typeof body.variables === 'object' && !Array.isArray(body.variables)) {
+      for (const [key, value] of Object.entries(body.variables).slice(0, 40)) {
+        if (!/^[A-Za-z][A-Za-z0-9_]{0,49}$/.test(key) || key.startsWith('__')) continue;
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+          variables[key] = String(value).slice(0, 1000);
+        }
+      }
+    }
+
+    return this.startTriggeredFlow(flow, contact, variables);
+  }
+
+  private async startTriggeredFlow(
+    flow: { id: string; tenantId: string; businessId: string; name: string },
+    contact: { id: string; name: string; phone: string },
+    variables: FlowVariables,
+    existingConversation?: any,
+  ) {
+    let conversation = existingConversation ?? await this.prisma.conversation.findFirst({
+      where: { tenantId: flow.tenantId, businessId: flow.businessId, contactId: contact.id },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!conversation) {
+      conversation = await this.prisma.conversation.create({
+        data: {
+          tenantId: flow.tenantId,
+          businessId: flow.businessId,
+          contactId: contact.id,
+          isAiActive: false,
+          status: 'OPEN',
+        },
+      });
+    } else if (conversation.status === 'CLOSED') {
+      conversation = await this.prisma.conversation.update({
+        where: { id: conversation.id },
+        data: { status: 'OPEN' },
+      });
+    }
+    if (conversation.activeFlowId) {
+      throw new ConflictException('This contact already has an active flow');
+    }
+
+    const creds = await this.resolveWACreds(
+      conversation.businessId,
+      conversation.whatsappIntegrationId ?? null,
+    );
+    const initialVariables: FlowVariables = {
+      ...variables,
+      contactId: contact.id,
+      contactName: contact.name,
+      contactPhone: contact.phone,
+    };
+    await this.executeFlow(
+      flow.tenantId,
+      flow.businessId,
+      conversation,
+      contact,
+      '',
+      null,
+      creds,
+      flow.id,
+      initialVariables,
+    );
+    return { triggered: true, flowId: flow.id, conversationId: conversation.id };
+  }
+
   // ── Chatbot flow execution ──────────────────────────────────────────────────
 
   private async executeFlow(
@@ -343,52 +509,59 @@ export class InboundPipelineService {
     inboundText:       string,
     inboundReplyId:    string | null,
     creds:             WACreds | null,
+    forcedFlowId?:     string,
+    initialVariables:  FlowVariables = {},
   ): Promise<boolean> {
-    if (!creds) return false;
+    if (!creds && !forcedFlowId) return false;
 
-    let flowId: string | null = (conversation as any).activeFlowId ?? null;
+    let flowId: string | null = forcedFlowId ?? (conversation as any).activeFlowId ?? null;
     let fromNodeId: string | undefined = (conversation as any).activeNodeId ?? undefined;
     let vars: FlowVariables = ((conversation as any).flowVars as FlowVariables | null) ?? {};
-    const isResuming = Boolean(flowId && fromNodeId);
+    const isResuming = !forcedFlowId && Boolean(flowId && fromNodeId);
 
     if (!isResuming) {
-      if (!inboundText) return false;
-      const normalised = inboundText.toLowerCase().trim();
-      const tokens = normalised.split(/[^a-z0-9]+/).filter(Boolean);
+      if (forcedFlowId) {
+        fromNodeId = undefined;
+        vars = initialVariables;
+      } else {
+        if (!inboundText) return false;
+        const normalised = inboundText.toLowerCase().trim();
+        const tokens = normalised.split(/[^a-z0-9]+/).filter(Boolean);
 
-      const activeFlows = await this.prisma.chatbotFlow.findMany({
-        where:  { tenantId, businessId, isActive: true },
-        select: { id: true, trigger: true, keywords: true, nodes: true, edges: true },
-      });
+        const activeFlows = await this.prisma.chatbotFlow.findMany({
+          where:  { tenantId, businessId, isActive: true },
+          select: { id: true, trigger: true, keywords: true, nodes: true, edges: true },
+        });
 
-      // Priority 1: KEYWORD
-      let matched: typeof activeFlows[0] | undefined = activeFlows.find(
-        (f) => f.trigger === 'KEYWORD' &&
-          (f.keywords as string[]).some((kw: string) => {
-            const k = kw.toLowerCase().trim();
-            if (!k) return false;
-            if (normalised === k) return true;
-            if (k.includes(' ')) return normalised.includes(k);
-            return tokens.includes(k);
-          }),
-      );
+        // Priority 1: KEYWORD
+        let matched: typeof activeFlows[0] | undefined = activeFlows.find(
+          (f) => f.trigger === 'KEYWORD' &&
+            (f.keywords as string[]).some((kw: string) => {
+              const k = kw.toLowerCase().trim();
+              if (!k) return false;
+              if (normalised === k) return true;
+              if (k.includes(' ')) return normalised.includes(k);
+              return tokens.includes(k);
+            }),
+        );
 
-      // Priority 2: FIRST_MESSAGE
-      if (!matched) {
-        const firstMsgFlow = activeFlows.find((f) => f.trigger === 'FIRST_MESSAGE');
-        if (firstMsgFlow) {
-          const msgCount = await this.prisma.message.count({ where: { conversationId: conversation.id } });
-          if (msgCount <= 1) matched = firstMsgFlow;
+        // Priority 2: FIRST_MESSAGE
+        if (!matched) {
+          const firstMsgFlow = activeFlows.find((f) => f.trigger === 'FIRST_MESSAGE');
+          if (firstMsgFlow) {
+            const msgCount = await this.prisma.message.count({ where: { conversationId: conversation.id } });
+            if (msgCount <= 1) matched = firstMsgFlow;
+          }
         }
+
+        // Priority 3: INBOUND catch-all
+        if (!matched) matched = activeFlows.find((f) => f.trigger === 'INBOUND');
+        if (!matched) return false;
+
+        flowId     = matched.id;
+        fromNodeId = undefined;
+        vars       = {};
       }
-
-      // Priority 3: INBOUND catch-all
-      if (!matched) matched = activeFlows.find((f) => f.trigger === 'INBOUND');
-      if (!matched) return false;
-
-      flowId     = matched.id;
-      fromNodeId = undefined;
-      vars       = {};
     }
 
     const flow = await this.prisma.chatbotFlow.findFirst({
@@ -506,7 +679,7 @@ export class InboundPipelineService {
     // Send every outbound action to the customer and keep a copy in the thread.
     let sentCount = 0;
     for (const action of result.actions) {
-      if (action.type === 'menu' && action.menu) {
+      if (creds && action.type === 'menu' && action.menu) {
         try {
           const sent = await this.sendInteractive(creds, contact.phone, action.menu.interactive);
           await this.persistBotMessage(conversation, {
@@ -526,7 +699,7 @@ export class InboundPipelineService {
         }
         continue;
       }
-      if ((action.type === 'message' || action.type === 'ai') && action.text) {
+      if (creds && (action.type === 'message' || action.type === 'ai') && action.text) {
         try {
           const sent = await this.sendText(creds, contact.phone, action.text);
           await this.persistBotMessage(conversation, {
@@ -539,7 +712,7 @@ export class InboundPipelineService {
     }
 
     // Persist / clear session state.
-    if (result.status === 'awaiting_input' && result.awaitingQuestionId) {
+    if (creds && result.status === 'awaiting_input' && result.awaitingQuestionId) {
       await this.prisma.conversation.update({
         where: { id: conversation.id },
         data:  {

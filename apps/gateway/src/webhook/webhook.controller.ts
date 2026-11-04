@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Query, Headers, Req, Res,
+  Controller, Get, Post, Query, Headers, Req, Res, Body, Param,
   HttpCode, HttpStatus, ForbiddenException, Logger,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
@@ -9,6 +9,7 @@ import { WebhookService } from '../../../../apps/messaging/src/webhook/webhook.s
 import { CallsWebhookService } from '../../../../apps/messaging/src/calls/calls-webhook.service';
 import { BillingService } from '../../../../apps/billing/src/billing.service';
 import type { WAWebhookPayload } from '../../../../apps/messaging/src/webhook/webhook.types';
+import { InboundPipelineService } from '../../../../apps/messaging/src/webhook/inbound-pipeline.service';
 
 @ApiTags('webhook')
 @Controller('webhook')
@@ -20,6 +21,7 @@ export class GatewayWebhookController {
     private readonly calls:   CallsWebhookService,
     private readonly billing: BillingService,
     private readonly cfg:     ConfigService,
+    private readonly pipeline: InboundPipelineService,
   ) {}
 
   // ── GET: Meta webhook verification challenge ──────────────────────────────
@@ -96,6 +98,16 @@ export class GatewayWebhookController {
 
     // Always return 200 — Meta will retry on anything else
     return { success: true };
+  }
+
+  @Post('flow/:token')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({ summary: 'Trigger an AI flow from its secret webhook URL' })
+  triggerFlow(
+    @Param('token') token: string,
+    @Body() body: { contactId?: string; phone?: string; name?: string; variables?: Record<string, unknown> },
+  ) {
+    return this.pipeline.triggerWebhookFlow(token, body);
   }
 
   // ── POST: Razorpay payment webhook ────────────────────────────────────────

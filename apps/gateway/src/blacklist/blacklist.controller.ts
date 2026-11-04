@@ -3,7 +3,7 @@ import {
   Body, Param, Query, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission, requireFields,} from '@lib/common';
 import { BlacklistService } from './blacklist.service';
 
 @ApiTags('blacklist')
@@ -46,6 +46,7 @@ export class BlacklistController {
   @RequiresPermission('blacklist.manage')
   @ApiOperation({ summary: 'Bulk-add phones to the blacklist' })
   create(@CurrentTenant() scope: TenantScope, @Body() body: { phones: string[]; reason?: string; scope?: string }) {
+    requireFields(body, ['phones']);
     return this.svc.create(scope, body);
   }
 

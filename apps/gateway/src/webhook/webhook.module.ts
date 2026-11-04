@@ -21,5 +21,6 @@ import { CallsModule } from '../calls/calls.module';
   ],
   controllers: [GatewayWebhookController],
   providers: [WebhookService, BillingService, WebhookDispatchService, StatusBufferService, InboundPipelineService, MediaFetchProcessor, CallsWebhookService],
+  exports: [InboundPipelineService],
 })
 export class GatewayWebhookModule {}

@@ -36,3 +36,4 @@ export * from './wallet/wallet.service';
 export * from './wallet/wallet.module';
 export * from './mail/mail.service';
 export * from './mail/mail.module';
+export * from './validation';

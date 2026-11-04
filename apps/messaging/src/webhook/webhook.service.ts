@@ -219,6 +219,10 @@ export class WebhookService {
     phone: string,
     profile?: { name?: string | null; waId?: string | null },
   ) {
+    const existingContact = await this.prisma.contact.findUnique({
+      where: { phone_businessId: { phone, businessId: identity.businessId } },
+      select: { id: true },
+    });
     const contact = await this.prisma.contact.upsert({
       where:  { phone_businessId: { phone, businessId: identity.businessId } },
       create: {
@@ -265,7 +269,7 @@ export class WebhookService {
         data:  { whatsappIntegrationId: identity.whatsappIntegrationId },
       });
     }
-    return { contact, conversation };
+    return { contact, conversation, contactCreated: !existingContact };
   }
 
   // ── Inbound message — direct DB write, no queue ───────────────────────────
@@ -284,7 +288,7 @@ export class WebhookService {
     const media       = mediaOf(message);
 
     // 1–2. Contact row + open thread
-    const { contact: contactRow, conversation } = await this.resolveContactAndConversation(
+    const { contact: contactRow, conversation, contactCreated } = await this.resolveContactAndConversation(
       identity, phone, { name: contactName, waId: contactWaId },
     );
 
@@ -378,6 +382,7 @@ export class WebhookService {
       interactiveReplyId: (message as any).interactive?.list_reply?.id
                        ?? (message as any).interactive?.button_reply?.id
                        ?? null,
+      contactCreated,
     }).catch((err) => this.logger.error(`InboundPipeline failed conv=${conversation.id}`, err?.message ?? err));
   }
 

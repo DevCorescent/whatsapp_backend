@@ -26,7 +26,15 @@ export type NodeKind =
   | "ai"
   | "end";
 
-export type TriggerType = "KEYWORD" | "INBOUND" | "FIRST_MESSAGE";
+export type TriggerType =
+  | "KEYWORD"
+  | "INBOUND"
+  | "FIRST_MESSAGE"
+  | "CONTACT_CREATED"
+  | "LEAD_CREATED"
+  | "LEAD_STATUS_CHANGED"
+  | "LEAD_CLOSED"
+  | "WEBHOOK";
 
 export interface StartNodeData {
   label?: string;
