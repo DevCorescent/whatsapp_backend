@@ -13,6 +13,8 @@ export interface NumberActivityRow {
   failed: number;
   lastSentAt: Date | null;
   campaigns: number;
+  /** What messaging this number has cost, in minor units. */
+  spentMinor: number;
 }
 
 /**
@@ -46,7 +48,10 @@ export class NumberActivityService {
    */
   async list(
     scope: TenantScope,
-    query: { page?: number; limit?: number; search?: string; view?: 'mine' | 'clients' | 'platform' } = {},
+    query: {
+      page?: number; limit?: number; search?: string;
+      view?: 'mine' | 'clients' | 'platform'; tag?: string;
+    } = {},
   ) {
     const page   = Math.max(1, query.page ?? 1);
     const limit  = Math.min(200, query.limit ?? 50);
@@ -83,6 +88,18 @@ export class NumberActivityService {
       where.push(`cc.phone ILIKE $${params.length}`);
     }
 
+    // Filter by label — the point of the hospital-with-locations case: import each
+    // location under its own label, then read the figures for that location alone.
+    if (query.tag?.trim()) {
+      params.push(query.tag.trim());
+      where.push(
+        `EXISTS (SELECT 1 FROM contact_tags xct
+                   JOIN tags xt ON xt.id = xct."tagId"
+                  WHERE xct."contactId" = cc."contactId"
+                    AND lower(xt.name) = lower($${params.length}))`,
+      );
+    }
+
     const whereSql = where.join(' AND ');
 
     // Grouped in SQL rather than in memory: a busy account has hundreds of thousands of
@@ -96,7 +113,8 @@ export class NumberActivityService {
               COUNT(*) FILTER (WHERE cc."repliedAt"   IS NOT NULL)::int        AS replied,
               COUNT(*) FILTER (WHERE cc.status = 'FAILED')::int                AS failed,
               MAX(cc."sentAt")                                                 AS "lastSentAt",
-              COUNT(DISTINCT cc."campaignId")::int                             AS campaigns
+              COUNT(DISTINCT cc."campaignId")::int                             AS campaigns,
+              COALESCE(SUM(cc."costMinor"), 0)::int                             AS "spentMinor"
          FROM campaign_contacts cc
          JOIN campaigns c  ON c.id = cc."campaignId"
          LEFT JOIN contacts ct ON ct.id = cc."contactId"

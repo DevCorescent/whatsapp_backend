@@ -50,6 +50,7 @@ import { OnboardingModule }   from './onboarding/onboarding.module';
 import { QuickRepliesModule } from './quick-replies/quick-replies.module';
 import { ContactListsModule } from './contact-lists/contact-lists.module';
 import { ClickModule } from './click/click.module';
+import { CatalogueModule } from './catalogue/catalogue.module';
 import { ResellerModule }     from './reseller/reseller.module';
 import { SearchModule }       from './search/search.module';
 import { SegmentsModule }     from './segments/segments.module';
@@ -135,6 +136,7 @@ import { CallsModule }        from './calls/calls.module';
     QuickRepliesModule,
     ContactListsModule,
     ClickModule,
+    CatalogueModule,
 
     // Contacts & CRM
     SegmentsModule,

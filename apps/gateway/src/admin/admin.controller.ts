@@ -401,7 +401,7 @@ export class AdminController {
   @ApiOperation({ summary: 'Set what happens when a trial or paid period runs out (super admin)' })
   setPlanEndPolicy(
     @CurrentTenant() scope: TenantScope,
-    @Body() body: { behaviour?: string; graceDays?: number },
+    @Body() body: { behaviour?: string; graceDays?: number; walletEnabled?: boolean },
   ) {
     return this.svc.setPlanEndPolicy(scope, body);
   }

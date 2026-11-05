@@ -175,6 +175,11 @@ model WhatsAppIntegration {
   /// it in step, so this is the intent and `callingEnabled` is the current state.
   callingFollowsBusinessHours Boolean @default(false)
 
+  /// The Meta Commerce catalogue connected to this number, when there is one. Products
+  /// live in Commerce Manager, not here — this is the pointer that lets us read them and
+  /// send them, so there is one source of truth rather than a copy that drifts.
+  catalogId                   String?
+
   /// Mirrors Meta's per-number calling setting (POST /{phone_number_id}/settings { calling }).
   callingEnabled         Boolean        @default(false)
   calls                  Call[]
@@ -229,6 +234,11 @@ model TenantSettings {
   ///          until it is, this behaves as GRACE rather than letting someone go unpaid.
   planEndBehaviour     String   @default("GRACE")
   planEndGraceDays     Int      @default(7)
+
+  /// The platform's master switch for self-service top-ups. Read from the PLATFORM
+  /// tenant. A plan may allow a wallet, but this turns the whole feature off at once —
+  /// useful while payment is being set up, and the only way to stop it everywhere.
+  walletEnabled        Boolean  @default(false)
 
   tenant               Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
@@ -1445,6 +1455,9 @@ model Plan {
   resellerId            String?
   basePlanId            String?
   callingEnabled        Boolean        @default(false)
+  /// Whether accounts on this plan may top up their own wallet. Off by default: a
+  /// wallet that cannot be filled is confusing, so it is shown only where it works.
+  walletEnabled         Boolean        @default(false)
   ownerTenant           Tenant?        @relation("CustomPlans", fields: [ownerTenantId], references: [id])
   reseller              Tenant?        @relation("ResellerPlans", fields: [resellerId], references: [id], onDelete: Cascade)
   subscriptions         Subscription[]
@@ -1859,6 +1872,37 @@ model CallRecording {
 
   @@index([businessId, createdAt(sort: Desc)])
   @@map("call_recordings")
+}
+
+/// A ready-made template anyone can copy into their own account.
+///
+/// Templates belong to a WhatsApp account and are approved by Meta per account, so a
+/// template cannot be shared the way a document can — each business has to submit its own
+/// copy. This is therefore a catalogue of starting points rather than of live templates:
+/// copying one creates a real template in the copier's business, which they then submit
+/// for approval themselves.
+///
+/// Curated by the platform. A tenant publishing into a shared library would mean one
+/// customer's wording reaching another's account, which is nobody's expectation.
+model TemplateLibraryItem {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  displayName String
+  description String?
+  category    String
+  language    String   @default("en")
+  /// The template body, buttons and so on, in the same shape the builder writes.
+  spec        Json
+  /// Grouping for the browse screen, e.g. "Appointments", "Offers".
+  industry    String?
+  isActive    Boolean  @default(true)
+  /// How many times it has been copied, so the useful ones can be found.
+  useCount    Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  @@index([isActive, industry])
+  @@map("template_library_items")
 }
 
 enum CallDirection {

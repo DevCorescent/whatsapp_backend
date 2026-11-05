@@ -25,11 +25,12 @@ export class AnalyticsController {
     @Query('limit')  limit?: string,
     @Query('search') search?: string,
     @Query('view')   view?: 'mine' | 'clients' | 'platform',
+    @Query('tag')    tag?: string,
   ) {
     return this.numbers.list(scope, {
       page:  page  ? Number(page)  : undefined,
       limit: limit ? Number(limit) : undefined,
-      search, view,
+      search, view, tag,
     });
   }
 

@@ -616,13 +616,48 @@ export class BillingService {
    * It used to return the bare wallet row, so `rates`, `canTopUp` and `transactions` were
    * all undefined on the client and the page threw on the first `.map`.
    */
+  /**
+   * Whether this account may top up its own wallet, and why not when it may not.
+   *
+   * Three things have to line up and they fail for different reasons, so each is named:
+   * the platform's master switch (off while payment is still being set up), the plan
+   * (a commercial decision per tier), and payment keys actually being configured.
+   */
+  async walletAccess(tenantId: string): Promise<{ enabled: boolean; reason: string | null }> {
+    const [platform, sub] = await Promise.all([
+      this.prisma.tenant.findFirst({
+        where:  { accountType: 'PLATFORM' },
+        select: { settings: { select: { walletEnabled: true } } },
+      }),
+      this.prisma.subscription.findUnique({
+        where:  { tenantId },
+        select: { plan: { select: { walletEnabled: true, displayName: true } } },
+      }),
+    ]);
+
+    if (!platform?.settings?.walletEnabled) {
+      return { enabled: false, reason: 'Wallet top-ups are not switched on for this platform yet.' };
+    }
+    if (!sub?.plan?.walletEnabled) {
+      return {
+        enabled: false,
+        reason: `Your ${sub?.plan?.displayName ?? 'current'} plan does not include a wallet. Change plan to add one.`,
+      };
+    }
+    if (!process.env['RAZORPAY_KEY_ID'] || !process.env['RAZORPAY_KEY_SECRET']) {
+      return { enabled: false, reason: 'Online payment is not configured yet.' };
+    }
+    return { enabled: true, reason: null };
+  }
+
   async getWallet(scope: TenantScope, query: { page?: number; limit?: number } = {}) {
     const page  = Math.max(1, Number(query.page) || 1);
     const limit = Math.min(100, Number(query.limit) || 20);
 
-    const [wallet, rates] = await Promise.all([
+    const [wallet, rates, access] = await Promise.all([
       this.prisma.wallet.findUnique({ where: { tenantId: scope.tenantId } }),
       this.rates.resolveAll(scope.tenantId),
+      this.walletAccess(scope.tenantId),
     ]);
     if (!wallet) throw new NotFoundException('Wallet not found');
 
@@ -644,7 +679,10 @@ export class BillingService {
         balanceMinor:             Math.max(0, wallet.balanceMinor),
         lowBalanceThresholdMinor: wallet.lowBalanceThresholdMinor,
         currency:                 (wallet as { currency?: string }).currency ?? 'INR',
-        canTopUp:                 Boolean(process.env['RAZORPAY_KEY_ID'] && process.env['RAZORPAY_KEY_SECRET']),
+        canTopUp:                 access.enabled,
+        // Named rather than merely false, so the screen can say which switch is off
+        // instead of leaving someone to guess why the button is missing.
+        topUpBlockedReason:       access.reason,
         rates: rates.map(r => ({
           category:   r.category,
           priceMinor: r.source === 'unpriced' ? null : r.priceMinor,
@@ -681,6 +719,18 @@ export class BillingService {
   }
 
   // ── Razorpay checkout ──────────────────────────────────────────────────────
+
+  /**
+   * A top-up order, refused with the specific reason when the wallet is not available.
+   *
+   * Guarded here rather than only in the interface: the button being hidden is a
+   * courtesy, not a control.
+   */
+  async createWalletTopUpOrder(scope: TenantScope, amountMinor: number, currency?: string) {
+    const access = await this.walletAccess(scope.tenantId);
+    if (!access.enabled) throw new BadRequestException(access.reason ?? 'Wallet top-ups are unavailable.');
+    return this.createRazorpayOrder(scope, amountMinor, currency);
+  }
 
   async createRazorpayOrder(scope: TenantScope, amountMinor: number, currency = 'INR') {
     if (amountMinor <= 0) throw new BadRequestException('Amount must be positive');

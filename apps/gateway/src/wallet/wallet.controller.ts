@@ -50,6 +50,6 @@ export class WalletController {
     @Body('amountMinor') amountMinor: number,
     @Body('currency') currency?: string,
   ) {
-    return this.svc.createRazorpayOrder(scope, amountMinor, currency);
+    return this.svc.createWalletTopUpOrder(scope, amountMinor, currency);
   }
 }

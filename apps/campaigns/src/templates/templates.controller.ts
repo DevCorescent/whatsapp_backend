@@ -42,6 +42,27 @@ export class TemplatesController {
     return this.svc.findOne(scope, id);
   }
 
+  @Get('library')
+  @ApiOperation({ summary: 'Ready-made templates to copy into this account' })
+  listLibrary(
+    @Query('industry') industry?: string,
+    @Query('search')   search?: string,
+  ) {
+    return this.svc.listLibrary({ industry, search });
+  }
+
+  @Post('library/:id/copy')
+  @RequiresPermission('templates.manage')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Copy a library template into this account as a draft' })
+  copyFromLibrary(
+    @CurrentTenant() scope: TenantScope,
+    @Param('id') id: string,
+    @Body() body: { name?: string } = {},
+  ) {
+    return this.svc.copyFromLibrary(scope, id, body);
+  }
+
   @Post()
   @RequiresPermission('templates.manage')
   @ApiOperation({ summary: 'Create a new message template' })

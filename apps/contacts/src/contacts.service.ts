@@ -494,9 +494,28 @@ export class ContactsService {
    * Matching ignores case and surrounding spaces, because "VIP" and "vip " are plainly
    * the same label to the person typing them.
    */
+  /** Strict: an unknown label is a mistake worth stopping for. */
   private async resolveTags(scope: TenantScope, tagNames: string[]) {
+    const { found, missing } = await this.matchTags(scope, tagNames);
+    if (missing.length) {
+      throw new BadRequestException(
+        `No such label: ${missing.join(', ')}. Create it on the Labels screen first.`,
+      );
+    }
+    return found;
+  }
+
+  /**
+   * Lenient: used by import, which is bulk and usually someone else's spreadsheet. One
+   * unrecognised word in a tags column should not throw away a thousand good rows, so
+   * the unknown ones come back to be reported rather than stopping the run.
+   */
+  private async matchTags(
+    scope: TenantScope,
+    tagNames: string[],
+  ): Promise<{ found: { id: string; name: string }[]; missing: string[] }> {
     const wanted = [...new Set(tagNames.map((n) => n.trim()).filter(Boolean))];
-    if (!wanted.length) return [];
+    if (!wanted.length) return { found: [], missing: [] };
 
     const existing = await this.prisma.tag.findMany({
       where:  { tenantId: scope.tenantId, businessId: scope.businessId },
@@ -512,17 +531,16 @@ export class ContactsService {
       else missing.push(name);
     }
 
-    if (missing.length) {
-      throw new BadRequestException(
-        `No such label: ${missing.join(', ')}. Create it on the Labels screen first.`,
-      );
-    }
-    return found;
+    return { found, missing };
   }
 
-  /** Add labels without removing existing ones — used during import. */
+  /**
+   * Add labels without removing existing ones — used during import.
+   *
+   * @returns the names that matched nothing, so the import can report them.
+   */
   private async syncTagsAdd(scope: TenantScope, contactId: string, tagNames: string[]) {
-    const tags = await this.resolveTags(scope, tagNames);
+    const { found: tags, missing } = await this.matchTags(scope, tagNames);
     for (const tag of tags) {
       await this.prisma.contactTag.upsert({
         where:  { contactId_tagId: { contactId, tagId: tag.id } },
@@ -530,6 +548,7 @@ export class ContactsService {
         update: {},
       });
     }
+    return missing;
   }
 
   private async syncTags(scope: TenantScope, contactId: string, tagNames: string[]) {

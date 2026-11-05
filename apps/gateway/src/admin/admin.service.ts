@@ -1422,6 +1422,7 @@ export class AdminService {
     return {
       behaviour: settings.planEndBehaviour,
       graceDays: settings.planEndGraceDays,
+      walletEnabled: settings.walletEnabled,
       options: [
         { value: 'GRACE', label: 'Keep working for a grace period, then stop',
           detail: 'The default. Most people renew in the first few days after lapsing.' },
@@ -1433,7 +1434,10 @@ export class AdminService {
     };
   }
 
-  async setPlanEndPolicy(scope: TenantScope, body: { behaviour?: string; graceDays?: number }) {
+  async setPlanEndPolicy(
+    scope: TenantScope,
+    body: { behaviour?: string; graceDays?: number; walletEnabled?: boolean },
+  ) {
     this.guard(scope);
     const allowed = ['GRACE', 'BLOCK', 'AUTO_CHARGE'];
     if (body.behaviour && !allowed.includes(body.behaviour)) {
@@ -1449,9 +1453,14 @@ export class AdminService {
       data:  {
         ...(body.behaviour ? { planEndBehaviour: body.behaviour } : {}),
         ...(body.graceDays !== undefined ? { planEndGraceDays: body.graceDays } : {}),
+        ...(body.walletEnabled !== undefined ? { walletEnabled: body.walletEnabled } : {}),
       },
     });
-    return { behaviour: saved.planEndBehaviour, graceDays: saved.planEndGraceDays };
+    return {
+      behaviour: saved.planEndBehaviour,
+      graceDays: saved.planEndGraceDays,
+      walletEnabled: saved.walletEnabled,
+    };
   }
 
   async updateTenantSubscription(

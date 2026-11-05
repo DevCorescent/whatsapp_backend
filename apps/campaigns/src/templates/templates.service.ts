@@ -148,6 +148,80 @@ export class TemplatesService {
     });
   }
 
+  // ── Library ────────────────────────────────────────────────────────────────
+
+  /** Ready-made templates to start from, newest and most-used first. */
+  async listLibrary(query: { industry?: string; search?: string } = {}) {
+    return this.prisma.templateLibraryItem.findMany({
+      where: {
+        isActive: true,
+        ...(query.industry ? { industry: query.industry } : {}),
+        ...(query.search
+          ? { displayName: { contains: query.search, mode: 'insensitive' as const } }
+          : {}),
+      },
+      orderBy: [{ useCount: 'desc' }, { createdAt: 'desc' }],
+    });
+  }
+
+  /**
+   * Copies a library item into this business as a new draft.
+   *
+   * A deliberate copy rather than a link: Meta approves a template per account, so the
+   * business owns and submits its own. Changing the library item later does not reach
+   * back into anything already copied, which is what people expect of a starting point.
+   *
+   * The name is made unique within the business because Meta requires that, and an
+   * attempt to copy the same item twice is more likely a second variation than a
+   * mistake worth refusing.
+   */
+  async copyFromLibrary(scope: TenantScope, itemId: string, overrides: { name?: string } = {}) {
+    const item = await this.prisma.templateLibraryItem.findFirst({
+      where: { id: itemId, isActive: true },
+    });
+    if (!item) throw new NotFoundException('That library template is not available');
+
+    const spec = (item.spec ?? {}) as Record<string, unknown>;
+    const base = (overrides.name?.trim() || item.name).toLowerCase().replace(/[^a-z0-9_]/g, '_');
+
+    let name = base;
+    for (let n = 2; n < 100; n++) {
+      const clash = await this.prisma.messageTemplate.findUnique({
+        where:  { name_businessId: { name, businessId: scope.businessId } },
+        select: { id: true },
+      });
+      if (!clash) break;
+      name = `${base}_${n}`;
+    }
+
+    const created = await this.prisma.messageTemplate.create({
+      data: {
+        tenantId:   scope.tenantId,
+        businessId: scope.businessId,
+        name,
+        category:   item.category,
+        language:   item.language,
+        body:       (spec.body as string) ?? '',
+        headerType:      (spec.headerType as string) ?? null,
+        headerContent:   (spec.headerContent as string) ?? null,
+        footer:          (spec.footer as string) ?? null,
+        buttons:         (spec.buttons ?? null) as any,
+        cards:           (spec.cards ?? null) as any,
+        templateType:    (spec.templateType as string) ?? 'STANDARD',
+        variables:       (spec.variables as string[]) ?? [],
+        headerVariables: (spec.headerVariables as string[]) ?? [],
+        status:          'DRAFT',
+      },
+    });
+
+    await this.prisma.templateLibraryItem.update({
+      where: { id: item.id },
+      data:  { useCount: { increment: 1 } },
+    });
+
+    return created;
+  }
+
   // ── Update ─────────────────────────────────────────────────────────────────
 
   async update(scope: TenantScope, id: string, data: TemplateWriteInput) {
