@@ -324,7 +324,13 @@ export class CallsService {
     if (remote && enabled !== integration.callingEnabled) {
       await this.prisma.whatsAppIntegration.update({ where: { id: integration.id }, data: { callingEnabled: enabled } });
     }
-    return { integrationId: integration.id, enabled, remote, error };
+    return {
+      integrationId: integration.id,
+      enabled,
+      followBusinessHours: integration.callingFollowsBusinessHours,
+      remote,
+      error,
+    };
   }
 
   /**
