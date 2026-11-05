@@ -1,7 +1,7 @@
 import {
   Controller, Get, Patch, Post, Body, Query, UseGuards,
 } from '@nestjs/common';
-import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { BillingService } from '../../../../apps/billing/src/billing.service';
 
@@ -42,6 +42,16 @@ export class WalletController {
     @Body('thresholdMinor') thresholdMinor: number,
   ) {
     return this.svc.updateWalletThreshold(scope, thresholdMinor);
+  }
+
+  @Get('spend')
+  @ApiOperation({ summary: 'Where the wallet money went, and what each campaign cost' })
+  spend(
+    @CurrentTenant() scope: TenantScope,
+    @Query('from') from?: string,
+    @Query('to')   to?: string,
+  ) {
+    return this.svc.getWalletSpend(scope, { from, to });
   }
 
   @Post('topup')

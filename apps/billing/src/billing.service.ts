@@ -671,6 +671,8 @@ export class BillingService {
       this.prisma.walletTransaction.count({ where: { tenantId: scope.tenantId } }),
     ]);
 
+    const described = await this.nameCampaignRows(transactions);
+
     return {
       success: true,
       data: {
@@ -688,9 +690,107 @@ export class BillingService {
           priceMinor: r.source === 'unpriced' ? null : r.priceMinor,
           source:     r.source,
         })),
-        transactions,
+        transactions: described,
       },
       pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+    };
+  }
+
+  /**
+   * Where the wallet money went.
+   *
+   * The ledger already records every debit, but one row per message means a campaign of
+   * ten thousand is ten thousand lines and no answer to "what did that campaign cost".
+   * This groups the same rows the statement shows, so the two always agree — a separate
+   * tally would drift the first time a send was retried.
+   *
+   * Campaign spend is joined back through the recipient row rather than read from
+   * Campaign.costMinor, for the same reason: one source, not two.
+   */
+  /**
+   * Replaces "Campaign message: cmv…" with the campaign's name.
+   *
+   * The ledger stores an id because a name can change and the debit must still point at
+   * the right thing; the statement shows the name because an id tells a person nothing.
+   * Looked up per page, so a campaign renamed later reads correctly here too.
+   */
+  private async nameCampaignRows<T extends { referenceType: string | null; referenceId: string | null; description: string | null }>(
+    rows: T[],
+  ): Promise<T[]> {
+    const recipientIds = rows
+      .filter((r) => r.referenceType === 'campaign_message' && r.referenceId)
+      .map((r) => r.referenceId!);
+    if (!recipientIds.length) return rows;
+
+    const recipients = await this.prisma.campaignContact.findMany({
+      where:  { id: { in: recipientIds } },
+      select: { id: true, campaign: { select: { name: true } } },
+    });
+    const nameById = new Map(recipients.map((r) => [r.id, r.campaign?.name]));
+
+    return rows.map((r) => {
+      const name = r.referenceId ? nameById.get(r.referenceId) : undefined;
+      return name ? { ...r, description: `Campaign message · ${name}` } : r;
+    });
+  }
+
+  async getWalletSpend(scope: TenantScope, query: { from?: string; to?: string } = {}) {
+    const from = query.from ? new Date(query.from) : new Date(Date.now() - 30 * 86_400_000);
+    const to   = query.to   ? new Date(query.to)   : new Date();
+
+    const where = {
+      tenantId:  scope.tenantId,
+      createdAt: { gte: from, lte: to },
+    };
+
+    // Totals by what the money was for. Credits and debits are kept apart because
+    // netting them hides both — "spent 5,000, topped up 5,000" is not "spent nothing".
+    const grouped = await this.prisma.walletTransaction.groupBy({
+      by:     ['referenceType'],
+      where,
+      _sum:   { amountMinor: true },
+      _count: { _all: true },
+    });
+
+    const byReason = grouped.map((g) => ({
+      reason: g.referenceType ?? 'other',
+      count:  g._count._all,
+      // Debits are stored negative; reported as a positive amount spent.
+      amountMinor: Math.abs(g._sum.amountMinor ?? 0),
+      direction: (g._sum.amountMinor ?? 0) < 0 ? ('debit' as const) : ('credit' as const),
+    }));
+
+    const spentMinor  = byReason.filter((r) => r.direction === 'debit').reduce((a, r) => a + r.amountMinor, 0);
+    const toppedUpMinor = byReason.filter((r) => r.direction === 'credit').reduce((a, r) => a + r.amountMinor, 0);
+
+    // Per campaign, through the recipient rows the debits point at.
+    const byCampaign = await this.prisma.$queryRaw<Array<{
+      campaignId: string; name: string; messages: number; spentMinor: number; lastSentAt: Date | null;
+    }>>`
+      SELECT c.id                               AS "campaignId",
+             c.name                             AS name,
+             COUNT(*)::int                      AS messages,
+             SUM(ABS(wt."amountMinor"))::int    AS "spentMinor",
+             MAX(wt."createdAt")                AS "lastSentAt"
+        FROM wallet_transactions wt
+        JOIN campaign_contacts cc ON cc.id = wt."referenceId"
+        JOIN campaigns c          ON c.id  = cc."campaignId"
+       WHERE wt."tenantId" = ${scope.tenantId}
+         AND wt."referenceType" = 'campaign_message'
+         AND wt."createdAt" BETWEEN ${from} AND ${to}
+       GROUP BY c.id, c.name
+       ORDER BY SUM(ABS(wt."amountMinor")) DESC
+       LIMIT 100`;
+
+    const wallet = await this.prisma.wallet.findUnique({ where: { tenantId: scope.tenantId } });
+
+    return {
+      from, to,
+      balanceMinor: Math.max(0, wallet?.balanceMinor ?? 0),
+      spentMinor,
+      toppedUpMinor,
+      byReason,
+      byCampaign,
     };
   }
 
