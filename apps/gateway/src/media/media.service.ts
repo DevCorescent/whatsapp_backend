@@ -2,8 +2,7 @@ import 'multer';
 import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
 import {
-  TenantScope, StorageService, decryptSecret, downloadMetaMedia, lookupMetaMedia, WA_API_VERSION,
-} from '@lib/common';
+  TenantScope, StorageService, decryptSecret, downloadMetaMedia, lookupMetaMedia, WA_API_VERSION, parseSendError, classifySendError, isKnownSendError,} from '@lib/common';
 
 export interface UploadedMedia {
   /** Public storage URL when storage is configured with a public base; otherwise null. */
@@ -63,7 +62,17 @@ export class MediaService {
     if (!response.ok) {
       const err = await response.text();
       this.logger.error(`Meta upload failed ${response.status}: ${err.slice(0, 300)}`);
-      throw new BadRequestException(`Meta upload failed: ${err.slice(0, 200)}`);
+      // The same rules the send path uses, so an expired token reads as "reconnect
+      // WhatsApp in Settings" rather than a paragraph of Graph API JSON. An attachment
+      // that will not upload is almost always the number's credentials rather than the
+      // file, and the message has to say which.
+      let parsedBody: unknown = null;
+      try { parsedBody = JSON.parse(err); } catch { /* not JSON */ }
+      const parsed = parseSendError(response.status, parsedBody);
+      if (isKnownSendError(parsed.code, parsed.subcode)) {
+        throw new BadRequestException(classifySendError(parsed.code, parsed.subcode).reason);
+      }
+      throw new BadRequestException(`WhatsApp refused the upload: ${(parsed.message ?? err).slice(0, 200)}`);
     }
     return ((await response.json()) as { id: string }).id;
   }
