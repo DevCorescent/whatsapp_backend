@@ -336,6 +336,19 @@ export class CampaignsService {
       },
     });
 
+    // ── 7b. Refuse an audience the number cannot legally send to ────────────
+    // Checked again at launch, because the allowance moves between building a campaign
+    // and sending it. Checking here as well means the refusal lands while the audience
+    // is still on screen and can be cut down, instead of after the work is done.
+    const allowance = await this.tierAllowance(scope, whatsappIntegrationId);
+    if (!allowance.unlimited && finalNumbers.length > (allowance.remaining ?? 0)) {
+      throw new BadRequestException(
+        `This number can message ${allowance.remaining} more people in the next 24 hours ` +
+        `(tier ${allowance.tier} allows ${allowance.cap} a day, ${allowance.used} already used). ` +
+        `This audience is ${finalNumbers.length}. Reduce it, or send the rest tomorrow.`,
+      );
+    }
+
     // ── 8. Create CampaignContact rows ──────────────────────────────────────
     if (finalNumbers.length > 0) {
       // Tracking only works when the template's URL button points at our redirect, since
@@ -562,6 +575,35 @@ export class CampaignsService {
   // ── Tier limits ────────────────────────────────────────────────────────────
 
   /** Returns the daily send cap for a messaging tier (0 = unlimited). */
+  /**
+   * What is left of this number's 24-hour sending allowance.
+   *
+   * WhatsApp caps how many people a number may start conversations with per rolling day,
+   * by tier. The cap used to be checked only at launch, so a campaign built for five
+   * thousand people on a 250 tier looked fine for as long as it sat in drafts and failed
+   * the moment someone pressed send — usually the moment it mattered. Exposed here so
+   * the figure can be shown while the audience is still being chosen.
+   */
+  async tierAllowance(scope: TenantScope, whatsappIntegrationId?: string) {
+    const integration = whatsappIntegrationId
+      ? await this.prisma.whatsAppIntegration.findFirst({
+          where:  { id: whatsappIntegrationId, businessId: scope.businessId },
+          select: { messagingTier: true },
+        })
+      : await this.prisma.whatsAppIntegration.findFirst({
+          where:  { businessId: scope.businessId, isDefault: true, isActive: true },
+          select: { messagingTier: true },
+        });
+
+    const tier = integration?.messagingTier ?? 1;
+    const cap  = this.tierDailyCap(tier);
+    // Tier 0 is Meta's unlimited tier, which the cap table reports as 0.
+    if (cap <= 0) return { tier, cap: null, used: 0, remaining: null, unlimited: true };
+
+    const used = await this.sent24h(scope.businessId);
+    return { tier, cap, used, remaining: Math.max(0, cap - used), unlimited: false };
+  }
+
   private tierDailyCap(tier: number): number {
     const caps: Record<number, number> = { 1: 250, 2: 2000, 3: 10000, 4: 100000 };
     return caps[tier] ?? 0;

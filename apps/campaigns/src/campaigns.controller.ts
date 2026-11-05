@@ -31,6 +31,15 @@ export class CampaignsController {
     });
   }
 
+  @Get('tier-allowance')
+  @ApiOperation({ summary: "What is left of this number's 24-hour sending allowance" })
+  tierAllowance(
+    @CurrentTenant() scope: TenantScope,
+    @Query('whatsappIntegrationId') whatsappIntegrationId?: string,
+  ) {
+    return this.svc.tierAllowance(scope, whatsappIntegrationId);
+  }
+
   @Get('scheduled')
   @ApiOperation({ summary: 'List upcoming scheduled campaigns' })
   listScheduled(@CurrentTenant() scope: TenantScope) {

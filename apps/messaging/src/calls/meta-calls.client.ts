@@ -43,6 +43,25 @@ export class MetaCallsClient {
     return this.post(phoneNumberId, accessToken, 'calls', { messaging_product: 'whatsapp', ...body });
   }
 
+  /**
+   * Starts a business-initiated call.
+   *
+   * The other actions answer a call Meta already told us about; this one creates it, so
+   * it sends an offer rather than an answer and gets the call id back instead of being
+   * given one. The customer must have messaged within the last 24 hours or have granted
+   * call permission — Meta refuses otherwise, and says which.
+   */
+  async connect(phoneNumberId: string, accessToken: string, toPhone: string, sdp: string) {
+    const res = await this.action(phoneNumberId, accessToken, {
+      to: toPhone,
+      action: 'connect',
+      session: { sdp_type: 'offer', sdp },
+    });
+    const callId = res?.calls?.[0]?.id as string | undefined;
+    if (!callId) throw new MetaCallError('Meta accepted the call but returned no call id', 502);
+    return { callId };
+  }
+
   preAccept(phoneNumberId: string, accessToken: string, callId: string, sdp: string) {
     return this.action(phoneNumberId, accessToken, { call_id: callId, action: 'pre_accept', session: { sdp_type: 'answer', sdp } });
   }

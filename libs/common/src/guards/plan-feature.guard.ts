@@ -18,6 +18,8 @@ interface PlanSnapshot {
   features: Record<PlanFeatureKey, boolean>;
   /** True once the paid period has run out, whatever the stored status still says. */
   lapsed: boolean;
+  /** Set when the period has run out but the platform's grace period has not. */
+  inGrace: boolean;
 }
 
 /** Statuses that mean the plan is not paid for, regardless of the period dates. */
@@ -49,11 +51,16 @@ export class PlanFeatureGuard implements CanActivate {
 
     const plan = await this.planFor(tenantId);
 
-    // A trial or paid period that has run out stops the paid features and nothing else:
-    // sign-in, the existing conversations and the billing pages all keep working. Locking
-    // the account outright would hide the data someone needs in order to decide to pay,
-    // and a separate code lets the app say "renew" rather than "upgrade" — the plan is
-    // not too small, it has simply run out.
+    // Within grace everything keeps working. The platform decides how long, because the
+    // first thing most people do after lapsing is come back and pay, and locking them out
+    // at the stroke of midnight loses the renewal rather than securing it.
+    if (plan?.lapsed && plan.inGrace) return Boolean(plan.features[feature]);
+
+    // Past grace, the paid features stop and nothing else: sign-in, the existing
+    // conversations and the billing pages all keep working, because locking the account
+    // outright hides the data someone needs in order to decide to pay. A separate code
+    // lets the app say "renew" rather than "upgrade" — the plan is not too small, it has
+    // simply run out.
     if (plan?.lapsed) {
       throw new ForbiddenException({
         success:  false,
@@ -79,6 +86,8 @@ export class PlanFeatureGuard implements CanActivate {
     const cached = this.cache.get(tenantId);
     if (cached && cached.expiresAt > Date.now()) return cached.plan;
 
+    const policy = await this.planEndPolicy();
+
     const sub = await this.prisma.subscription.findUnique({
       where:  { tenantId },
       select: {
@@ -101,6 +110,12 @@ export class PlanFeatureGuard implements CanActivate {
           lapsed:
             UNPAID_STATUSES.includes(sub.status) ||
             (sub.currentPeriodEnd != null && sub.currentPeriodEnd.getTime() <= Date.now()),
+          // AUTO_CHARGE has no recurring billing behind it yet, so it is treated as
+          // grace rather than quietly letting an unpaid account run on indefinitely.
+          inGrace:
+            policy.behaviour !== 'BLOCK' &&
+            sub.currentPeriodEnd != null &&
+            Date.now() < sub.currentPeriodEnd.getTime() + policy.graceDays * 86_400_000,
           features: {
             aiEnabled: sub.plan.aiEnabled, ragEnabled: sub.plan.ragEnabled, whiteLabel: sub.plan.whiteLabel,
             advancedAi: sub.plan.advancedAi, allowExport: sub.plan.allowExport, callingEnabled: sub.plan.callingEnabled,
@@ -109,6 +124,23 @@ export class PlanFeatureGuard implements CanActivate {
       : null;
     this.cache.set(tenantId, { plan, expiresAt: Date.now() + CACHE_TTL_MS });
     return plan;
+  }
+
+  /**
+   * The platform's answer to a lapsed plan, cached alongside the plans.
+   *
+   * Read from the PLATFORM tenant rather than the one being checked: it is a rule about
+   * the product, not a preference of the customer being refused.
+   */
+  private async planEndPolicy(): Promise<{ behaviour: string; graceDays: number }> {
+    const platform = await this.prisma.tenant.findFirst({
+      where:  { accountType: 'PLATFORM' },
+      select: { settings: { select: { planEndBehaviour: true, planEndGraceDays: true } } },
+    });
+    return {
+      behaviour: platform?.settings?.planEndBehaviour ?? 'GRACE',
+      graceDays: platform?.settings?.planEndGraceDays ?? 7,
+    };
   }
 
   invalidate(tenantId: string) {

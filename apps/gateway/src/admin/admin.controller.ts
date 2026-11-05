@@ -378,6 +378,21 @@ export class AdminController {
 
   // ── Tenant Subscription ───────────────────────────────────────────────────────
 
+  @Get('plan-end-policy')
+  @ApiOperation({ summary: 'What happens when a trial or paid period runs out (super admin)' })
+  getPlanEndPolicy(@CurrentTenant() scope: TenantScope) {
+    return this.svc.getPlanEndPolicy(scope);
+  }
+
+  @Put('plan-end-policy')
+  @ApiOperation({ summary: 'Set what happens when a trial or paid period runs out (super admin)' })
+  setPlanEndPolicy(
+    @CurrentTenant() scope: TenantScope,
+    @Body() body: { behaviour?: string; graceDays?: number },
+  ) {
+    return this.svc.setPlanEndPolicy(scope, body);
+  }
+
   @Get('tenants/:id/subscription')
   @ApiOperation({ summary: 'Get subscription + plan + usage for a tenant (super admin)' })
   getTenantSubscription(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {

@@ -2,7 +2,7 @@ import {
   Controller, Get, Post, Put, Body, Param, Query, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
-import { JwtAuthGuard, PlanFeatureGuard, RequiresPlanFeature, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
+import { JwtAuthGuard, PlanFeatureGuard, RequiresPlanFeature, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission, requireFields,} from '@lib/common';
 import { CallsService } from './calls.service';
 
 @ApiTags('calls')
@@ -49,15 +49,29 @@ export class CallsController {
   setSettings(
     @CurrentTenant() scope: TenantScope,
     @Param('integrationId') integrationId: string,
-    @Body() body: { enabled?: boolean },
+    @Body() body: { enabled?: boolean; followBusinessHours?: boolean },
   ) {
-    return this.svc.setCallingEnabled(scope, integrationId, body?.enabled === true);
+    return this.svc.setCallingEnabled(
+      scope, integrationId, body?.enabled === true, body?.followBusinessHours,
+    );
   }
 
   @Get(':id')
   @ApiOperation({ summary: 'One call' })
   get(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
     return this.svc.get(scope, id);
+  }
+
+  @Post()
+  @RequiresPermission('conversations.view')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Place a call to a contact (business-initiated)' })
+  initiate(
+    @CurrentTenant() scope: TenantScope,
+    @Body() body: { contactId?: string; sdpOffer?: string; integrationId?: string },
+  ) {
+    requireFields(body, ['contactId', 'sdpOffer']);
+    return this.svc.initiate(scope, body as { contactId: string; sdpOffer: string; integrationId?: string });
   }
 
   @Post(':id/accept')

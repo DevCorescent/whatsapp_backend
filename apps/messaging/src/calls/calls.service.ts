@@ -61,6 +61,82 @@ export class CallsService {
 
   // ── Agent actions ───────────────────────────────────────────────────────────
 
+  /**
+   * Places a call to a contact.
+   *
+   * Three things have to be true and each fails differently, so each is checked and
+   * named rather than collapsed into one refusal: calling must be switched on for the
+   * number, the contact must exist in this department, and Meta must agree the customer
+   * can be called — which depends on them having messaged recently or having granted
+   * permission, and is the one we cannot know in advance.
+   */
+  async initiate(scope: TenantScope, body: { contactId: string; sdpOffer: string; integrationId?: string }) {
+    if (!body.sdpOffer?.includes('a=')) throw new BadRequestException('A WebRTC SDP offer is required');
+
+    const contact = await this.prisma.contact.findFirst({
+      where:  { id: body.contactId, tenantId: scope.tenantId, businessId: scope.businessId },
+      select: { id: true, phone: true, name: true },
+    });
+    if (!contact) throw new NotFoundException('That contact is not in this department');
+
+    const integration = body.integrationId
+      ? await this.prisma.whatsAppIntegration.findFirst({
+          where: { id: body.integrationId, businessId: scope.businessId, isActive: true },
+        })
+      : await this.prisma.whatsAppIntegration.findFirst({
+          where: { businessId: scope.businessId, isActive: true, isDefault: true },
+        });
+    if (!integration) throw new BadRequestException('No active WhatsApp number to call from');
+
+    if (!integration.callingEnabled) {
+      // Actionable rather than merely true: the setting is ours to change, and saying
+      // where turns a dead end into one more click.
+      throw new BadRequestException(
+        integration.callingFollowsBusinessHours
+          ? "Calling is closed outside this department's business hours. Change the hours, or switch calling to always on, in Settings → WhatsApp numbers."
+          : 'Calling is switched off for this number. Turn it on in Settings → WhatsApp numbers.',
+      );
+    }
+
+    const accessToken = integration.accessToken ? decryptSecret(integration.accessToken) : null;
+    if (!accessToken) throw new BadRequestException('This WhatsApp number has no usable access token');
+
+    let callId: string;
+    try {
+      ({ callId } = await this.meta.connect(
+        integration.phoneNumberId, accessToken, contact.phone, body.sdpOffer,
+      ));
+    } catch (err) {
+      const why = err instanceof MetaCallError ? err.message : 'Could not place the call';
+      throw new BadRequestException(why);
+    }
+
+    const conversation = await this.prisma.conversation.findFirst({
+      where:  { contactId: contact.id, businessId: scope.businessId },
+      select: { id: true },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    const call = await this.prisma.call.create({
+      data: {
+        waCallId:              callId,
+        tenantId:              scope.tenantId,
+        businessId:            scope.businessId,
+        whatsappIntegrationId: integration.id,
+        contactId:             contact.id,
+        conversationId:        conversation?.id ?? null,
+        direction:             'OUTBOUND',
+        status:                'RINGING',
+        answeredById:          scope.userId,
+        fromPhone:             integration.phoneNumber ?? integration.phoneNumberId,
+        toPhone:               contact.phone,
+      },
+    });
+
+    this.logger.log(`Outgoing call ${call.id} to ${contact.name ?? contact.phone}`);
+    return call;
+  }
+
   async accept(scope: TenantScope, callId: string, sdpAnswer: string) {
     if (!sdpAnswer?.includes('a=')) throw new BadRequestException('A WebRTC SDP answer is required');
     const call = await this.find(scope, callId);
@@ -249,15 +325,32 @@ export class CallsService {
     return { integrationId: integration.id, enabled, remote, error };
   }
 
-  async setCallingEnabled(scope: TenantScope, integrationId: string, enabled: boolean) {
+  /**
+   * @param followBusinessHours When true, the department's hours decide, and `enabled`
+   *   only sets where the number starts until the scheduler next runs. Switching it off
+   *   leaves calling wherever it currently is rather than forcing it on, so turning the
+   *   schedule off at night does not start ringing phones nobody is at.
+   */
+  async setCallingEnabled(
+    scope: TenantScope,
+    integrationId: string,
+    enabled: boolean,
+    followBusinessHours?: boolean,
+  ) {
     const { integration, phoneNumberId, accessToken } = await this.credentials(integrationId, scope);
     try {
       await this.meta.setCalling(phoneNumberId, accessToken, enabled);
     } catch (err) {
       throw new BadRequestException(err instanceof MetaCallError ? `Meta refused: ${err.message}` : 'Could not update calling settings');
     }
-    await this.prisma.whatsAppIntegration.update({ where: { id: integration.id }, data: { callingEnabled: enabled } });
-    return { integrationId: integration.id, enabled };
+    await this.prisma.whatsAppIntegration.update({
+      where: { id: integration.id },
+      data:  {
+        callingEnabled: enabled,
+        ...(followBusinessHours !== undefined ? { callingFollowsBusinessHours: followBusinessHours } : {}),
+      },
+    });
+    return { integrationId: integration.id, enabled, followBusinessHours };
   }
 
   // ── Internal ────────────────────────────────────────────────────────────────

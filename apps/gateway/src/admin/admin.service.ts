@@ -1350,6 +1350,58 @@ export class AdminService {
    * a trial is ended early, so `null` has to reach the database instead of being skipped
    * the way an absent field is.
    */
+  /** The platform's policy row, created on first read so there is always one to edit. */
+  private async platformSettings() {
+    const platform = await this.prisma.tenant.findFirst({
+      where:  { accountType: 'PLATFORM' },
+      select: { id: true },
+    });
+    if (!platform) throw new NotFoundException('No platform account exists');
+    return this.prisma.tenantSettings.upsert({
+      where:  { tenantId: platform.id },
+      create: { tenantId: platform.id },
+      update: {},
+    });
+  }
+
+  async getPlanEndPolicy(scope: TenantScope) {
+    this.guard(scope);
+    const settings = await this.platformSettings();
+    return {
+      behaviour: settings.planEndBehaviour,
+      graceDays: settings.planEndGraceDays,
+      options: [
+        { value: 'GRACE', label: 'Keep working for a grace period, then stop',
+          detail: 'The default. Most people renew in the first few days after lapsing.' },
+        { value: 'BLOCK', label: 'Stop paid features immediately',
+          detail: 'Strictest. Sign-in and existing conversations still work.' },
+        { value: 'AUTO_CHARGE', label: 'Charge automatically',
+          detail: 'Needs recurring billing, which is not set up yet. Behaves as grace until it is.' },
+      ],
+    };
+  }
+
+  async setPlanEndPolicy(scope: TenantScope, body: { behaviour?: string; graceDays?: number }) {
+    this.guard(scope);
+    const allowed = ['GRACE', 'BLOCK', 'AUTO_CHARGE'];
+    if (body.behaviour && !allowed.includes(body.behaviour)) {
+      throw new BadRequestException(`behaviour must be one of ${allowed.join(', ')}.`);
+    }
+    if (body.graceDays !== undefined && (body.graceDays < 0 || body.graceDays > 90)) {
+      throw new BadRequestException('graceDays must be between 0 and 90.');
+    }
+
+    const settings = await this.platformSettings();
+    const saved = await this.prisma.tenantSettings.update({
+      where: { tenantId: settings.tenantId },
+      data:  {
+        ...(body.behaviour ? { planEndBehaviour: body.behaviour } : {}),
+        ...(body.graceDays !== undefined ? { planEndGraceDays: body.graceDays } : {}),
+      },
+    });
+    return { behaviour: saved.planEndBehaviour, graceDays: saved.planEndGraceDays };
+  }
+
   async updateTenantSubscription(
     scope: TenantScope,
     tenantId: string,

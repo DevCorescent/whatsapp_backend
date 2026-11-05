@@ -169,6 +169,11 @@ model WhatsAppIntegration {
   qualityRating          String?
   /// WhatsApp Business API messaging tier (1=250, 2=2000, 3=10000, 0=unlimited/day)
   messagingTier          Int            @default(1)
+  /// When true, calling is switched on and off to match the department's business
+  /// hours instead of being left on. Meta holds the live setting; a scheduler keeps
+  /// it in step, so this is the intent and `callingEnabled` is the current state.
+  callingFollowsBusinessHours Boolean @default(false)
+
   /// Mirrors Meta's per-number calling setting (POST /{phone_number_id}/settings { calling }).
   callingEnabled         Boolean        @default(false)
   calls                  Call[]
@@ -210,6 +215,20 @@ model TenantSettings {
   waAppSecret          String?
   /// API key for incoming webhook / external API access. Generated per tenant.
   apiKey               String?  @unique
+
+  /// What happens when a trial or paid period runs out. Read from the PLATFORM tenant's
+  /// row, which is where the policy for the whole product lives; the column sits here
+  /// rather than in a table of its own so a reseller can later be given its own answer
+  /// for its own clients without another migration.
+  ///
+  /// GRACE  — keep working for `planEndGraceDays`, then stop. The default, because the
+  ///          first thing someone does after lapsing is come back and pay.
+  /// BLOCK  — stop the paid features the moment the period ends.
+  /// AUTO_CHARGE — take payment automatically. Needs recurring billing to be set up;
+  ///          until it is, this behaves as GRACE rather than letting someone go unpaid.
+  planEndBehaviour     String   @default("GRACE")
+  planEndGraceDays     Int      @default(7)
+
   tenant               Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@map("tenant_settings")
