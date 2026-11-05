@@ -2,7 +2,7 @@ import {
   Injectable, NotFoundException, ForbiddenException, BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope, MessageRatesService, WalletService, encryptSecret } from '@lib/common';
+import { TenantScope, MessageRatesService, WalletService, encryptSecret, computeBulkPrices, type BulkPriceChange,} from '@lib/common';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 
@@ -654,6 +654,35 @@ export class ResellerService {
   }
 
   // ── Rates ──────────────────────────────────────────────────────────────────
+
+  /**
+   * Moves every rate this reseller charges its clients, in one go.
+   *
+   * Only its own overrides are touched. A reseller that has not overridden a category is
+   * charging the platform rate; moving that for them would quietly create an override
+   * they never asked for, so those categories are reported as untouched instead.
+   */
+  async bulkRateChange(scope: TenantScope, body: BulkPriceChange) {
+    const existing = await this.prisma.messageRate.findMany({
+      where:  { resellerId: scope.tenantId, tenantId: null },
+      select: { id: true, category: true, priceMinor: true },
+    });
+    if (!existing.length) {
+      throw new BadRequestException(
+        'You have no rate overrides yet. Set a price for at least one category first, then a bulk change can move them.',
+      );
+    }
+
+    const lines = computeBulkPrices(
+      existing.map((r) => ({ id: r.id, label: r.category, priceMinor: r.priceMinor })), body,
+    );
+    if (body.dryRun) return { applied: false, rates: lines };
+
+    await this.prisma.$transaction(
+      lines.map((l) => this.prisma.messageRate.update({ where: { id: l.id }, data: { priceMinor: l.after } })),
+    );
+    return { applied: true, changed: lines.length, rates: lines };
+  }
 
   async listRates(scope: TenantScope) {
     await this.guardReseller(scope);

@@ -4,8 +4,7 @@ import {
 import { PrismaService } from '@lib/prisma';
 import {
   TenantScope, PERMISSIONS, accountCeiling, roleDefaults, resolvePermission, MessageRatesService, WalletService,
-  decryptSecret,
-} from '@lib/common';
+  decryptSecret, computeBulkPrices, type BulkPriceChange,} from '@lib/common';
 import * as bcrypt from 'bcryptjs';
 
 // ── CMS section metadata (mirrored from lib/cms/sections.ts — no Next.js imports) ──
@@ -1362,6 +1361,59 @@ export class AdminService {
       create: { tenantId: platform.id },
       update: {},
     });
+  }
+
+  /**
+   * Moves every platform message rate, and optionally every plan price, in one go.
+   *
+   * Always previewable and never silent: `dryRun` returns exactly what would change so
+   * the whole set can be read before anything is written. A sweeping price change is the
+   * sort of thing people want to look at twice.
+   */
+  async bulkPriceChange(
+    scope: TenantScope,
+    body: BulkPriceChange & { target?: 'rates' | 'plans' | 'both' },
+  ) {
+    this.guard(scope);
+    const target = body.target ?? 'rates';
+
+    const rates = target === 'plans' ? [] : await this.prisma.messageRate.findMany({
+      where:  { resellerId: null, tenantId: null },
+      select: { id: true, category: true, priceMinor: true },
+    });
+    const plans = target === 'rates' ? [] : await this.prisma.plan.findMany({
+      select: { id: true, displayName: true, priceMonthly: true, priceAnnual: true },
+    });
+
+    const rateLines = computeBulkPrices(
+      rates.map((r) => ({ id: r.id, label: r.category, priceMinor: r.priceMinor })), body,
+    );
+    const monthlyLines = computeBulkPrices(
+      plans.map((p) => ({ id: p.id, label: `${p.displayName} (monthly)`, priceMinor: Number(p.priceMonthly) })), body,
+    );
+    const annualLines = computeBulkPrices(
+      plans.map((p) => ({ id: p.id, label: `${p.displayName} (annual)`, priceMinor: Number(p.priceAnnual) })), body,
+    );
+
+    if (body.dryRun) {
+      return { applied: false, rates: rateLines, plansMonthly: monthlyLines, plansAnnual: annualLines };
+    }
+
+    await this.prisma.$transaction([
+      ...rateLines.map((l) =>
+        this.prisma.messageRate.update({ where: { id: l.id }, data: { priceMinor: l.after } })),
+      ...plans.map((p, i) =>
+        this.prisma.plan.update({
+          where: { id: p.id },
+          data:  { priceMonthly: monthlyLines[i].after, priceAnnual: annualLines[i].after },
+        })),
+    ]);
+
+    return {
+      applied: true,
+      changed: rateLines.length + plans.length,
+      rates: rateLines, plansMonthly: monthlyLines, plansAnnual: annualLines,
+    };
   }
 
   async getPlanEndPolicy(scope: TenantScope) {

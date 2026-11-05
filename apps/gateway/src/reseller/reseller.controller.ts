@@ -1,7 +1,6 @@
 import {
   Controller, Get, Post, Put, Patch, Delete,
-  Body, Param, Query, UseGuards,
-} from '@nestjs/common';
+  Body, Param, Query, UseGuards, HttpCode, HttpStatus,} from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission, requireFields,} from '@lib/common';
 import { ResellerService } from './reseller.service';
@@ -171,6 +170,17 @@ export class ResellerController {
   }
 
   // ── Rates ─────────────────────────────────────────────────────────────────
+
+  @Post('rates/bulk')
+  @RequiresPermission('reseller.clients.manage')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Move every rate you charge clients at once (dryRun previews it)' })
+  bulkRateChange(
+    @CurrentTenant() scope: TenantScope,
+    @Body() body: { percent?: number; flatMinor?: number; dryRun?: boolean; rounding?: 'nearest' | 'up' | 'down' },
+  ) {
+    return this.svc.bulkRateChange(scope, body);
+  }
 
   @Get('rates')
   @ApiOperation({ summary: 'List message rates (platform base + reseller overrides)' })

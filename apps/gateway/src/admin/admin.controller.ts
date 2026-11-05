@@ -378,6 +378,19 @@ export class AdminController {
 
   // ── Tenant Subscription ───────────────────────────────────────────────────────
 
+  @Post('rates/bulk')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Move every platform price at once (dryRun previews it)' })
+  bulkPriceChange(
+    @CurrentTenant() scope: TenantScope,
+    @Body() body: {
+      percent?: number; flatMinor?: number; dryRun?: boolean;
+      rounding?: 'nearest' | 'up' | 'down'; target?: 'rates' | 'plans' | 'both';
+    },
+  ) {
+    return this.svc.bulkPriceChange(scope, body);
+  }
+
   @Get('plan-end-policy')
   @ApiOperation({ summary: 'What happens when a trial or paid period runs out (super admin)' })
   getPlanEndPolicy(@CurrentTenant() scope: TenantScope) {

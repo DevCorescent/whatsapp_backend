@@ -4,6 +4,7 @@ import {
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { AnalyticsService } from './analytics.service';
+import { NumberActivityService } from './number-activity.service';
 
 @ApiTags('analytics')
 @ApiBearerAuth()
@@ -11,7 +12,26 @@ import { AnalyticsService } from './analytics.service';
 @RequiresPermission('reports.view')
 @Controller('analytics')
 export class AnalyticsController {
-  constructor(private readonly svc: AnalyticsService) {}
+  constructor(
+    private readonly svc: AnalyticsService,
+    private readonly numbers: NumberActivityService,
+  ) {}
+
+  @Get('number-activity')
+  @ApiOperation({ summary: 'How often each number has been messaged (view=mine|clients|platform)' })
+  numberActivity(
+    @CurrentTenant() scope: TenantScope,
+    @Query('page')   page?: string,
+    @Query('limit')  limit?: string,
+    @Query('search') search?: string,
+    @Query('view')   view?: 'mine' | 'clients' | 'platform',
+  ) {
+    return this.numbers.list(scope, {
+      page:  page  ? Number(page)  : undefined,
+      limit: limit ? Number(limit) : undefined,
+      search, view,
+    });
+  }
 
   @Get()
   @ApiOperation({ summary: 'Get analytics overview — period=today|7d|30d|90d or from/to dates' })
