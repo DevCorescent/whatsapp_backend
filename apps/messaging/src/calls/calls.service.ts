@@ -5,6 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '@lib/prisma';
 import {
   TenantScope, RealtimeService, RedisService, MessageEventsService, NotificationsService, AGENT_ROLES, decryptSecret,
+  StorageService,
 } from '@lib/common';
 import { MetaCallsClient, MetaCallError } from './meta-calls.client';
 
@@ -39,6 +40,7 @@ export class CallsService {
     private readonly notifications: NotificationsService,
     private readonly meta:          MetaCallsClient,
     private readonly cfg:           ConfigService,
+    private readonly storage:       StorageService,
   ) {}
 
   offerKey(waCallId: string) {
@@ -351,6 +353,96 @@ export class CallsService {
       },
     });
     return { integrationId: integration.id, enabled, followBusinessHours };
+  }
+
+  // ── Recordings ──────────────────────────────────────────────────────────────
+
+  /**
+   * Stores the audio the agent's browser captured for a call.
+   *
+   * One file per call, replacing any earlier attempt rather than accumulating: a retry
+   * after a failed upload should leave one recording, not two nobody can tell apart.
+   * Nothing is written until the file is actually stored, so a row that exists always
+   * has audio behind it.
+   */
+  async saveRecording(
+    scope: TenantScope,
+    callId: string,
+    file: { buffer: Buffer; mimetype?: string; size?: number } | undefined,
+    durationSec?: number,
+  ) {
+    if (!file?.buffer?.length) throw new BadRequestException('An audio file is required.');
+
+    const call = await this.find(scope, callId);
+
+    const mimeType = file.mimetype || 'audio/webm';
+    const key = this.storage.mediaKey({
+      tenantId:   scope.tenantId,
+      businessId: scope.businessId,
+      id:         `call-${call.id}`,
+      mimeType,
+    });
+
+    await this.storage.put(key, file.buffer, mimeType);
+
+    const recording = await this.prisma.callRecording.upsert({
+      where:  { callId: call.id },
+      create: {
+        callId: call.id, tenantId: scope.tenantId, businessId: scope.businessId,
+        storageKey: key, mimeType, sizeBytes: file.size ?? file.buffer.length,
+        durationSec: durationSec ?? call.durationSec ?? null,
+      },
+      update: {
+        storageKey: key, mimeType, sizeBytes: file.size ?? file.buffer.length,
+        durationSec: durationSec ?? call.durationSec ?? null,
+      },
+    });
+
+    this.logger.log(`Recording stored for call ${call.id} (${recording.sizeBytes} bytes)`);
+    return { id: recording.id, callId: call.id, sizeBytes: recording.sizeBytes };
+  }
+
+  /** Recordings for this department, newest first, with who was on the call. */
+  async listRecordings(scope: TenantScope, query: { page?: number; limit?: number } = {}) {
+    const page  = Math.max(1, query.page ?? 1);
+    const limit = Math.min(100, query.limit ?? 20);
+
+    const where = { tenantId: scope.tenantId, businessId: scope.businessId };
+    const [rows, total] = await Promise.all([
+      this.prisma.callRecording.findMany({
+        where, skip: (page - 1) * limit, take: limit,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          call: {
+            select: {
+              id: true, direction: true, status: true, fromPhone: true, toPhone: true,
+              ringingAt: true, answeredAt: true, endedAt: true, durationSec: true,
+              contact: { select: { id: true, name: true, phone: true } },
+              answeredBy: { select: { id: true, name: true } },
+            },
+          },
+        },
+      }),
+      this.prisma.callRecording.count({ where }),
+    ]);
+
+    return { recordings: rows, total, page, limit };
+  }
+
+  /**
+   * A short-lived link to the audio.
+   *
+   * Signed on demand rather than stored, so a recording cannot be reached by anyone who
+   * once saw its address, and access is decided per request against this department.
+   */
+  async recordingUrl(scope: TenantScope, recordingId: string) {
+    const recording = await this.prisma.callRecording.findFirst({
+      where: { id: recordingId, tenantId: scope.tenantId, businessId: scope.businessId },
+    });
+    if (!recording) throw new NotFoundException('Recording not found');
+
+    const url = await this.storage.presignGet(recording.storageKey, 3600);
+    return { url, expiresInSec: 3600, mimeType: recording.mimeType };
   }
 
   // ── Internal ────────────────────────────────────────────────────────────────

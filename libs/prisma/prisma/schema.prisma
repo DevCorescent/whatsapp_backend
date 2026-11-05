@@ -63,6 +63,7 @@ model Tenant {
   commissionsEarned    ResellerCommission[]      @relation("CommissionReseller")
   segments             Segment[]
   contactLists         ContactList[]
+  callRecordings       CallRecording[]
   subscription         Subscription?
   tags                 Tag[]
   settings             TenantSettings?
@@ -361,6 +362,7 @@ model Call {
   metadata              Json?
   createdAt             DateTime            @default(now())
   updatedAt             DateTime            @default(now()) @updatedAt
+  recording             CallRecording?
   answeredBy            User?               @relation("CallAnsweredBy", fields: [answeredById], references: [id], onUpdate: NoAction)
   business              Business            @relation(fields: [businessId], references: [id], onDelete: Cascade, onUpdate: NoAction)
   contact               Contact             @relation(fields: [contactId], references: [id], onDelete: Cascade, onUpdate: NoAction)
@@ -1827,6 +1829,36 @@ enum NotificationType {
   HANDOVER_REQUESTED
   /// A lead the model scored highly enough to be worth someone's attention.
   LEAD_QUALIFIED
+}
+
+/// The audio of a call, captured in the agent's browser and stored on our side.
+///
+/// WhatsApp calling is WebRTC: the audio goes straight between the customer's phone and
+/// the agent's browser and never passes through Meta or through us, so there is no
+/// server in the media path to record from. Putting one there would mean running a media
+/// server, which is a separate service with its own cost and latency. Instead the agent's
+/// browser mixes both sides and uploads the result when the call ends.
+///
+/// The honest consequence, which the UI states rather than hides: if the tab is closed or
+/// the network drops mid-call, that recording is incomplete or missing. A row is only
+/// written once a file has actually been stored, so a recording that exists is whole.
+model CallRecording {
+  id          String   @id @default(cuid())
+  callId      String   @unique
+  tenantId    String
+  businessId  String
+  /// Object key in the media store, not a URL — URLs are signed on demand.
+  storageKey  String
+  mimeType    String
+  sizeBytes   Int
+  durationSec Int?
+  createdAt   DateTime @default(now())
+
+  call   Call   @relation(fields: [callId], references: [id], onDelete: Cascade)
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([businessId, createdAt(sort: Desc)])
+  @@map("call_recordings")
 }
 
 enum CallDirection {

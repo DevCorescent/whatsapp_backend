@@ -1,8 +1,8 @@
 import {
-  Controller, Get, Post, Put, Body, Param, Query, UseGuards, HttpCode, HttpStatus,
-} from '@nestjs/common';
-import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
+  Controller, Get, Post, Put, Body, Param, Query, UseGuards, HttpCode, HttpStatus, UseInterceptors, UploadedFile,} from '@nestjs/common';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiConsumes } from '@nestjs/swagger';
 import { JwtAuthGuard, PlanFeatureGuard, RequiresPlanFeature, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission, requireFields,} from '@lib/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { CallsService } from './calls.service';
 
 @ApiTags('calls')
@@ -35,6 +35,41 @@ export class CallsController {
       limit: limit ? Number(limit) : undefined,
       status, contactId, conversationId,
     });
+  }
+
+  @Get('recordings')
+  @ApiOperation({ summary: 'Call recordings for this department, newest first' })
+  listRecordings(
+    @CurrentTenant() scope: TenantScope,
+    @Query('page')  page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.svc.listRecordings(scope, {
+      page:  page  ? Number(page)  : undefined,
+      limit: limit ? Number(limit) : undefined,
+    });
+  }
+
+  @Get('recordings/:id/url')
+  @ApiOperation({ summary: 'A short-lived link to a recording' })
+  recordingUrl(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
+    return this.svc.recordingUrl(scope, id);
+  }
+
+  @Post(':id/recording')
+  @HttpCode(HttpStatus.OK)
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({ summary: 'Upload the audio captured for a call' })
+  @UseInterceptors(FileInterceptor('file'))
+  saveRecording(
+    @CurrentTenant() scope: TenantScope,
+    @Param('id') id: string,
+    @UploadedFile() file: any,
+    @Body() body: { durationSec?: string },
+  ) {
+    return this.svc.saveRecording(
+      scope, id, file, body?.durationSec ? Number(body.durationSec) : undefined,
+    );
   }
 
   @Get('settings/:integrationId')
