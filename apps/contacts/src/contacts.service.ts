@@ -481,14 +481,49 @@ export class ContactsService {
 
   // ── Internal helpers ───────────────────────────────────────────────────────
 
-  /** Add tags without removing existing ones — used during import. */
+  /**
+   * Resolves label names to rows that already exist, and refuses the ones that do not.
+   *
+   * Labels used to be created by the act of applying one: typing anything on a contact
+   * minted a new label for the whole workspace. Every typo, every singular/plural
+   * variation and every half-finished word became permanent, and the list stopped being
+   * usable for the segmenting and campaign targeting it exists to serve.
+   *
+   * So the list is now a closed set. Creating a label is a deliberate act on the labels
+   * screen, which is permissioned; applying one can only pick from what is there.
+   * Matching ignores case and surrounding spaces, because "VIP" and "vip " are plainly
+   * the same label to the person typing them.
+   */
+  private async resolveTags(scope: TenantScope, tagNames: string[]) {
+    const wanted = [...new Set(tagNames.map((n) => n.trim()).filter(Boolean))];
+    if (!wanted.length) return [];
+
+    const existing = await this.prisma.tag.findMany({
+      where:  { tenantId: scope.tenantId, businessId: scope.businessId },
+      select: { id: true, name: true },
+    });
+    const byName = new Map(existing.map((t) => [t.name.trim().toLowerCase(), t]));
+
+    const found: { id: string; name: string }[] = [];
+    const missing: string[] = [];
+    for (const name of wanted) {
+      const hit = byName.get(name.toLowerCase());
+      if (hit) found.push(hit);
+      else missing.push(name);
+    }
+
+    if (missing.length) {
+      throw new BadRequestException(
+        `No such label: ${missing.join(', ')}. Create it on the Labels screen first.`,
+      );
+    }
+    return found;
+  }
+
+  /** Add labels without removing existing ones — used during import. */
   private async syncTagsAdd(scope: TenantScope, contactId: string, tagNames: string[]) {
-    for (const name of tagNames) {
-      const tag = await this.prisma.tag.upsert({
-        where:  { name_businessId: { name, businessId: scope.businessId } },
-        create: { name, tenantId: scope.tenantId, businessId: scope.businessId },
-        update: {},
-      });
+    const tags = await this.resolveTags(scope, tagNames);
+    for (const tag of tags) {
       await this.prisma.contactTag.upsert({
         where:  { contactId_tagId: { contactId, tagId: tag.id } },
         create: { contactId, tagId: tag.id },
@@ -498,17 +533,12 @@ export class ContactsService {
   }
 
   private async syncTags(scope: TenantScope, contactId: string, tagNames: string[]) {
-    // Remove all existing tags for this contact
-    await this.prisma.contactTag.deleteMany({ where: { contactId } });
-    if (!tagNames.length) return;
+    // Resolved before anything is removed, so a bad name leaves the contact untouched
+    // rather than stripping its labels and then failing.
+    const tags = await this.resolveTags(scope, tagNames);
 
-    // Upsert each tag name, then create the join row
-    for (const name of tagNames) {
-      const tag = await this.prisma.tag.upsert({
-        where:  { name_businessId: { name, businessId: scope.businessId } },
-        create: { name, tenantId: scope.tenantId, businessId: scope.businessId },
-        update: {},
-      });
+    await this.prisma.contactTag.deleteMany({ where: { contactId } });
+    for (const tag of tags) {
       // ContactTag PK is (contactId, tagId) — upsert is a no-op if it already exists
       await this.prisma.contactTag.upsert({
         where:  { contactId_tagId: { contactId, tagId: tag.id } },

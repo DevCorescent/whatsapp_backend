@@ -1337,23 +1337,63 @@ export class AdminService {
     return { ...sub, usage: { contacts, users } };
   }
 
-  async updateTenantSubscription(scope: TenantScope, tenantId: string, data: { planId?: string; status?: string; currentPeriodEnd?: string }) {
+  /**
+   * The super admin's override of a tenant's subscription.
+   *
+   * Every field the admin form offers is applied. It used to accept only the plan, the
+   * status and the period end while the form also sent the billing cycle, the period
+   * start, the trial end and a reset-usage flag — those four were dropped in silence, so
+   * extending somebody's trial appeared to work and changed nothing. A control that
+   * reports success without acting is worse than one that is not there.
+   *
+   * `trialEndsAt` is deliberately nullable rather than optional: clearing the date is how
+   * a trial is ended early, so `null` has to reach the database instead of being skipped
+   * the way an absent field is.
+   */
+  async updateTenantSubscription(
+    scope: TenantScope,
+    tenantId: string,
+    data: {
+      planId?: string;
+      status?: string;
+      billingCycle?: string;
+      currentPeriodStart?: string;
+      currentPeriodEnd?: string;
+      trialEndsAt?: string | null;
+      resetUsage?: boolean;
+    },
+  ) {
     this.guard(scope);
-    return this.prisma.subscription.upsert({
+
+    const sub = await this.prisma.subscription.upsert({
       where: { tenantId },
       create: {
         tenantId,
         planId: data.planId ?? 'free',
         status: (data.status ?? 'ACTIVE') as any,
-        currentPeriodStart: new Date(),
+        ...(data.billingCycle ? { billingCycle: data.billingCycle as any } : {}),
+        currentPeriodStart: data.currentPeriodStart ? new Date(data.currentPeriodStart) : new Date(),
         currentPeriodEnd: data.currentPeriodEnd ? new Date(data.currentPeriodEnd) : new Date(Date.now() + 30 * 86400000),
+        ...(data.trialEndsAt ? { trialEndsAt: new Date(data.trialEndsAt) } : {}),
       },
       update: {
         ...(data.planId ? { planId: data.planId } : {}),
         ...(data.status ? { status: data.status as any } : {}),
+        ...(data.billingCycle ? { billingCycle: data.billingCycle as any } : {}),
+        ...(data.currentPeriodStart ? { currentPeriodStart: new Date(data.currentPeriodStart) } : {}),
         ...(data.currentPeriodEnd ? { currentPeriodEnd: new Date(data.currentPeriodEnd) } : {}),
+        ...(data.trialEndsAt !== undefined
+          ? { trialEndsAt: data.trialEndsAt ? new Date(data.trialEndsAt) : null }
+          : {}),
+        ...(data.resetUsage ? { aiCreditsUsed: 0 } : {}),
       },
     });
+
+    // The plan guard caches its per-tenant snapshot for a minute and each module holds
+    // its own instance, so there is no one cache to clear from here. An override can
+    // therefore take up to a minute to be felt on the feature routes; the billing pages
+    // read the database directly and show it at once.
+    return sub;
   }
 
   // ── Tenant WhatsApp ───────────────────────────────────────────────────────────

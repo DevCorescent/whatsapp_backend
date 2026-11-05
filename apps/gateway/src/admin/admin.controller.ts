@@ -389,7 +389,11 @@ export class AdminController {
   updateTenantSubscription(
     @CurrentTenant() scope: TenantScope,
     @Param('id') id: string,
-    @Body() body: { planId?: string; status?: string; currentPeriodEnd?: string },
+    @Body() body: {
+      planId?: string; status?: string; billingCycle?: string;
+      currentPeriodStart?: string; currentPeriodEnd?: string;
+      trialEndsAt?: string | null; resetUsage?: boolean;
+    },
   ) {
     return this.svc.updateTenantSubscription(scope, id, body);
   }

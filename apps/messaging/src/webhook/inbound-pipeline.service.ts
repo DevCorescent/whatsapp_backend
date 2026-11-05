@@ -609,14 +609,24 @@ export class InboundPipelineService {
             return;
           }
 
+          // Labels are a closed set kept on the Labels screen, so a flow applies them and
+          // never invents them. A flow that names one which has since been renamed or
+          // deleted would otherwise quietly recreate it on every inbound message, and
+          // nobody would connect the growing list to a chatbot running in the background.
+          const existing = await this.prisma.tag.findMany({
+            where:  { businessId: conversation.businessId },
+            select: { id: true, name: true },
+          });
+          const byName = new Map(existing.map((t) => [t.name.trim().toLowerCase(), t]));
+
           for (const name of names) {
-            // A tag the author typed may not exist yet; naming one in a flow is as good
-            // as creating it.
-            const tag = await this.prisma.tag.upsert({
-              where:  { name_businessId: { name, businessId: conversation.businessId } },
-              create: { name, businessId: conversation.businessId, tenantId: conversation.tenantId },
-              update: {},
-            });
+            const tag = byName.get(name.trim().toLowerCase());
+            if (!tag) {
+              this.logger.warn(
+                `Flow tried to apply label "${name}", which does not exist in this department — skipped`,
+              );
+              continue;
+            }
             await this.prisma.contactTag.upsert({
               where:  { contactId_tagId: { contactId: contact.id, tagId: tag.id } },
               create: { contactId: contact.id, tagId: tag.id },

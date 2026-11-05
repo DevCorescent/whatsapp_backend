@@ -16,7 +16,12 @@ interface PlanSnapshot {
   name: string;
   displayName: string;
   features: Record<PlanFeatureKey, boolean>;
+  /** True once the paid period has run out, whatever the stored status still says. */
+  lapsed: boolean;
 }
+
+/** Statuses that mean the plan is not paid for, regardless of the period dates. */
+const UNPAID_STATUSES = ['EXPIRED', 'PAST_DUE', 'CANCELLED'];
 
 /**
  * Loads Subscription → Plan once a minute per tenant and answers 403 in the
@@ -43,6 +48,22 @@ export class PlanFeatureGuard implements CanActivate {
     if (!tenantId) throw new ForbiddenException('No tenant');
 
     const plan = await this.planFor(tenantId);
+
+    // A trial or paid period that has run out stops the paid features and nothing else:
+    // sign-in, the existing conversations and the billing pages all keep working. Locking
+    // the account outright would hide the data someone needs in order to decide to pay,
+    // and a separate code lets the app say "renew" rather than "upgrade" — the plan is
+    // not too small, it has simply run out.
+    if (plan?.lapsed) {
+      throw new ForbiddenException({
+        success:  false,
+        error:    'Your plan has ended. Renew it to use this again.',
+        code:     'PLAN_EXPIRED',
+        feature,
+        planName: plan.displayName,
+      });
+    }
+
     if (plan?.features[feature]) return true;
 
     throw new ForbiddenException({
@@ -61,6 +82,8 @@ export class PlanFeatureGuard implements CanActivate {
     const sub = await this.prisma.subscription.findUnique({
       where:  { tenantId },
       select: {
+        status: true,
+        currentPeriodEnd: true,
         plan: {
           select: {
             name: true, displayName: true, aiEnabled: true, ragEnabled: true, whiteLabel: true,
@@ -72,6 +95,12 @@ export class PlanFeatureGuard implements CanActivate {
     const plan: PlanSnapshot | null = sub?.plan
       ? {
           name: sub.plan.name, displayName: sub.plan.displayName,
+          // The dates decide, not the stored status: nothing sweeps lapsed rows the
+          // instant they lapse, so a subscription can still read ACTIVE days after its
+          // period ended. Reading the date here means access is correct immediately.
+          lapsed:
+            UNPAID_STATUSES.includes(sub.status) ||
+            (sub.currentPeriodEnd != null && sub.currentPeriodEnd.getTime() <= Date.now()),
           features: {
             aiEnabled: sub.plan.aiEnabled, ragEnabled: sub.plan.ragEnabled, whiteLabel: sub.plan.whiteLabel,
             advancedAi: sub.plan.advancedAi, allowExport: sub.plan.allowExport, callingEnabled: sub.plan.callingEnabled,

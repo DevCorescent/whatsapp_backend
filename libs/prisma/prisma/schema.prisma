@@ -134,7 +134,7 @@ model Business {
   quickReplies          QuickReply[]
   tags                  Tag[]
   tickets               Ticket[]
-  whatsappIntegrations  WhatsAppIntegration?
+  whatsappIntegrations  WhatsAppIntegration[]
 
   @@unique([slug, tenantId])
   @@index([tenantId])
@@ -144,7 +144,13 @@ model Business {
 model WhatsAppIntegration {
   id                     String         @id @default(cuid())
   tenantId               String
-  businessId             String         @unique(map: "whatsapp_integrations_one_default_per_business", where: raw("(\"isDefault\" = true)"))
+  // NOT unique. At most one row per business may have isDefault = true, and that is
+  // enforced by a PARTIAL unique index that lives in raw SQL (migrations/manual/) because
+  // Prisma cannot express a WHERE clause on a unique constraint. Writing it here as
+  // `@unique` instead makes Prisma read the relation below as one-to-one and generate
+  // `Business.whatsappIntegrations` as a single optional row — which breaks `_count` and
+  // contradicts the whole point of this table, since a business holds several numbers.
+  businessId             String
   displayName            String?
   phoneNumber            String?
   phoneNumberId          String         @unique
