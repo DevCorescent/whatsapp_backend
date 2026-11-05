@@ -377,16 +377,28 @@ export class CallsService {
     file: { buffer: Buffer; mimetype?: string; size?: number } | undefined,
     durationSec?: number,
   ) {
+    // What actually arrived, before anything is rejected. A failed upload leaves nothing
+    // behind to inspect — the audio is gone and the call is over — so the only way to
+    // tell "the browser sent nothing" from "the proxy dropped it" is to write it down
+    // as it happens.
+    this.logger.log(
+      `[recording] call=${callId} file=${file ? 'yes' : 'NO'} ` +
+      `field=${(file as { fieldname?: string } | undefined)?.fieldname ?? '-'} ` +
+      `name=${(file as { originalname?: string } | undefined)?.originalname ?? '-'} ` +
+      `mime=${file?.mimetype ?? '-'} size=${file?.size ?? 0} ` +
+      `buffer=${file?.buffer?.length ?? 0} durationSec=${durationSec ?? '-'}`,
+    );
+
     // Three different failures used to read as one message, which made a failed upload
     // impossible to diagnose from the browser console alone.
     if (!file) {
-      this.logger.warn(`Recording upload for ${callId} arrived with no file part`);
+      this.logger.warn(`[recording] call=${callId} no file part in the request`);
       throw new BadRequestException(
         'No audio reached the server. The upload was sent without a file part.',
       );
     }
     if (!file.buffer?.length) {
-      this.logger.warn(`Recording upload for ${callId} had an empty file (${file.size ?? 0} bytes)`);
+      this.logger.warn(`[recording] call=${callId} file part present but empty (size=${file.size ?? 0})`);
       throw new BadRequestException(
         'The audio file was empty. The recording captured nothing — this usually means the tab lost the call before it ended.',
       );
@@ -402,7 +414,17 @@ export class CallsService {
       mimeType,
     });
 
-    await this.storage.put(key, file.buffer, mimeType);
+    this.logger.log(`[recording] call=${call.id} storing ${file.buffer.length} bytes at ${key}`);
+    try {
+      await this.storage.put(key, file.buffer, mimeType);
+    } catch (err) {
+      // Storage being unconfigured is a deployment problem, not the caller's — but it
+      // looks identical to a broken upload unless it says so.
+      this.logger.error(`[recording] call=${call.id} storage failed: ${(err as Error).message}`);
+      throw new BadRequestException(
+        'The audio could not be stored. Media storage is not reachable — tell an administrator.',
+      );
+    }
 
     const recording = await this.prisma.callRecording.upsert({
       where:  { callId: call.id },
@@ -417,7 +439,7 @@ export class CallsService {
       },
     });
 
-    this.logger.log(`Recording stored for call ${call.id} (${recording.sizeBytes} bytes)`);
+    this.logger.log(`[recording] call=${call.id} stored id=${recording.id} ${recording.sizeBytes} bytes`);
     return { id: recording.id, callId: call.id, sizeBytes: recording.sizeBytes };
   }
 

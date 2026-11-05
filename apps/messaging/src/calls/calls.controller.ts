@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Put, Body, Param, Query, UseGuards, HttpCode, HttpStatus, UseInterceptors, UploadedFile,} from '@nestjs/common';
+  Controller, Get, Post, Put, Body, Param, Query, UseGuards, HttpCode, HttpStatus, UseInterceptors, UploadedFile, Logger,} from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiConsumes } from '@nestjs/swagger';
 import { JwtAuthGuard, PlanFeatureGuard, RequiresPlanFeature, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission, requireFields,} from '@lib/common';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -12,6 +12,8 @@ import { CallsService } from './calls.service';
 @RequiresPermission('conversations.view')
 @Controller('calls')
 export class CallsController {
+  private readonly logger = new Logger(CallsController.name);
+
   constructor(private readonly svc: CallsService) {}
 
   @Get('ice-servers')
@@ -67,6 +69,13 @@ export class CallsController {
     @UploadedFile() file: any,
     @Body() body: { durationSec?: string },
   ) {
+    // Logged at the edge as well as in the service: if multer never populated `file`,
+    // the difference between "nothing was sent" and "the interceptor rejected it" shows
+    // up here, before any of our own checks have run.
+    this.logger.log(
+      `[recording] POST /calls/${id}/recording reached the controller · ` +
+      `file=${file ? 'present' : 'MISSING'} bodyKeys=${Object.keys(body ?? {}).join(',') || 'none'}`,
+    );
     return this.svc.saveRecording(
       scope, id, file, body?.durationSec ? Number(body.durationSec) : undefined,
     );
