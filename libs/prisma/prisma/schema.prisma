@@ -62,6 +62,7 @@ model Tenant {
   commissionsGenerated ResellerCommission[]      @relation("CommissionClient")
   commissionsEarned    ResellerCommission[]      @relation("CommissionReseller")
   segments             Segment[]
+  contactLists         ContactList[]
   subscription         Subscription?
   tags                 Tag[]
   settings             TenantSettings?
@@ -133,6 +134,7 @@ model Business {
   messages              Message[]
   quickReplies          QuickReply[]
   tags                  Tag[]
+  contactLists          ContactList[]
   tickets               Ticket[]
   whatsappIntegrations  WhatsAppIntegration[]
 
@@ -388,6 +390,7 @@ model Contact {
   calls           Call[]
   campaignsSent   CampaignContact[]
   tags            ContactTag[]
+  lists           ContactListMember[]
   business        Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
   tenant          Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   conversations   Conversation[]
@@ -894,6 +897,11 @@ model CampaignContact {
   /// What was charged to the wallet for this message (paise).
   costMinor    Int?
   clickedAt    DateTime?
+  /// Where this recipient's tracked link points. Set when the campaign is built, so the
+  /// redirect can send them on without re-deriving it at click time.
+  clickUrl     String?
+  /// How many times they followed it. The first one also stamps clickedAt.
+  clickCount   Int       @default(0)
   /// WhatsApp error code from statuses[].errors[].code (e.g. 131026 = recipient not on WA)
   errorCode    Int?
   /// Human-readable title matching the error code
@@ -1132,6 +1140,43 @@ model Segment {
 
   @@index([tenantId, businessId])
   @@map("segments")
+}
+
+/// A hand-picked group of contacts, built and named by whoever will send to it.
+///
+/// Distinct from Segment, which is a saved *rule* ("everyone tagged VIP") re-evaluated
+/// on every use. A list is the opposite: an explicit set of people chosen one by one,
+/// which does not change underneath the sender. Both can target a broadcast; this is the
+/// one to reach for when the recipients are a decision rather than a query.
+model ContactList {
+  id          String              @id @default(cuid())
+  tenantId    String
+  businessId  String
+  name        String
+  description String?
+  /// Who built it. Kept so a list survives the person leaving, unlike an owner column.
+  createdById String?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @default(now()) @updatedAt
+  members     ContactListMember[]
+  tenant      Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  business    Business            @relation(fields: [businessId], references: [id], onDelete: Cascade)
+
+  @@unique([name, businessId])
+  @@index([tenantId, businessId])
+  @@map("contact_lists")
+}
+
+model ContactListMember {
+  listId    String
+  contactId String
+  addedAt   DateTime    @default(now())
+  list      ContactList @relation(fields: [listId], references: [id], onDelete: Cascade)
+  contact   Contact     @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@id([listId, contactId])
+  @@index([contactId])
+  @@map("contact_list_members")
 }
 
 model BusinessCategory {

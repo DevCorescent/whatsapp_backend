@@ -4,7 +4,7 @@ import {
   HttpCode, HttpStatus, UseInterceptors, UploadedFile,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiConsumes } from '@nestjs/swagger';
-import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
+import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission, requireFields,} from '@lib/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { CampaignsService } from './campaigns.service';
 
@@ -62,6 +62,19 @@ export class CampaignsController {
   @ApiOperation({ summary: 'Add recipients to a campaign' })
   addContacts(@CurrentTenant() scope: TenantScope, @Param('id') id: string, @Body('contacts') contacts: any[]) {
     return this.svc.addContacts(scope, id, contacts ?? []);
+  }
+
+  @Post(':id/contacts-from-lists')
+  @RequiresPermission('campaigns.send')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Fill campaign recipients from hand-picked contact lists' })
+  addContactsFromLists(
+    @CurrentTenant() scope: TenantScope,
+    @Param('id') id: string,
+    @Body() body: { listIds?: string[] },
+  ) {
+    requireFields(body, ['listIds']);
+    return this.svc.addContactsFromLists(scope, id, body.listIds!);
   }
 
   @Post(':id/duplicate')

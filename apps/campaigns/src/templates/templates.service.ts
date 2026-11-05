@@ -6,8 +6,7 @@ import { Queue } from 'bull';
 import { PrismaService } from '@lib/prisma';
 import {
   TenantScope, decryptSecret, parseMetaTemplate, pickTemplateAccount, toSpec, validateTemplate,
-  StorageService,
-} from '@lib/common';
+  StorageService, requireFields,} from '@lib/common';
 import { QUEUE_TEMPLATE_SYNC } from '@lib/queue';
 
 /** What the builder may write. `status`, `waTemplateId` and the sync stamps are ours. */
@@ -123,6 +122,11 @@ export class TemplatesService {
   // ── Create ─────────────────────────────────────────────────────────────────
 
   async create(scope: TenantScope, data: TemplateWriteInput) {
+    // Meta refuses a template missing any of these, several seconds later and in its own
+    // words. Saying so here means the author fixes the form instead of reading a Graph
+    // API error about a submission that never had a chance.
+    requireFields(data as Record<string, unknown>, ['name', 'category', 'body']);
+
     const existing = await this.prisma.messageTemplate.findUnique({
       where: { name_businessId: { name: data.name!, businessId: scope.businessId } },
     });

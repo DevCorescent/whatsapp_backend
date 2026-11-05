@@ -1,12 +1,12 @@
 import {
   Injectable, Logger, NotFoundException, BadRequestException,
 } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { PrismaService } from '@lib/prisma';
 import {
-  TenantScope, MessageRatesService, RedisService, classifySendError,
-} from '@lib/common';
+  TenantScope, MessageRatesService, RedisService, classifySendError, requireFields,} from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
 import { CampaignProgressService } from './campaign-progress.service';
 
@@ -100,9 +100,16 @@ export class CampaignsService {
 
   async create(scope: TenantScope, data: any) {
     // Route to broadcast handler for any audience-based creation
-    if (Array.isArray(data.numbers) || data.segmentId || data.all || Array.isArray(data.contactIds)) {
+    if (
+      Array.isArray(data.numbers) || data.segmentId || data.all ||
+      Array.isArray(data.contactIds) || Array.isArray(data.contactListIds)
+    ) {
+      requireFields(data, ['name', 'templateId']);
       return this.createBroadcast(scope, data);
     }
+
+    // A draft with no audience yet still needs a name to be findable again.
+    requireFields(data, ['name']);
 
     return this.prisma.campaign.create({
       data: {
@@ -131,6 +138,7 @@ export class CampaignsService {
       segmentId,
       all               = false,
       contactIds,
+      contactListIds,
       excludeContactIds = [] as string[],
       recipientFields   = {} as Record<string, Record<string, string>>,
       scheduledAt,
@@ -180,6 +188,22 @@ export class CampaignsService {
         select: { phone: true },
       });
       rawNumbers = contacts.map(c => c.phone);
+    } else if (Array.isArray(contactListIds) && contactListIds.length > 0) {
+      // Hand-picked groups. A list that is not this department's is refused rather than
+      // quietly contributing nobody, which would look like an empty list instead of the
+      // wrong one being chosen.
+      const lists = await this.prisma.contactList.findMany({
+        where:  { id: { in: contactListIds }, tenantId: scope.tenantId, businessId: scope.businessId },
+        select: { id: true },
+      });
+      if (lists.length !== new Set(contactListIds).size) {
+        throw new BadRequestException('One of those contact lists does not exist here.');
+      }
+      const members = await this.prisma.contactListMember.findMany({
+        where:  { listId: { in: contactListIds } },
+        select: { contact: { select: { phone: true } } },
+      });
+      rawNumbers = members.map(m => m.contact.phone).filter(Boolean);
     } else if (segmentId || all) {
       // Segment rows hold dynamic filters evaluated by lib/segments.ts.
       // Without importing that evaluator here we fall back to all non-opted-out
@@ -314,6 +338,13 @@ export class CampaignsService {
 
     // ── 8. Create CampaignContact rows ──────────────────────────────────────
     if (finalNumbers.length > 0) {
+      // Tracking only works when the template's URL button points at our redirect, since
+      // WhatsApp fixes the base in the template and lets the campaign fill the suffix.
+      // With a base configured we put the recipient's own id in that suffix and keep the
+      // real destination here; without one the link is passed through untouched and
+      // clicks simply go unmeasured, which is better than rewriting it to nowhere.
+      const trackingBase = (process.env['TRACKING_BASE_URL'] ?? '').replace(/\/+$/, '');
+
       const contactRows = finalNumbers.map(phone => {
         const contact = contactMap.get(phone);
         const fields  = (recipientFields[phone] ?? {}) as Record<string, string>;
@@ -326,11 +357,20 @@ export class CampaignsService {
         });
         Object.assign(variables, fields);
 
+        // Prisma would mint the id on insert, but the suffix has to be known now so the
+        // recipient's link can carry it.
+        const id = randomUUID();
+        const destination = variables['url_1']?.trim() || null;
+        const tracked = Boolean(trackingBase && destination);
+        if (tracked) variables['url_1'] = id;
+
         return {
+          id,
           campaignId: campaign.id,
           phone,
           contactId:  contact?.id ?? undefined,
           variables:  variables as any,
+          clickUrl:   tracked ? destination : null,
           status:     'PENDING',
         };
       });
@@ -411,6 +451,58 @@ export class CampaignsService {
       data:  { totalCount: count },
     });
     return { added: contacts.length, total: count };
+  }
+
+  /**
+   * Fills a campaign's recipients from hand-picked contact lists.
+   *
+   * The people are copied in as they stand now, rather than the campaign holding a
+   * reference to the list. A broadcast is a thing that happened to a known set of
+   * people: if someone is added to the list tomorrow they did not receive yesterday's
+   * send, and the report has to keep saying so.
+   *
+   * Contacts with no phone number are skipped rather than failing the whole call, and
+   * counted back so the screen can say how many were left out and why.
+   */
+  async addContactsFromLists(scope: TenantScope, campaignId: string, listIds: string[]) {
+    await this.findOne(scope, campaignId);
+
+    const ids = [...new Set((listIds ?? []).filter(Boolean))];
+    if (!ids.length) throw new BadRequestException('listIds is required.');
+
+    const lists = await this.prisma.contactList.findMany({
+      where:  { id: { in: ids }, tenantId: scope.tenantId, businessId: scope.businessId },
+      select: { id: true },
+    });
+    if (lists.length !== ids.length) {
+      throw new BadRequestException('One of those contact lists does not exist here.');
+    }
+
+    const members = await this.prisma.contactListMember.findMany({
+      where:  { listId: { in: ids } },
+      select: { contact: { select: { id: true, phone: true } } },
+    });
+
+    // One person in two chosen lists is still one recipient.
+    const byId = new Map(members.map((m) => [m.contact.id, m.contact]));
+    const reachable = [...byId.values()].filter((c) => Boolean(c.phone?.trim()));
+    const withoutPhone = byId.size - reachable.length;
+
+    if (!reachable.length) {
+      throw new BadRequestException('Nobody in those lists has a phone number to message.');
+    }
+
+    await this.prisma.campaignContact.createMany({
+      data: reachable.map((c) => ({
+        campaignId, phone: c.phone!, contactId: c.id, status: 'PENDING' as const,
+      })),
+      skipDuplicates: true,
+    });
+
+    const total = await this.prisma.campaignContact.count({ where: { campaignId } });
+    await this.prisma.campaign.update({ where: { id: campaignId }, data: { totalCount: total } });
+
+    return { added: reachable.length, withoutPhone, total };
   }
 
   // ── Duplicate ──────────────────────────────────────────────────────────────
