@@ -377,7 +377,20 @@ export class CallsService {
     file: { buffer: Buffer; mimetype?: string; size?: number } | undefined,
     durationSec?: number,
   ) {
-    if (!file?.buffer?.length) throw new BadRequestException('An audio file is required.');
+    // Three different failures used to read as one message, which made a failed upload
+    // impossible to diagnose from the browser console alone.
+    if (!file) {
+      this.logger.warn(`Recording upload for ${callId} arrived with no file part`);
+      throw new BadRequestException(
+        'No audio reached the server. The upload was sent without a file part.',
+      );
+    }
+    if (!file.buffer?.length) {
+      this.logger.warn(`Recording upload for ${callId} had an empty file (${file.size ?? 0} bytes)`);
+      throw new BadRequestException(
+        'The audio file was empty. The recording captured nothing — this usually means the tab lost the call before it ended.',
+      );
+    }
 
     const call = await this.find(scope, callId);
 
