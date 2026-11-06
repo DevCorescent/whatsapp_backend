@@ -106,9 +106,12 @@ export class CampaignSendProcessor {
       if (!template) throw new Error('Campaign has no template');
 
       const integration = campaign.whatsappIntegration
+        // Falls back to the default number, not whichever row comes back first: a
+        // workspace with a second, lapsed number would otherwise send from that one.
         ?? await this.prisma.whatsAppIntegration.findFirst({
-            where: { businessId, isActive: true },
-            select: { phoneNumberId: true, accessToken: true },
+            where:   { businessId, isActive: true },
+            orderBy: { isDefault: 'desc' },
+            select:  { phoneNumberId: true, accessToken: true },
           });
       if (!integration?.accessToken) throw new Error('No active WhatsApp integration');
       const accessToken = decryptSecret(integration.accessToken);

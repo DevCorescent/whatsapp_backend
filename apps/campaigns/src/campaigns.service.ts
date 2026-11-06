@@ -7,7 +7,7 @@ import { Queue } from 'bull';
 import { PrismaService } from '@lib/prisma';
 import {
   TenantScope, MessageRatesService, RedisService, classifySendError, requireFields,
-  normalizePhone,
+  normalizePhone, decryptSecret,
 } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
 import { CampaignProgressService } from './campaign-progress.service';
@@ -894,7 +894,11 @@ export class CampaignsService {
 
   // ── Upload media to Meta ────────────────────────────────────────────────────
 
-  async uploadCampaignMedia(scope: TenantScope, file: { buffer: Buffer; mimetype: string; originalname: string; size: number }) {
+  async uploadCampaignMedia(
+    scope: TenantScope,
+    file: { buffer: Buffer; mimetype: string; originalname: string; size: number },
+    templateId?: string,
+  ) {
     if (!file) throw new BadRequestException('No file provided');
 
     const ALLOWED = new Set([
@@ -914,12 +918,37 @@ export class CampaignsService {
       throw new BadRequestException('File is too large. Maximum size is 16 MB.');
     }
 
+    // Meta scopes a media id to the phone number it was uploaded to, so this has to be
+    // the number the campaign will send from or the send fails on a media id Meta does
+    // not recognise. The template names that number; without one, the default is the
+    // same choice campaign creation makes.
+    const wabaId = templateId
+      ? (await this.prisma.messageTemplate.findFirst({
+          where:  { id: templateId, tenantId: scope.tenantId, businessId: scope.businessId },
+          select: { wabaId: true },
+        }))?.wabaId ?? null
+      : null;
+
     const integration = await this.prisma.whatsAppIntegration.findFirst({
-      where:  { businessId: scope.businessId, tenantId: scope.tenantId, isActive: true },
-      select: { phoneNumberId: true, accessToken: true },
+      where: {
+        businessId: scope.businessId, tenantId: scope.tenantId, isActive: true,
+        ...(wabaId ? { whatsappBusinessId: wabaId } : {}),
+      },
+      orderBy: { isDefault: 'desc' },
+      select:  { phoneNumberId: true, accessToken: true, displayName: true },
     });
     if (!integration?.phoneNumberId || !integration.accessToken) {
-      throw new Error('WhatsApp is not connected for this workspace');
+      throw new BadRequestException('WhatsApp is not connected for this workspace');
+    }
+
+    // Tokens are stored encrypted. This sent the stored value straight to Meta, so every
+    // upload went out as `Bearer enc:v1:…` and came back 401 — which surfaced as "something
+    // went wrong on our side" and made the upload box look broken for no stated reason.
+    const accessToken = decryptSecret(integration.accessToken);
+    if (!accessToken) {
+      throw new BadRequestException(
+        `The access token for ${integration.displayName ?? 'this number'} could not be read. Reconnect it in Settings.`,
+      );
     }
 
     const apiVer = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
@@ -932,13 +961,17 @@ export class CampaignsService {
       `https://graph.facebook.com/${apiVer}/${integration.phoneNumberId}/media`,
       {
         method:  'POST',
-        headers: { Authorization: `Bearer ${integration.accessToken}` },
+        headers: { Authorization: `Bearer ${accessToken}` },
         body:    form,
       },
     );
     if (!res.ok) {
       const err: any = await res.json().catch(() => ({}));
-      throw new Error(err?.error?.message ?? 'Upload failed');
+      const why = err?.error?.message ?? `Meta returned ${res.status}`;
+      this.logger.error(`Media upload rejected for ${integration.displayName}: ${why}`);
+      // Meta's own sentence, not a generic failure — an expired token and a file it
+      // refuses need different things done about them.
+      throw new BadRequestException(`WhatsApp refused the upload: ${why}`);
     }
     const result: any = await res.json();
     return { mediaId: result.id, mimeType: file.mimetype };

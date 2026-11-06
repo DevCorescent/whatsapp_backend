@@ -616,14 +616,20 @@ export class TemplatesService {
       throw new Error('File is too large — maximum 4 MB for template header samples.');
     }
 
+    // The default number first. An unordered pick took whichever row came back, which on a
+    // workspace with a second, lapsed number meant uploads failed against a token nobody
+    // had any reason to think was in use.
     const integration = await this.prisma.whatsAppIntegration.findFirst({
-      where:  { businessId: scope.businessId, tenantId: scope.tenantId, isActive: true },
-      select: { accessToken: true },
+      where:   { businessId: scope.businessId, tenantId: scope.tenantId, isActive: true },
+      orderBy: { isDefault: 'desc' },
+      select:  { accessToken: true, displayName: true },
     });
     if (!integration?.accessToken) throw new Error('WhatsApp is not connected for this workspace');
 
     const apiKey = decryptSecret(integration.accessToken);
-    if (!apiKey) throw new Error('WhatsApp access token could not be decrypted');
+    if (!apiKey) {
+      throw new Error(`The access token for ${integration.displayName ?? 'this number'} could not be read. Reconnect it in Settings.`);
+    }
     const apiVer   = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
     const filename = file.originalname ?? `header.${file.mimetype.split('/')[1]}`;
 

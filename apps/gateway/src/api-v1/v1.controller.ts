@@ -118,7 +118,8 @@ export class V1Controller {
 
     // Load integration
     const integration = await this.prisma.whatsAppIntegration.findFirst({
-      where: { businessId: scope.businessId, isActive: true },
+      where:   { businessId: scope.businessId, isActive: true },
+      orderBy: { isDefault: 'desc' },
     });
     if (!integration?.accessToken) return { error: 'No active WhatsApp integration configured' };
 

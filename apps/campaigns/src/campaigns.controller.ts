@@ -156,7 +156,10 @@ export class CampaignsController {
   uploadMedia(
     @CurrentTenant() scope: TenantScope,
     @UploadedFile() file: any,
+    // Names the WhatsApp number to upload against: a media id only works for the number
+    // it was uploaded to, and the template decides which number sends.
+    @Body('templateId') templateId?: string,
   ) {
-    return this.svc.uploadCampaignMedia(scope, file);
+    return this.svc.uploadCampaignMedia(scope, file, templateId);
   }
 }
