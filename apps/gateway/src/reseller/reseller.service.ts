@@ -2,7 +2,7 @@ import {
   Injectable, NotFoundException, ForbiddenException, BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope, MessageRatesService, WalletService, encryptSecret, computeBulkPrices, type BulkPriceChange,} from '@lib/common';
+import { TenantScope, MessageRatesService, WalletService, encryptSecret, computeBulkPrices, type BulkPriceChange, attachDomainToHosting,} from '@lib/common';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 
@@ -202,11 +202,22 @@ export class ResellerService {
       update: payload,
     });
 
-    return {
-      domainStatus: payload.domain
-        ? { status: 'pending', message: 'Domain saved. Add the CNAME record pointing to cname.vercel-dns.com, then click Check now.' }
-        : null,
-    };
+    // Registering the domain with the host is the half a CNAME cannot do: Vercel routes
+    // by host and answers an unknown one with its own 404, so DNS alone leaves the
+    // reseller pointing at a page that will never load. Never allowed to fail the save —
+    // the domain is recorded either way, and the result says what is still outstanding.
+    let domainStatus: { status: string; message: string } | null = null;
+    if (payload.domain) {
+      const attached = await attachDomainToHosting(payload.domain);
+      domainStatus = {
+        status:  attached.status === 'added' ? 'pending' : attached.status,
+        message: attached.status === 'added'
+          ? `${attached.message} Then click Check now.`
+          : attached.message,
+      };
+    }
+
+    return { domainStatus };
   }
 
   async checkDomainStatus(scope: TenantScope) {

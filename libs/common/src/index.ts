@@ -38,3 +38,4 @@ export * from './mail/mail.service';
 export * from './mail/mail.module';
 export * from './validation';
 export * from './rates/bulk-price';
+export * from './hosting/vercel-domains';
