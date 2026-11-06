@@ -858,6 +858,10 @@ export class CampaignsService {
       haltErrorCode: campaign.haltErrorCode,
       skippedCount:  campaign.skippedCount,
       failedCount:   campaign.failedCount,
+      // So the screen can tell a campaign that sent nothing from one that mostly worked
+      // and hit a bad error at the end. Both stop, but they do not mean the same thing.
+      sentCount:     campaign.sentCount,
+      totalCount:    campaign.totalCount,
       reasons: grouped
         .map((g, i) => ({
           errorCode: g.errorCode,
