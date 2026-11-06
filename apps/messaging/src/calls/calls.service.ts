@@ -185,15 +185,48 @@ export class CallsService {
     return { ok: true };
   }
 
+  /**
+   * Ends a call on both sides.
+   *
+   * Meta's terminate used to be fire-and-forget: a refusal was logged and then ignored,
+   * so our side went quiet and showed the call as over while the customer's phone was
+   * still connected. The agent had no way to know, and the customer was left talking to
+   * nobody — the worst version of this failing.
+   *
+   * It still ends locally when Meta refuses, because the agent has already gone and
+   * pretending otherwise helps no one. But the refusal is now reported, and the call is
+   * recorded with the reason rather than as a clean completion.
+   */
   async hangup(scope: TenantScope, callId: string) {
     const call = await this.find(scope, callId);
     const { phoneNumberId, accessToken } = await this.credentials(call.whatsappIntegrationId);
-    await this.meta.terminate(phoneNumberId, accessToken, call.waCallId).catch(err =>
-      this.logger.warn(`Meta terminate failed for ${call.waCallId}: ${err?.message ?? err}`));
+
+    this.logger.log(`[hangup] call=${call.id} waCallId=${call.waCallId} status=${call.status} — terminating at Meta`);
+
+    let metaError: string | null = null;
+    try {
+      await this.meta.terminate(phoneNumberId, accessToken, call.waCallId);
+      this.logger.log(`[hangup] call=${call.id} Meta accepted the terminate`);
+    } catch (err) {
+      metaError = err instanceof MetaCallError ? err.message : ((err as Error)?.message ?? 'unknown error');
+      this.logger.error(`[hangup] call=${call.id} Meta REFUSED the terminate: ${metaError}`);
+    }
 
     const endedAt = new Date();
     const duration = call.answeredAt ? Math.max(0, Math.round((endedAt.getTime() - call.answeredAt.getTime()) / 1000)) : 0;
-    await this.transition(call.id, ['CONNECTING', 'IN_PROGRESS'], { status: 'COMPLETED', endedAt, durationSec: duration });
+    await this.transition(call.id, ['CONNECTING', 'IN_PROGRESS'], {
+      status: 'COMPLETED',
+      endedAt,
+      durationSec: duration,
+      ...(metaError ? { errorTitle: `Hang-up not confirmed by WhatsApp: ${metaError}`.slice(0, 250) } : {}),
+    });
+
+    if (metaError) {
+      throw new BadRequestException(
+        `The call ended here, but WhatsApp did not confirm it: ${metaError}. ` +
+        `The customer may still be connected — ask them to hang up.`,
+      );
+    }
     return { ok: true };
   }
 

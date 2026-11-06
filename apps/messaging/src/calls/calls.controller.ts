@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Put, Body, Param, Query, UseGuards, HttpCode, HttpStatus, UseInterceptors, UploadedFile, Logger,} from '@nestjs/common';
+  Controller, Get, Post, Put, Body, Param, Query, UseGuards, HttpCode, HttpStatus, UseInterceptors, UploadedFile, Logger, Req,} from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation, ApiConsumes } from '@nestjs/swagger';
 import { JwtAuthGuard, PlanFeatureGuard, RequiresPlanFeature, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission, requireFields,} from '@lib/common';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -68,13 +68,20 @@ export class CallsController {
     @Param('id') id: string,
     @UploadedFile() file: any,
     @Body() body: { durationSec?: string },
+    @Req() req: any,
   ) {
     // Logged at the edge as well as in the service: if multer never populated `file`,
     // the difference between "nothing was sent" and "the interceptor rejected it" shows
     // up here, before any of our own checks have run.
+    // The content type settles whether multer was ever given a multipart body to parse.
+    // Without it, "file is missing" could equally mean the browser sent nothing or that
+    // something upstream had already consumed the stream.
     this.logger.log(
       `[recording] POST /calls/${id}/recording reached the controller · ` +
-      `file=${file ? 'present' : 'MISSING'} bodyKeys=${Object.keys(body ?? {}).join(',') || 'none'}`,
+      `file=${file ? 'present' : 'MISSING'} ` +
+      `contentType="${req?.headers?.['content-type'] ?? '-'}" ` +
+      `contentLength=${req?.headers?.['content-length'] ?? '-'} ` +
+      `bodyKeys=${Object.keys(body ?? {}).join(',') || 'none'}`,
     );
     return this.svc.saveRecording(
       scope, id, file, body?.durationSec ? Number(body.durationSec) : undefined,
