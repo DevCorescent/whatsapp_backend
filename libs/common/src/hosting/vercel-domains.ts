@@ -22,10 +22,24 @@ export interface DomainAttachResult {
 
 const logger = new Logger('VercelDomains');
 
+/** Where a reseller's CNAME should point. One answer, wherever the app is served from. */
+export function cnameTarget(): string {
+  return process.env['CNAME_TARGET'] || 'cname.vercel-dns.com';
+}
+
 export async function attachDomainToHosting(domain: string): Promise<DomainAttachResult> {
+  const dnsHint = `Point a CNAME for ${domain} to ${cnameTarget()}.`;
+
+  // On our own servers there is no registry to add a domain to: the reverse proxy
+  // answers for whatever resolves to it and obtains the certificate on first request.
+  // DNS really is the whole job there, and saying anything more would send the reseller
+  // looking for a step that does not exist.
+  if ((process.env['HOSTING_PROVIDER'] ?? 'vercel').toLowerCase() === 'self') {
+    return { status: 'added', message: dnsHint };
+  }
+
   const token   = process.env['VERCEL_API_TOKEN'];
   const project = process.env['VERCEL_PROJECT_ID'];
-  const dnsHint = `Point a CNAME for ${domain} to cname.vercel-dns.com.`;
 
   if (!token || !project) {
     return {

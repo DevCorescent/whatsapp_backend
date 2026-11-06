@@ -2,7 +2,7 @@ import {
   Injectable, NotFoundException, ForbiddenException, BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope, MessageRatesService, WalletService, encryptSecret, computeBulkPrices, type BulkPriceChange, attachDomainToHosting,} from '@lib/common';
+import { TenantScope, MessageRatesService, WalletService, encryptSecret, computeBulkPrices, type BulkPriceChange, attachDomainToHosting, cnameTarget,} from '@lib/common';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 
@@ -231,7 +231,7 @@ export class ResellerService {
       domain:  config.domain,
       state:   'not_added',
       message: 'Point a CNAME record for this domain at the value shown, then click Check now.',
-      record:  { type: 'CNAME', name: config.domain, value: 'cname.vercel-dns.com' },
+      record:  { type: 'CNAME', name: config.domain, value: cnameTarget() },
     };
   }
 
