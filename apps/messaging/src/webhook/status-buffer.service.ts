@@ -180,10 +180,21 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
       perCampaign.set(r.campaignId, tally);
     }
     for (const [campaignId, tally] of perCampaign) {
-      const data: Record<string, { increment: number }> = {};
+      const data: Record<string, { increment: number } | { decrement: number }> = {};
       if (status === 'failed') {
         if (tally.failed)  data.failedCount  = { increment: tally.failed };
         if (tally.skipped) data.skippedCount = { increment: tally.skipped };
+
+        // A message WhatsApp accepted and later refused was counted as sent at the time,
+        // so it has to stop being counted as sent now. Leaving it caused two problems:
+        // the report read "2 sent, 2 failed" out of 2 recipients, which cannot both be
+        // true, and completion is decided by sent + failed + skipped reaching the total —
+        // so double-counting could finish a campaign while recipients were still pending.
+        //
+        // Every row here was matched by its WhatsApp message id, which only exists once a
+        // send has succeeded, so each one was counted and the decrement is sound.
+        const counted = tally.failed + tally.skipped;
+        if (counted) data.sentCount = { decrement: counted };
       } else {
         data[counter] = { increment: tally.failed + tally.skipped };
       }
