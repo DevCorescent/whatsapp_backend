@@ -4,6 +4,7 @@ import {
 import { ApiTags, ApiSecurity, ApiOperation } from '@nestjs/swagger';
 import {
   CurrentTenant, TenantScope, decryptSecret, MessageEventsService, buildSendComponents, toSpec,
+  normalizePhone,
 } from '@lib/common';
 import { PrismaService } from '@lib/prisma';
 import { ApiKeyGuard } from './api-key.guard';
@@ -51,8 +52,12 @@ export class V1Controller {
   @Post('contacts')
   @ApiOperation({ summary: 'Create or upsert a contact by phone' })
   async upsertContact(@CurrentTenant() scope: TenantScope, @Body() body: any) {
-    const { phone, name, email, company, source } = body;
-    if (!phone || !name) return { error: 'phone and name are required' };
+    const { phone: rawPhone, name, email, company, source } = body;
+    if (!rawPhone || !name) return { error: 'phone and name are required' };
+    // A customer's integration sends whatever it holds — "+91 98765 43210" as often as
+    // "919876543210". Both have to land on one contact, not two.
+    const phone = normalizePhone(rawPhone);
+    if (phone.length < 8) return { error: 'phone must include the country code, like 919876543210' };
     const existing = await this.prisma.contact.findUnique({
       where: { phone_businessId: { phone, businessId: scope.businessId } },
       select: { id: true },

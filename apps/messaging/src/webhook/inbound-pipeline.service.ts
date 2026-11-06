@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto';
 import {
   decryptSecret, MessageEventsService, HandoverService, LeadQualificationService, LlmService,
   NotificationsService, MANAGER_ROLES,
+  normalizePhone,
 } from '@lib/common';
 import { runFlowStep } from './chatbot/engine';
 import { toFlowDocument } from './chatbot/types';
@@ -401,13 +402,16 @@ export class InboundPipelineService {
     }
 
     const contactId = typeof body?.contactId === 'string' ? body.contactId.trim() : '';
-    const phone = typeof body?.phone === 'string' ? body.phone.trim() : '';
-    if (!contactId && !phone) {
+    const raw = typeof body?.phone === 'string' ? body.phone.trim() : '';
+    if (!contactId && !raw) {
       throw new BadRequestException('contactId or phone is required');
     }
-    if (phone && !/^\+?[0-9][0-9\s().-]{4,30}$/.test(phone)) {
+    if (raw && !/^\+?[0-9][0-9\s().-]{4,30}$/.test(raw)) {
       throw new BadRequestException('phone must be a valid phone number');
     }
+    // Whoever calls this webhook formats the number their own way, and the contact it has
+    // to find or create is keyed on bare digits.
+    const phone = normalizePhone(raw);
 
     let contact = contactId
       ? await this.prisma.contact.findFirst({

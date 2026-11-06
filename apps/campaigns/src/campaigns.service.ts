@@ -6,7 +6,9 @@ import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { PrismaService } from '@lib/prisma';
 import {
-  TenantScope, MessageRatesService, RedisService, classifySendError, requireFields,} from '@lib/common';
+  TenantScope, MessageRatesService, RedisService, classifySendError, requireFields,
+  normalizePhone,
+} from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
 import { CampaignProgressService } from './campaign-progress.service';
 
@@ -218,10 +220,15 @@ export class CampaignsService {
     const total = rawNumbers.length;
 
     // ── 2. Deduplicate ──────────────────────────────────────────────────────
+    // Normalised first, because the same person can reach here spelled two ways — a
+    // pasted "+91 98765 43210" and the contact's stored "919876543210". Comparing the raw
+    // strings let both through, and the customer received the campaign twice.
     const seen = new Set<string>();
     const uniqueNumbers: string[] = [];
     let duplicates = 0;
-    for (const num of rawNumbers) {
+    for (const raw of rawNumbers) {
+      const num = normalizePhone(raw);
+      if (!num) continue;
       if (seen.has(num)) { duplicates++; } else { seen.add(num); uniqueNumbers.push(num); }
     }
 

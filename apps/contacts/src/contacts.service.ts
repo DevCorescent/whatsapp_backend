@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException, ConflictException, BadRequestException, Optional } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope } from '@lib/common';
+import { TenantScope, normalizePhone } from '@lib/common';
 import { InboundPipelineService } from '../../../apps/messaging/src/webhook/inbound-pipeline.service';
 
 @Injectable()
@@ -24,9 +24,13 @@ export class ContactsService {
 
     const where: any = { tenantId: scope.tenantId, businessId: scope.businessId };
     if (query.search) {
+      // Phones are stored as bare digits, so a search typed as "+91 98765" has to be
+      // reduced to digits or it matches nothing. Falls back to the raw term when there
+      // are none, which is the case for a name or an email.
+      const digits = normalizePhone(query.search);
       where.OR = [
         { name:  { contains: query.search, mode: 'insensitive' } },
-        { phone: { contains: query.search } },
+        { phone: { contains: digits || query.search } },
         { email: { contains: query.search, mode: 'insensitive' } },
       ];
     }
@@ -66,12 +70,13 @@ export class ContactsService {
     designation?: string; location?: string; source?: string;
     notes?: string; customFields?: Record<string, unknown>; tags?: string[];
   }) {
+    const phone = this.cleanPhone(data.phone);
     const existing = await this.prisma.contact.findUnique({
-      where: { phone_businessId: { phone: data.phone, businessId: scope.businessId } },
+      where: { phone_businessId: { phone, businessId: scope.businessId } },
     });
     if (existing) throw new ConflictException('A contact with this phone number already exists');
 
-    const { tags, ...rest } = data;
+    const { tags, ...rest } = { ...data, phone };
     const contact = await this.prisma.contact.create({
       data: {
         name:         rest.name,
@@ -92,6 +97,21 @@ export class ContactsService {
     if (tags?.length) await this.syncTags(scope, contact.id, tags);
     this.dispatchContactCreated(scope, contact);
     return this.findOne(scope, contact.id);
+  }
+
+  /**
+   * Phones are stored as bare digits, so the dashboard's `+91…` and a webhook's `91…` are
+   * the same contact rather than two. Rejecting here beats silently storing something
+   * undialable, since a campaign would then fail per-message with Meta's own error.
+   */
+  private cleanPhone(raw: string): string {
+    const phone = normalizePhone(raw);
+    if (phone.length < 8 || phone.length > 15) {
+      throw new BadRequestException(
+        'Enter a phone number with its country code, like 919876543210.',
+      );
+    }
+    return phone;
   }
 
   private dispatchContactCreated(
@@ -118,7 +138,9 @@ export class ContactsService {
   }) {
     await this.findOne(scope, id); // 404 guard
 
-    const { tags, ...rest } = data;
+    const { tags, ...rest } = data.phone === undefined
+      ? data
+      : { ...data, phone: this.cleanPhone(data.phone) };
     await this.prisma.contact.update({
       where: { id },
       data:  {
@@ -154,8 +176,9 @@ export class ContactsService {
   }>) {
     let created = 0, skipped = 0;
 
-    for (const item of contacts) {
+    for (const raw of contacts) {
       try {
+        const item = { ...raw, phone: this.cleanPhone(raw.phone) };
         const existing = await this.prisma.contact.findUnique({
           where: { phone_businessId: { phone: item.phone, businessId: scope.businessId } },
           select: { id: true },
@@ -241,9 +264,13 @@ export class ContactsService {
     let created = 0, skipped = 0;
 
     const mapped = rows.map(row => {
-      const phone = row['phone'] ?? row['Phone'] ?? row['mobile'] ?? row['Mobile'] ?? '';
+      const raw   = row['phone'] ?? row['Phone'] ?? row['mobile'] ?? row['Mobile'] ?? '';
       const name  = row['name']  ?? row['Name']  ?? '';
-      if (!name || !phone) return null;
+      // A spreadsheet writes a number however the person typed it — "+91 98765 43210",
+      // "091…", with a dash. Any of those must land on the same row as the contact the
+      // webhook already created, which means digits only.
+      const phone = normalizePhone(raw);
+      if (!name || phone.length < 8) return null;
 
       // Per-row tags column (comma-separated, e.g. "VIP,Hospital,Delhi")
       const rowTagsRaw = row['tags'] ?? row['Tags'] ?? row['tag'] ?? row['Tag'] ?? '';
@@ -296,7 +323,11 @@ export class ContactsService {
     opts: { mode?: 'skip' | 'update'; importId?: string; fileName?: string; sheetName?: string } = {},
   ) {
     const mode  = opts.mode === 'update' ? 'update' : 'skip';
-    const valid = contacts.filter(c => c.phone?.trim());
+    // Normalised before the existing-row lookup, so an imported "+91 98765 43210" matches
+    // the contact the webhook created as "919876543210" instead of inserting a second one.
+    const valid = contacts
+      .map(c => ({ ...c, phone: normalizePhone(c.phone) }))
+      .filter(c => c.phone.length >= 8);
 
     const existingRows = valid.length
       ? await this.prisma.contact.findMany({

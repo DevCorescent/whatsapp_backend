@@ -3,6 +3,7 @@ import { PrismaService } from '@lib/prisma';
 import { InboundPipelineService } from '../../../../apps/messaging/src/webhook/inbound-pipeline.service';
 import {
   TenantScope, LeadQualificationService, CRITERIA, DEFAULT_WEIGHTS, scoreLabelFor,
+  normalizePhone,
 } from '@lib/common';
 import {
   buildLeadWhere, leadOrderBy, leadsToCsv,
@@ -447,17 +448,19 @@ export class LeadsService {
         const stageId = item.stageId ?? defaultStage?.id;
         if (!stageId) throw new Error('No stage specified and no default stage configured');
 
+        const phone = normalizePhone(item.phone);
+        if (phone.length < 8) throw new Error('phone must include the country code, like 919876543210');
         const existingContact = await this.prisma.contact.findUnique({
-          where: { phone_businessId: { phone: item.phone, businessId: scope.businessId } },
+          where: { phone_businessId: { phone, businessId: scope.businessId } },
           select: { id: true },
         });
         const contact = await this.prisma.contact.upsert({
-          where:  { phone_businessId: { phone: item.phone, businessId: scope.businessId } },
+          where:  { phone_businessId: { phone, businessId: scope.businessId } },
           create: {
             tenantId:   scope.tenantId,
             businessId: scope.businessId,
-            name:       item.phone,
-            phone:      item.phone,
+            name:       phone,
+            phone,
           },
           update: {},
         });
