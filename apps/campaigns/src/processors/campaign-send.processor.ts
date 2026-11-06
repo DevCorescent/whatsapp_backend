@@ -4,7 +4,7 @@ import { Job } from 'bull';
 import { PrismaService } from '@lib/prisma';
 import {
   WebhookDispatchService, NotificationsService, MessageRatesService, WalletService, MANAGER_ROLES, decryptSecret,
-  buildSendComponents, toSpec, RedisService, SuppressionService,
+  buildSendComponents, toSpec, RedisService, SuppressionService, CampaignHaltService,
   classifySendError, describeSendError, parseSendError, type ParsedSendError,
 } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
@@ -43,6 +43,7 @@ export class CampaignSendProcessor {
     private readonly wallet:    WalletService,
     private readonly suppression: SuppressionService,
     private readonly redis:     RedisService,
+    private readonly halt:      CampaignHaltService,
   ) {}
 
   private async getCampaignData(campaignId: string): Promise<CampaignData | null> {
@@ -378,64 +379,23 @@ export class CampaignSendProcessor {
 
   // ── Halting ────────────────────────────────────────────────────────────────
 
-  private haltKey(campaignId: string): string {
-    return `campaign:halted:${campaignId}`;
-  }
-
   /**
-   * Stop the campaign where it stands. Pending recipients stay pending, so resuming it
-   * after fixing the cause picks up exactly where it left off rather than re-sending.
+   * Stop the campaign where it stands, and drop this worker's cached copy of the row so
+   * it does not keep sending from a stale status.
    *
-   * The flag goes in Redis as well as the database because the campaign row is cached per
-   * worker for 30 minutes, and waiting out that cache would mean thousands more doomed
-   * sends. Every job checks the flag before claiming.
+   * The halt itself is shared with the status webhook, which is where most of these
+   * errors actually arrive — Meta accepts the message here and reports the failure there.
    */
   private async haltCampaign(
     campaignId: string, tenantId: string, businessId: string,
     reason: string, errorCode: number | null,
   ): Promise<void> {
-    const halted = await this.prisma.campaign.updateMany({
-      where: { id: campaignId, status: { in: ['RUNNING', 'PROCESSING'] } },
-      data:  {
-        status: 'PAUSED', haltedAt: new Date(), haltReason: reason.slice(0, 500),
-        haltErrorCode: errorCode, lastError: reason.slice(0, 500),
-      },
-    });
-
-    // Set the flag whether or not we were the one to pause it, so a worker holding a
-    // stale cached row still stops.
-    await this.redis.client.set(this.haltKey(campaignId), reason.slice(0, 500), 'EX', 24 * 60 * 60)
-      .catch((err) => this.logger.error(`Could not flag halt for ${campaignId}: ${err.message}`));
+    await this.halt.halt({ campaignId, tenantId, businessId, reason, errorCode });
     this.campaignCache.delete(campaignId);
-
-    if (halted.count === 0) return; // already paused — only notify once
-
-    const remaining = await this.prisma.campaignContact.count({
-      where: { campaignId, status: 'PENDING' },
-    });
-
-    this.logger.error(`Campaign ${campaignId} halted (code ${errorCode ?? 'none'}): ${reason}`);
-
-    void this.notifications.notify({
-      tenantId,
-      businessId,
-      recipients: { roles: MANAGER_ROLES },
-      type:  'SYSTEM',
-      title: 'Campaign paused by WhatsApp',
-      body:  `${reason} ${remaining.toLocaleString()} recipient${remaining === 1 ? '' : 's'} not sent. Fix the cause, then resume.`,
-      href:  `/campaigns/${campaignId}`,
-      data:  { campaignId, errorCode },
-    });
-    this.webhooks.dispatchEvent(tenantId, 'campaign.paused', { campaignId, reason, errorCode, remaining });
   }
 
-  private async isHalted(campaignId: string): Promise<boolean> {
-    try {
-      return (await this.redis.client.exists(this.haltKey(campaignId))) === 1;
-    } catch {
-      // Redis is unreachable. The cached campaign status is the fallback.
-      return false;
-    }
+  private isHalted(campaignId: string): Promise<boolean> {
+    return this.halt.isHalted(campaignId);
   }
 
   // Fix #2: single atomic conditional UPDATE eliminates:

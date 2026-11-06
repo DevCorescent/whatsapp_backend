@@ -1,7 +1,8 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
 import {
-  RealtimeService, SuppressionService, classifySendError, type RtStatusUpdate,
+  RealtimeService, SuppressionService, CampaignHaltService, classifySendError,
+  type RtStatusUpdate,
 } from '@lib/common';
 
 interface Buffered {
@@ -44,6 +45,7 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
     private readonly prisma:   PrismaService,
     private readonly realtime: RealtimeService,
     private readonly suppression: SuppressionService,
+    private readonly halt: CampaignHaltService,
   ) {}
 
   onModuleInit() {
@@ -145,9 +147,22 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
         data:  { status: 'READ', readAt: now },
       }));
     } else if (status === 'failed') {
+      // An error every remaining recipient would also hit stops the campaign. This has to
+      // happen here and not only where the send is made: Meta accepts the message, hands
+      // back an id, and reports a billing or account failure on this webhook seconds
+      // later. Without it, a campaign pushed every recipient to Meta, had each accepted,
+      // then failed all of them one webhook at a time — nobody told, nothing paused, and
+      // the campaign reported "completed" having sent nothing.
+      // Every group shares one tenant — they are keyed by it.
+      const groupTenantId = group[0].tenantId;
+      const aborts = new Map<string, { reason: string; code: number | null }>();
+
       for (const row of transitioning) {
         const b = byId.get(row.waMessageId ?? '');
         const rule = classifySendError(b?.errorCode);
+        if (rule.action === 'ABORT' && !aborts.has(row.campaignId)) {
+          aborts.set(row.campaignId, { reason: rule.reason, code: b?.errorCode ?? null });
+        }
         ops.push(this.prisma.campaignContact.update({
           where: { id: row.id },
           data:  {
@@ -162,6 +177,11 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
               : {}),
           },
         }));
+      }
+
+      for (const [campaignId, a] of aborts) {
+        void this.halt.halt({ campaignId, tenantId: groupTenantId, reason: a.reason, errorCode: a.code })
+          .catch((err) => this.logger.error(`Could not halt ${campaignId}: ${err.message}`));
       }
     }
 

@@ -6,7 +6,7 @@ import { BullModule, type BullRootModuleOptions } from '@nestjs/bull';
 import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from '@lib/prisma';
 import {
-  RealtimeModule, StorageModule, NotificationsCoreModule, MessageRatesModule,
+  RealtimeModule, StorageModule, NotificationsCoreModule, MessageRatesModule, CampaignHaltModule,
   WalletModule as WalletCoreModule, PermissionsModule, SuppressionModule, LlmModule, HandoverModule,
   MailModule, sharedBullClients,
 } from '@lib/common';
@@ -116,6 +116,7 @@ import { CallsModule }        from './calls/calls.module';
     WalletCoreModule,
     PermissionsModule,
     SuppressionModule,
+    CampaignHaltModule,
     LlmModule,
     HandoverModule,
     MailModule,
