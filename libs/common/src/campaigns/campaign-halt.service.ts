@@ -56,10 +56,30 @@ export class CampaignHaltService {
   }): Promise<void> {
     const { campaignId, tenantId, reason, errorCode } = args;
 
+    const [remaining, current] = await Promise.all([
+      this.prisma.campaignContact.count({ where: { campaignId, status: 'PENDING' } }),
+      this.prisma.campaign.findUnique({
+        where:  { id: campaignId },
+        select: { sentCount: true, businessId: true, status: true },
+      }),
+    ]);
+
+    // What the campaign becomes depends on what is left and what got through.
+    //
+    // COMPLETED is included deliberately. A campaign is marked complete the moment Meta
+    // accepts the last message, which is seconds before it reports whether it will send
+    // any of them — so a billing failure consistently arrived at a campaign that had
+    // already declared itself finished, and the halt matched nothing. That completion is
+    // provisional, and this is where it gets corrected.
+    const nextStatus =
+      remaining > 0                        ? 'PAUSED'   // there is something to resume
+      : (current?.sentCount ?? 0) === 0    ? 'FAILED'   // nothing got through at all
+      : null;                                           // most of it did — leave it complete
+
     const halted = await this.prisma.campaign.updateMany({
-      where: { id: campaignId, status: { in: ['RUNNING', 'PROCESSING'] } },
+      where: { id: campaignId, status: { in: ['RUNNING', 'PROCESSING', 'COMPLETED'] } },
       data: {
-        status: 'PAUSED',
+        ...(nextStatus ? { status: nextStatus } : {}),
         haltedAt: new Date(),
         haltReason: reason.slice(0, 500),
         haltErrorCode: errorCode,
@@ -73,30 +93,27 @@ export class CampaignHaltService {
       .set(CampaignHaltService.key(campaignId), reason.slice(0, 500), 'EX', 24 * 60 * 60)
       .catch((err) => this.logger.error(`Could not flag halt for ${campaignId}: ${err.message}`));
 
-    if (halted.count === 0) return; // already paused — only notify once
+    if (halted.count === 0) return; // already halted — only notify once
 
-    const campaign = await this.prisma.campaign
-      .findUnique({ where: { id: campaignId }, select: { businessId: true, name: true } })
-      .catch(() => null);
-    const businessId = args.businessId ?? campaign?.businessId;
+    const businessId = args.businessId ?? current?.businessId;
     if (!businessId) {
       this.logger.error(`Campaign ${campaignId} halted but its business is unknown — nobody notified`);
       return;
     }
 
-    const remaining = await this.prisma.campaignContact.count({
-      where: { campaignId, status: 'PENDING' },
-    });
-
     this.logger.error(`Campaign ${campaignId} halted (code ${errorCode ?? 'none'}): ${reason}`);
 
+    // Telling someone to "resume" a campaign with nobody left to send to would send them
+    // looking for a button that cannot help them.
     void this.notifications.notify({
       tenantId,
       businessId,
       recipients: { roles: MANAGER_ROLES },
       type: 'SYSTEM',
-      title: 'Campaign paused by WhatsApp',
-      body: `${reason} ${remaining.toLocaleString()} recipient${remaining === 1 ? '' : 's'} not sent. Fix the cause, then resume.`,
+      title: remaining > 0 ? 'Campaign paused by WhatsApp' : 'Campaign stopped by WhatsApp',
+      body: remaining > 0
+        ? `${reason} ${remaining.toLocaleString()} recipient${remaining === 1 ? '' : 's'} not sent. Fix the cause, then resume.`
+        : `${reason} Nothing was sent. Fix the cause, then send it again.`,
       href: `/campaigns/${campaignId}`,
       data: { campaignId, errorCode },
     });

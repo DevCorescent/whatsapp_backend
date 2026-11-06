@@ -136,6 +136,13 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
     const byId = new Map(group.map(g => [g.waMessageId, g]));
     const ops: Promise<unknown>[] = [];
 
+    // Campaigns to stop, decided below and acted on once the counters have been written:
+    // the halt reads sentCount to tell "nothing got through" from "most of it did", and
+    // this same flush is what decrements it.
+    const aborts = new Map<string, { reason: string; code: number | null }>();
+    // Every group shares one tenant — they are keyed by it.
+    const groupTenantId = group[0].tenantId;
+
     if (status === 'delivered') {
       ops.push(this.prisma.campaignContact.updateMany({
         where: { id: { in: transitioning.map(r => r.id) } },
@@ -153,10 +160,6 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
       // later. Without it, a campaign pushed every recipient to Meta, had each accepted,
       // then failed all of them one webhook at a time — nobody told, nothing paused, and
       // the campaign reported "completed" having sent nothing.
-      // Every group shares one tenant — they are keyed by it.
-      const groupTenantId = group[0].tenantId;
-      const aborts = new Map<string, { reason: string; code: number | null }>();
-
       for (const row of transitioning) {
         const b = byId.get(row.waMessageId ?? '');
         const rule = classifySendError(b?.errorCode);
@@ -177,11 +180,6 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
               : {}),
           },
         }));
-      }
-
-      for (const [campaignId, a] of aborts) {
-        void this.halt.halt({ campaignId, tenantId: groupTenantId, reason: a.reason, errorCode: a.code })
-          .catch((err) => this.logger.error(`Could not halt ${campaignId}: ${err.message}`));
       }
     }
 
@@ -224,6 +222,12 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
 
     const results = await Promise.allSettled(ops);
     for (const r of results) if (r.status === 'rejected') this.logger.error(`campaign flush (${status}): ${r.reason?.message ?? r.reason}`);
+
+    for (const [campaignId, a] of aborts) {
+      await this.halt
+        .halt({ campaignId, tenantId: groupTenantId, reason: a.reason, errorCode: a.code })
+        .catch((err) => this.logger.error(`Could not halt ${campaignId}: ${err.message}`));
+    }
   }
 
   /**
