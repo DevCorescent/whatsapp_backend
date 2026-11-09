@@ -12,6 +12,13 @@ import { CampaignProgressService } from '../campaign-progress.service';
 
 const WA_API_VERSION = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
 
+/**
+ * How long to let WhatsApp's delivery outcomes settle before announcing how a campaign
+ * went. Status webhooks for a message Meta has accepted arrive within a second or two;
+ * this leaves room for a slow one without making anyone wait to hear.
+ */
+const COMPLETION_SETTLE_MS = 20_000;
+
 // Shape cached per campaign — only immutable fields (template, integration credentials)
 interface CampaignData {
   id:                   string;
@@ -280,7 +287,10 @@ export class CampaignSendProcessor {
 
     this.logger.warn(
       `Meta rejected campaign=${campaignId} recipient=${recipientId} ` +
-      `code=${parsed.code ?? 'none'} http=${parsed.httpStatus} action=${rule.action}: ${parsed.message ?? ''}`,
+      `code=${parsed.code ?? 'none'} http=${parsed.httpStatus} action=${rule.action} ` +
+      // Meta support asks for this reference, and an account-level rejection is exactly
+      // the kind that ends up with them rather than being fixable here.
+      `fbtrace=${parsed.fbtraceId ?? 'none'}: ${parsed.message ?? ''}`,
     );
 
     if (rule.action === 'SUPPRESS') {
@@ -428,21 +438,18 @@ export class CampaignSendProcessor {
     this.campaignCache.delete(campaignId);
 
     const c = rows[0];
-    void this.notifications.notify({
-      tenantId:   c.tenantId ?? tenantId,
-      businessId: c.businessId,
-      recipients: { roles: MANAGER_ROLES },
-      type:       'CAMPAIGN_COMPLETED',
-      title:      `Campaign "${c.name}" finished`,
-      body:       [
-        `${Number(c.sentCount).toLocaleString()} sent`,
-        `${Number(c.failedCount).toLocaleString()} failed`,
-        ...(Number(c.skippedCount) > 0 ? [`${Number(c.skippedCount).toLocaleString()} skipped`] : []),
-        `of ${Number(c.totalCount).toLocaleString()}`,
-      ].join(' · '),
-      href:       `/campaigns/${campaignId}`,
-      data:       { campaignId },
-    });
+
+    // The counts at this instant are provisional. "Sent" here means Meta accepted the
+    // message; whether it will actually send arrives on the status webhook a second or
+    // two later. Announcing immediately put "2 sent · 0 failed" directly above "stopped
+    // by WhatsApp — nothing was sent", from the same campaign, seconds apart.
+    //
+    // So the figures are re-read once the outcomes have had time to land, and nothing is
+    // announced at all if the campaign stopped being complete in the meantime — the halt
+    // sends its own notice, and two contradicting ones are worse than one.
+    setTimeout(() => {
+      void this.announceCompletion(campaignId, tenantId);
+    }, COMPLETION_SETTLE_MS).unref?.();
     this.webhooks.dispatchEvent(c.tenantId ?? tenantId, 'campaign.completed', {
       campaignId,
       sentCount:      Number(c.sentCount),
@@ -453,5 +460,40 @@ export class CampaignSendProcessor {
       completedAt:    c.completedAt?.toISOString(),
     });
     return true;
+  }
+
+  /**
+   * Tells the managers how a campaign finished, once the delivery outcomes have settled.
+   *
+   * Skipped entirely when the campaign is no longer COMPLETED, which is what a halt leaves
+   * behind: it has already explained itself, and following that with a cheerful summary
+   * built from counts that have since been corrected only confuses whoever reads both.
+   */
+  private async announceCompletion(campaignId: string, tenantId: string): Promise<void> {
+    const c = await this.prisma.campaign.findUnique({
+      where:  { id: campaignId },
+      select: {
+        tenantId: true, businessId: true, name: true, status: true,
+        sentCount: true, failedCount: true, skippedCount: true, totalCount: true,
+      },
+    }).catch(() => null);
+
+    if (!c || c.status !== 'COMPLETED') return;
+
+    void this.notifications.notify({
+      tenantId:   c.tenantId ?? tenantId,
+      businessId: c.businessId,
+      recipients: { roles: MANAGER_ROLES },
+      type:       'CAMPAIGN_COMPLETED',
+      title:      `Campaign "${c.name}" finished`,
+      body:       [
+        `${c.sentCount.toLocaleString()} sent`,
+        `${c.failedCount.toLocaleString()} failed`,
+        ...(c.skippedCount > 0 ? [`${c.skippedCount.toLocaleString()} skipped`] : []),
+        `of ${c.totalCount.toLocaleString()}`,
+      ].join(' · '),
+      href:       `/campaigns/${campaignId}`,
+      data:       { campaignId },
+    });
   }
 }

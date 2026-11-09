@@ -147,6 +147,8 @@ export interface ParsedSendError {
   /** Meta's own message, which is more specific than our reason and worth keeping. */
   message: string | null;
   details: string | null;
+  /** Meta's own reference for this exact rejection. Their support asks for it by name. */
+  fbtraceId: string | null;
   httpStatus: number;
 }
 
@@ -163,6 +165,7 @@ export function parseSendError(httpStatus: number, body: unknown): ParsedSendErr
     title: error.error_user_title ?? error.type ?? null,
     message: error.message ?? null,
     details: error.error_data?.details ?? error.error_user_msg ?? null,
+    fbtraceId: typeof error.fbtrace_id === 'string' ? error.fbtrace_id : null,
     httpStatus,
   };
 }
