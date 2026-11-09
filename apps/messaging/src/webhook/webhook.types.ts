@@ -81,7 +81,15 @@ export interface WAMessage {
   button?: { payload: string; text: string };
   reaction?: { message_id: string; emoji: string };
   context?: { from: string; id: string };
-  errors?: Array<{ code: number; title: string }>;
+  errors?: Array<{
+    code: number;
+    title: string;
+    /** Meta's own sentence. Usually the same as `title`, occasionally fuller. */
+    message?: string;
+    /** The most specific thing Meta says about the failure. */
+    error_data?: { details?: string };
+    href?: string;
+  }>;
 }
 
 export interface WAMedia {
@@ -109,5 +117,13 @@ export interface WAStatus {
   recipient_id: string;
   conversation?: { id: string; origin?: { type: string } };
   pricing?: { billable: boolean; pricing_model: string; category: string };
-  errors?: Array<{ code: number; title: string }>;
+  errors?: Array<{
+    code: number;
+    title: string;
+    /** Meta's own sentence. Usually the same as `title`, occasionally fuller. */
+    message?: string;
+    /** The most specific thing Meta says about the failure. */
+    error_data?: { details?: string };
+    href?: string;
+  }>;
 }

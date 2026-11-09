@@ -847,7 +847,7 @@ export class CampaignsService {
     const samples = await Promise.all(
       grouped.map((g) => this.prisma.campaignContact.findFirst({
         where:  { campaignId: id, status: 'FAILED', errorCode: g.errorCode },
-        select: { failedReason: true, errorTitle: true },
+        select: { failedReason: true, errorTitle: true, errorDetail: true },
       })),
     );
 
@@ -867,6 +867,9 @@ export class CampaignsService {
           errorCode: g.errorCode,
           title:     samples[i]?.errorTitle ?? null,
           reason:    samples[i]?.failedReason ?? 'No reason recorded.',
+          // WhatsApp's own sentence, kept apart from ours. Quoting it is what Meta
+          // support asks for, and paraphrasing it there helps nobody.
+          detail:    samples[i]?.errorDetail ?? null,
           count:     g._count._all,
           action:    classifySendError(g.errorCode).action,
         }))

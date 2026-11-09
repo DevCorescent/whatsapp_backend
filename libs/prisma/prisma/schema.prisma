@@ -937,6 +937,10 @@ model CampaignContact {
   errorCode    Int?
   /// Human-readable title matching the error code
   errorTitle   String?
+  /// WhatsApp's own explanation, verbatim, from statuses[].errors[].error_data.details.
+  /// Kept apart from `failedReason`, which is our wording: when an error has to be taken
+  /// to Meta support, what they said is the part that matters and ours is not evidence.
+  errorDetail  String?
   failedAt     DateTime?
   campaign     Campaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   contact      Contact?  @relation(fields: [contactId], references: [id])

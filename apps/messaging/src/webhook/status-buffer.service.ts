@@ -12,6 +12,7 @@ interface Buffered {
   rank:        number;
   errorCode?:  number;
   errorTitle?: string;
+  errorDetail?: string | null;
 }
 
 const STATUS_RANK: Record<string, number> = {
@@ -58,7 +59,7 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
   }
 
   buffer(tenantId: string, waMessageId: string, status: string, extras?: {
-    errorCode?: number; errorTitle?: string;
+    errorCode?: number; errorTitle?: string; errorDetail?: string | null;
   }) {
     const rank = STATUS_RANK[status] ?? -1;
     if (rank < 0) return;
@@ -172,8 +173,9 @@ export class StatusBufferService implements OnModuleInit, OnModuleDestroy {
             status: 'FAILED', failedAt: now,
             ...(b?.errorCode !== undefined
               ? {
-                  errorCode:  b.errorCode,
-                  errorTitle: b.errorTitle,
+                  errorCode:   b.errorCode,
+                  errorTitle:  b.errorTitle,
+                  errorDetail: b.errorDetail ?? null,
                   // Our own wording explains what to do about it; Meta's title alone does not.
                   failedReason: `${rule.reason}${b.errorCode ? ` (WhatsApp error ${b.errorCode})` : ''}`.slice(0, 500),
                 }

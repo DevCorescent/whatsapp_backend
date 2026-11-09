@@ -422,8 +422,16 @@ export class WebhookService {
   // ── Status processing — buffered, flushed in bulk every 5 s ─────────────
 
   private processStatus(tenantId: string, status: WAStatus): void {
-    const extras = status.status === 'failed' && status.errors?.length
-      ? { errorCode: status.errors[0].code, errorTitle: status.errors[0].title }
+    const err = status.errors?.[0];
+    // Meta's own words are kept alongside the code. They are what Meta support asks to
+    // see, and our wording — written to tell someone what to do — is not evidence of
+    // what WhatsApp actually said.
+    const extras = status.status === 'failed' && err
+      ? {
+          errorCode:   err.code,
+          errorTitle:  err.title,
+          errorDetail: err.error_data?.details ?? err.message ?? null,
+        }
       : undefined;
     this.statusBuffer.buffer(tenantId, status.id, status.status, extras);
   }
