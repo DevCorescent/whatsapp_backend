@@ -96,9 +96,15 @@ export class AdminService {
 
     const where: any = {};
     if (query.search) {
+      // An email is how the platform operator actually knows a customer — it is what
+      // they were given in a support message, and what they type here. Searching only
+      // the workspace name and its web address meant the one identifier anyone has at
+      // hand found nothing at all.
       where.OR = [
         { name: { contains: query.search, mode: 'insensitive' } },
         { slug: { contains: query.search, mode: 'insensitive' } },
+        { users: { some: { email: { contains: query.search, mode: 'insensitive' } } } },
+        { users: { some: { name:  { contains: query.search, mode: 'insensitive' } } } },
       ];
     }
     if (query.isActive !== undefined && query.isActive !== '') {
