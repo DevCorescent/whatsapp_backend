@@ -61,6 +61,39 @@ export class GatewayService {
     });
   }
 
+  /**
+   * Whether a certificate may be issued for this host.
+   *
+   * Asked by the reverse proxy, once, the first time a stranger's domain arrives. Serving
+   * the platform from one machine means any hostname on earth can be pointed at it, and a
+   * proxy that obtained a certificate for each would be an open invitation to exhaust the
+   * certificate authority's rate limit on our account — so it asks first, and only a
+   * domain a live white-label reseller has actually claimed is allowed.
+   *
+   * Deliberately plain: 200 for yes, 404 for no, no body worth parsing. That is the whole
+   * contract Caddy's `on_demand_tls.ask` expects, and anything cleverer would be a way to
+   * fail it.
+   */
+  async isDomainAllowed(host: string | null | undefined): Promise<boolean> {
+    const h = normalizeHost(host);
+    if (!h) return false;
+
+    // The platform's own hostnames are served by the same proxy and are not anyone's
+    // white-label domain, so they are allowed on their own terms.
+    const root = normalizeHost(
+      this.cfg.get<string>('PLATFORM_ROOT_DOMAIN') ??
+      this.cfg.get<string>('NEXT_PUBLIC_APP_DOMAIN') ??
+      (this.cfg.get<string>('NEXTAUTH_URL') ?? ''),
+    );
+    if (root && (h === root || h.endsWith(`.${root}`))) return true;
+
+    const config = await this.prisma.whiteLabelConfig.findFirst({
+      where:  { domain: h, ...LIVE_CONFIG },
+      select: { id: true },
+    });
+    return Boolean(config);
+  }
+
   async getBrandForHost(host: string | null | undefined) {
     if (!host) return null;
     // The same setting the frontend reads, under the same name. These used to be two

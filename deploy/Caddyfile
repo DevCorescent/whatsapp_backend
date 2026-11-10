@@ -1,0 +1,71 @@
+# One machine, any number of customers' own domains — what Vercel and Render do for you.
+#
+# Nothing here is magic. A reverse proxy that answers for whatever hostname arrives, gets
+# a certificate for it on first request, and hands it to the same app. The app is already
+# multi-tenant by Host: `GET /brand?host=…` resolves the white-label brand, so a reseller's
+# domain shows their brand without a second deployment.
+#
+# The one thing that cannot be left out is the `ask` below. A public IP will be sent every
+# hostname on earth sooner or later — scanners, stale DNS, people trying it on. A proxy
+# that fetched a certificate for each would burn Let's Encrypt's rate limit on our account
+# within a day and take every real domain down with it. So the proxy asks the backend
+# first, and only a domain a live white-label reseller has actually claimed is allowed.
+#
+# ── What a reseller does ──────────────────────────────────────────────────────
+#   1. Saves their domain in Branding (this is what makes `ask` say yes)
+#   2. Points DNS at this machine:
+#        A     crm.acme.com  ->  <this server's IPv4>
+#      or, if they prefer a CNAME and their DNS host allows it at that level:
+#        CNAME crm.acme.com  ->  app.yourplatform.com
+#   3. Opens https://crm.acme.com — the certificate is issued on that first request
+#
+# ── What the platform sets ────────────────────────────────────────────────────
+#   HOSTING_PROVIDER=self        (so the app stops telling people to add the domain
+#                                 to Vercel, which does not apply here)
+#   CNAME_TARGET=app.yourplatform.com
+#   PLATFORM_ROOT_DOMAIN=yourplatform.com
+#
+# Run:  caddy run --config /etc/caddy/Caddyfile
+# Caddy keeps certificates in its data directory — give it a persistent volume, or it
+# re-issues everything on each restart and runs into the rate limit anyway.
+
+{
+	email admin@yourplatform.com
+
+	on_demand_tls {
+		# Caddy calls this before issuing a certificate for a hostname it has not seen.
+		# 200 = go ahead, anything else = refuse. It appends ?domain=<host> itself.
+		ask http://127.0.0.1:4000/hosting/domain-allowed
+
+		# A burst of unknown hostnames is what an attack looks like; this caps the damage
+		# even if `ask` is somehow wrong.
+		interval 2m
+		burst 5
+	}
+}
+
+# ── The platform's own hostnames ──────────────────────────────────────────────
+# Named explicitly so they never depend on `ask`, and so a backend that is down does not
+# take the platform's own login page with it.
+yourplatform.com, *.yourplatform.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:3000
+}
+
+# ── Everyone else's domains ───────────────────────────────────────────────────
+# No hostname list: the empty matcher takes whatever arrives, and `ask` decides whether it
+# is served. Same app, same port — the Host header is what makes it theirs.
+https:// {
+	tls {
+		on_demand
+	}
+
+	encode zstd gzip
+
+	# The app reads the brand from this, and NextAuth builds callback URLs from it, so a
+	# reseller signing in on their own domain stays on their own domain.
+	reverse_proxy 127.0.0.1:3000 {
+		header_up X-Forwarded-Host {host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}
