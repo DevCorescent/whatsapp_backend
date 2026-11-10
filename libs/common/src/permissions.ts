@@ -80,14 +80,12 @@ const ROLE_DEFAULTS: Record<string, readonly Permission[]> = {
 };
 
 /**
- * What an admin of the platform account starts with: enough to look, nothing that
- * changes anyone's account.
+ * How much of *running the platform* each role starts with on the platform account.
  *
- * An ADMIN of a *client* account is its second-in-command and defaults to everything, so
- * the role alone cannot decide this — the same role means something far larger here. New
- * staff therefore begin able to see the platform and do nothing to it, and each power is
- * handed over deliberately. The alternative, inheriting the client default, would make
- * every new admin as powerful as the Super Admin the moment they were created.
+ * Only the `platform.*` half. An ADMIN of a client account is its second-in-command and
+ * defaults to everything, and inheriting that here would make every new admin the equal
+ * of the Super Admin the moment they were created — so these are granted deliberately
+ * instead, and a role not listed starts with none of them.
  */
 const PLATFORM_ROLE_DEFAULTS: Record<string, readonly Permission[]> = {
   ADMIN: ['platform.tenants.view', 'platform.revenue.view', 'platform.audit.view'],
@@ -96,11 +94,24 @@ const PLATFORM_ROLE_DEFAULTS: Record<string, readonly Permission[]> = {
   AGENT: [],
 };
 
+/**
+ * What a role may do by default, for the kind of account they are on.
+ *
+ * The platform account is also an ordinary workspace — it has its own inbox, contacts and
+ * campaigns, and most of its people work in them. So its roles keep every workspace
+ * permission their role normally carries, and differ only in the platform-running half.
+ *
+ * Returning the platform list *instead* of the workspace one was a bad bug: the platform
+ * account's owner resolved to zero permissions and lost every screen but Settings, as did
+ * its agents. Nothing about running the platform should take away the workspace.
+ */
 export function roleDefaults(role: string, accountType?: string | null): readonly Permission[] {
-  if (accountType === 'PLATFORM' && role !== 'SUPER_ADMIN') {
-    return PLATFORM_ROLE_DEFAULTS[role] ?? [];
-  }
-  return ROLE_DEFAULTS[role] ?? [];
+  const base = ROLE_DEFAULTS[role] ?? [];
+  if (accountType !== 'PLATFORM' || role === 'SUPER_ADMIN') return base;
+  return [
+    ...base.filter((p) => !p.startsWith('platform.')),
+    ...(PLATFORM_ROLE_DEFAULTS[role] ?? []),
+  ];
 }
 
 /**
