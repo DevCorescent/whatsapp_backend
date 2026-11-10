@@ -869,8 +869,8 @@ export class AdminService {
    * user is actually seeing when they report that something is missing.
    *
    * That second mode writes under someone else's name, so it is deliberately narrow: a
-   * Super Admin is never impersonable, nor is the platform account, and both the start
-   * and the end are recorded against the admin who did it.
+   * Super Admin is never impersonable, and both the start and the end are recorded
+   * against the admin who did it.
    */
   async startViewAs(scope: TenantScope, tenantId: string, userId?: string) {
     await this.guard(scope, 'platform.impersonate');
@@ -880,8 +880,16 @@ export class AdminService {
       select: { id: true, slug: true, name: true, isActive: true, accountType: true, resellerType: true, parentId: true },
     });
     if (!tenant) throw new NotFoundException('Account not found');
-    if (tenant.accountType === 'PLATFORM') {
-      throw new BadRequestException("That's the platform account — use the admin panel");
+    // "View the platform account as itself" means nothing — the admin panel is that, and
+    // the admin is already in it. Signing in as one of the people who work there is a
+    // different thing entirely, and necessary: the platform account doubles as an
+    // ordinary workspace, with its own inbox and contacts, and refusing both left no way
+    // in at all. A Super Admin signed in as themselves is sent to the admin panel, so
+    // that was not a way in either.
+    if (tenant.accountType === 'PLATFORM' && !userId) {
+      throw new BadRequestException(
+        "That's the platform account — open the admin panel, or sign in as one of its people.",
+      );
     }
     if (!tenant.isActive) {
       throw new BadRequestException('This account is suspended. Activate it first to view it.');
