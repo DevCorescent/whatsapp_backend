@@ -22,6 +22,7 @@ import {
   hasLimitedTimeOffer,
   isAuthentication,
   isCarousel,
+  isOtpButton,
   namedParams,
   paramCount,
   positionalCount,
@@ -309,7 +310,10 @@ export function buildSendComponents(spec: TemplateSpec, ctx: SendContext = {}): 
   if (isAuthentication(spec)) {
     const code = str(vars['1']) ?? str(vars.code) ?? '';
     components.push({ type: 'body', parameters: [{ type: 'text', text: code }] });
-    const otp = (spec.buttons ?? []).find((b) => b.type === 'OTP');
+    // Matched by shape, not by type alone: Meta returns this button typed URL, and
+    // looking only for 'OTP' meant every authentication template imported from Meta went
+    // out with no value for its button and was refused.
+    const otp = (spec.buttons ?? []).find(isOtpButton);
     if (otp && otp.otpType !== 'ZERO_TAP') {
       components.push({
         type: 'button',
@@ -350,7 +354,9 @@ export function buildSendComponents(spec: TemplateSpec, ctx: SendContext = {}): 
 
   // ── Buttons that take a value at send time ──
   (spec.buttons ?? []).forEach((b, index) => {
-    if (b.type === 'URL' && b.url && /\{\{.+?\}\}/.test(b.url)) {
+    // An OTP button is never filled in here — authentication templates return above, and
+    // outside them this button has no meaning.
+    if (b.type === 'URL' && b.url && /\{\{.+?\}\}/.test(b.url) && !isOtpButton(b)) {
       const value = vars[`button_${index + 1}`] ?? vars[`url_${index + 1}`] ?? '';
       components.push({
         type: 'button', sub_type: 'url', index,

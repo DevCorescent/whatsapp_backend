@@ -185,6 +185,30 @@ export function toSpec(row: Record<string, any>): TemplateSpec {
   };
 }
 
+/**
+ * An authentication template's copy-code button.
+ *
+ * Built here it is typed `OTP`. Imported from Meta the same button comes back typed
+ * `URL`, pointing at whatsapp.com/otp/code — Meta's own representation, not a link anyone
+ * fills in. Reading only the type meant an imported authentication template had no OTP
+ * button as far as the payload builder was concerned, so it sent no value for it and
+ * WhatsApp refused the message: "Button at index 0 of type Url requires a parameter".
+ */
+export function isOtpButton(b: TemplateButtonSpec): boolean {
+  return b.type === 'OTP' || (b.type === 'URL' && /whatsapp\.com\/otp\//i.test(b.url ?? ''));
+}
+
+/**
+ * Positions, among ALL of the template's buttons, of the URL buttons whose link carries a
+ * variable — which is what Meta's `index` refers to. OTP buttons are excluded: their value
+ * is the body's code, not something to ask for.
+ */
+export function dynamicUrlButtonIndexes(spec: TemplateSpec): number[] {
+  return (spec.buttons ?? []).flatMap((b, index) =>
+    b.type === 'URL' && !isOtpButton(b) && /\{\{.+?\}\}/.test(b.url ?? '') ? [index] : [],
+  );
+}
+
 export function isCarousel(spec: TemplateSpec): boolean {
   return spec.templateType === 'CAROUSEL' || Boolean(spec.cards?.length);
 }

@@ -7,7 +7,8 @@ import { Queue } from 'bull';
 import { PrismaService } from '@lib/prisma';
 import {
   TenantScope, MessageRatesService, RedisService, classifySendError, requireFields,
-  normalizePhone, decryptSecret,
+  normalizePhone, decryptSecret, toSpec, missingSendValues, describeMissing,
+  dynamicUrlButtonIndexes,
 } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
 import { CampaignProgressService } from './campaign-progress.service';
@@ -169,7 +170,6 @@ export class CampaignsService {
 
     const template = await this.prisma.messageTemplate.findFirst({
       where: { id: templateId, tenantId: scope.tenantId, businessId: scope.businessId },
-      select: { status: true, category: true, wabaId: true },
     });
     if (!template || template.status !== 'APPROVED') {
       throw new BadRequestException('Choose an approved WhatsApp template');
@@ -178,6 +178,8 @@ export class CampaignsService {
       throw new BadRequestException('This template does not belong to the selected WhatsApp number');
     }
     const whatsappIntegrationId = integration.id;
+
+    const spec = toSpec(template);
 
     // ── 1. Gather raw phone numbers ─────────────────────────────────────────
     let rawNumbers: string[] = [];
@@ -274,8 +276,28 @@ export class CampaignsService {
     const excludedCount = excluded.length;
     const matched       = validNumbers.length;
 
+    /**
+     * Refuses a send the template cannot complete, naming the field rather than letting
+     * Meta answer with "Button at index 0 of type Url requires a parameter" once per
+     * recipient. Takes the actual recipients, because a value supplied per-person counts
+     * as supplied — a campaign filling each name individually has no default and is
+     * still complete.
+     */
+    const assertComplete = (phones: string[]) => {
+      const missing = missingSendValues(spec, {
+        bodyVarMapping, urlButtonMapping, headerMediaId, headerMediaUrl,
+        couponCode: data.couponCode ?? data.metadata?.couponCode ?? null,
+        cardMedia:  Array.isArray(data.cardMedia) ? data.cardMedia
+                  : Array.isArray(data.metadata?.cardMedia) ? data.metadata.cardMedia : null,
+        recipientFields, phones,
+      });
+      if (missing.length) throw new BadRequestException(describeMissing(missing));
+    };
+
     // ── 5. Dry-run: return preview + cost estimate ──────────────────────────
     if (dryRun) {
+      // Raised at the review step, before anything is created.
+      assertComplete(validNumbers);
       const wallet = await this.prisma.wallet.findUnique({
         where: { tenantId: scope.tenantId },
         select: { balanceMinor: true },
@@ -322,6 +344,8 @@ export class CampaignsService {
       return !cid || !excludedContactIdSet.has(cid);
     });
 
+    assertComplete(finalNumbers);
+
     // ── 7. Create Campaign record ───────────────────────────────────────────
     const campaign = await this.prisma.campaign.create({
       data: {
@@ -364,6 +388,7 @@ export class CampaignsService {
       // real destination here; without one the link is passed through untouched and
       // clicks simply go unmeasured, which is better than rewriting it to nowhere.
       const trackingBase = (process.env['TRACKING_BASE_URL'] ?? '').replace(/\/+$/, '');
+      const urlSlots = dynamicUrlButtonIndexes(spec);
 
       const contactRows = finalNumbers.map(phone => {
         const contact = contactMap.get(phone);
@@ -372,17 +397,22 @@ export class CampaignsService {
         (bodyVarMapping as string[]).forEach((val, i) => {
           variables[`${i + 1}`] = fields[`slot_${i + 1}`] ?? val ?? '';
         });
-        (urlButtonMapping as string[]).forEach((val, i) => {
-          variables[`url_${i + 1}`] = fields[`url_${i + 1}`] ?? val ?? '';
+        // The form lists only the buttons that take a link, while Meta counts every
+        // button. A template whose dynamic link is not its first button had its value
+        // written to a slot the payload builder never reads.
+        urlSlots.forEach((buttonIndex, slot) => {
+          const key = `url_${buttonIndex + 1}`;
+          variables[key] = fields[key] ?? (urlButtonMapping as string[])[slot] ?? '';
         });
         Object.assign(variables, fields);
 
         // Prisma would mint the id on insert, but the suffix has to be known now so the
         // recipient's link can carry it.
         const id = randomUUID();
-        const destination = variables['url_1']?.trim() || null;
+        const firstUrlKey = urlSlots.length ? `url_${urlSlots[0] + 1}` : null;
+        const destination = firstUrlKey ? (variables[firstUrlKey]?.trim() || null) : null;
         const tracked = Boolean(trackingBase && destination);
-        if (tracked) variables['url_1'] = id;
+        if (tracked && firstUrlKey) variables[firstUrlKey] = id;
 
         return {
           id,

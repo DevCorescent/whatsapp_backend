@@ -25,6 +25,7 @@ export * from './leads/lead-qualification.service';
 export * from './suppression/suppression.service';
 export * from './suppression/suppression.module';
 export * from './templates/template-spec';
+export * from './templates/send-validation';
 export * from './templates/template-payload';
 export * from './templates/template-account';
 export * from './notifications/notification-prefs';
