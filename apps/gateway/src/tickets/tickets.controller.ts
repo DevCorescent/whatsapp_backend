@@ -23,6 +23,7 @@ export class TicketsController {
     @Query('status')       status?:       string,
     @Query('priority')     priority?:     string,
     @Query('assignedToId') assignedToId?: string,
+    @Query('conversationId') conversationId?: string,
   ) {
     return this.svc.list(scope, {
       page:         page  ? Number(page)  : undefined,
@@ -30,6 +31,7 @@ export class TicketsController {
       status,
       priority,
       assignedToId,
+      conversationId,
     });
   }
 

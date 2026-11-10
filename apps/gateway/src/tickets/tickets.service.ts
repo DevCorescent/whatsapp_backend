@@ -8,7 +8,10 @@ export class TicketsService {
 
   async list(
     scope: TenantScope,
-    query: { page?: number; limit?: number; status?: string; priority?: string; assignedToId?: string },
+    query: {
+      page?: number; limit?: number; status?: string; priority?: string;
+      assignedToId?: string; conversationId?: string;
+    },
   ) {
     const page  = Math.max(1, query.page ?? 1);
     const limit = Math.min(100, query.limit ?? 20);
@@ -18,6 +21,9 @@ export class TicketsService {
     if (query.status)       where.status       = query.status;
     if (query.priority)     where.priority     = query.priority;
     if (query.assignedToId) where.assignedToId = query.assignedToId;
+    // So a chat can show its own tickets. Without it the inbox panel asked for one
+    // conversation's tickets and was handed the whole workspace's.
+    if (query.conversationId) where.conversationId = query.conversationId;
 
     const [tickets, total] = await Promise.all([
       this.prisma.ticket.findMany({
