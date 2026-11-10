@@ -26,6 +26,8 @@ export interface SendValues {
   bodyVarMapping?: string[];
   /** One entry per dynamic URL button, in the order `dynamicUrlButtonIndexes` returns. */
   urlButtonMapping?: string[];
+  /** One entry per variable in a TEXT header, in order. */
+  headerVarMapping?: string[];
   headerMediaId?: string | null;
   headerMediaUrl?: string | null;
   couponCode?: string | null;
@@ -83,8 +85,9 @@ export function missingSendValues(spec: TemplateSpec, values: SendValues): strin
   const headerFormat = spec.headerType?.toUpperCase();
   if (headerFormat === 'TEXT' && spec.headerContent) {
     const headerNeeded = paramCount(spec.headerContent, format);
+    const header = values.headerVarMapping ?? [];
     for (let i = 0; i < headerNeeded; i++) {
-      if (!coveredPerRecipient(values, `header_${i + 1}`)) {
+      if (!filled(header[i]) && !coveredPerRecipient(values, `header_${i + 1}`)) {
         missing.push(`a value for the heading's {{${i + 1}}}`);
       }
     }

@@ -220,6 +220,7 @@ export class ConversationsService {
     templateId?: string;
     bodyVarMapping?: string[];
     urlButtonMapping?: string[];
+    headerVarMapping?: string[];
     headerMediaId?: string | null;
     headerMediaUrl?: string | null;
   }) {
@@ -253,6 +254,7 @@ export class ConversationsService {
     const missing = missingSendValues(spec, {
       bodyVarMapping:   body.bodyVarMapping,
       urlButtonMapping: body.urlButtonMapping,
+      headerVarMapping: body.headerVarMapping,
       headerMediaId:    body.headerMediaId,
       headerMediaUrl:   body.headerMediaUrl,
       phones:           [],
@@ -261,6 +263,7 @@ export class ConversationsService {
 
     const variables: Record<string, string> = {};
     (body.bodyVarMapping ?? []).forEach((v, i) => { variables[`${i + 1}`] = v ?? ''; });
+    (body.headerVarMapping ?? []).forEach((v, i) => { variables[`header_${i + 1}`] = v ?? ''; });
     dynamicUrlButtonIndexes(spec).forEach((buttonIndex, slot) => {
       variables[`url_${buttonIndex + 1}`] = (body.urlButtonMapping ?? [])[slot] ?? '';
     });
