@@ -415,6 +415,10 @@ export class WebhookService {
       case 'interactive': return caption ?? '💬 Interactive';
       case 'button':      return caption ?? '🔘 Button reply';
       case 'reaction':    return caption ?? '👍';
+      // Meta's own 'unsupported': the customer sent something the Cloud API will not pass
+      // on to a business at all. Calling it an attachment implied there was a file to
+      // open, and there is nothing — not even the type they sent.
+      case 'unsupported': return '⚠️ Message WhatsApp could not deliver';
       default:            return '📎 Attachment';
     }
   }
