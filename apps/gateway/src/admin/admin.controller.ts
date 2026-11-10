@@ -277,6 +277,43 @@ export class AdminController {
     return this.svc.listTenantUsers(scope, id);
   }
 
+  // ── Platform staff ───────────────────────────────────────────────────────────
+
+  @Get('staff')
+  @ApiOperation({ summary: 'People who help run the platform' })
+  listStaff(@CurrentTenant() scope: TenantScope) {
+    return this.svc.listStaff(scope);
+  }
+
+  @Post('staff')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Take on an admin, who starts able to look and change nothing' })
+  createStaff(@CurrentTenant() scope: TenantScope, @Body() body: any) {
+    return this.svc.createStaff(scope, body);
+  }
+
+  @Patch('staff/:id')
+  @ApiOperation({ summary: "Change an admin's name, role, or whether they can sign in" })
+  updateStaff(@CurrentTenant() scope: TenantScope, @Param('id') id: string, @Body() body: any) {
+    return this.svc.updateStaff(scope, id, body);
+  }
+
+  @Get('staff/:id/permissions')
+  @ApiOperation({ summary: 'What this admin may do, and what came from their role' })
+  staffPermissions(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
+    return this.svc.getStaffPermissions(scope, id);
+  }
+
+  @Put('staff/:id/permissions')
+  @ApiOperation({ summary: 'Grant or withhold parts of the admin panel' })
+  setStaffPermissions(
+    @CurrentTenant() scope: TenantScope,
+    @Param('id') id: string,
+    @Body('permissions') permissions: Record<string, boolean | null>,
+  ) {
+    return this.svc.setStaffPermissions(scope, id, permissions ?? {});
+  }
+
   @Delete('view-as')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Stop impersonating and return to admin panel (super admin)' })

@@ -1,10 +1,11 @@
 import {
-  Injectable, NotFoundException, ForbiddenException, BadRequestException,
+  Injectable, NotFoundException, ForbiddenException, BadRequestException, ConflictException,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
 import {
   TenantScope, PERMISSIONS, accountCeiling, roleDefaults, resolvePermission, MessageRatesService, WalletService,
   decryptSecret, computeBulkPrices, type BulkPriceChange, PermissionsService,
+  type Permission, PLATFORM_PERMISSIONS, requireFields, isInvitableRole,
 } from '@lib/common';
 import * as bcrypt from 'bcryptjs';
 
@@ -40,8 +41,24 @@ export class AdminService {
     private readonly permissions: PermissionsService,
   ) {}
 
-  private guard(scope: TenantScope) {
-    if (scope.role !== 'SUPER_ADMIN') throw new ForbiddenException('Super admin only');
+  /**
+   * Who may do this piece of running the platform.
+   *
+   * It used to be "are you the Super Admin", which left no room between all of it and
+   * none of it — so taking on help meant handing over everything. A Super Admin still
+   * passes everything (resolvePermission says so), and anyone else must hold the
+   * permission for this particular area.
+   *
+   * A client's own ADMIN cannot reach any of this however their account is configured:
+   * these permissions are outside the client ceiling, which `can` applies, so no role
+   * default or override within an account can grant one.
+   */
+  private async guard(scope: TenantScope, permission?: Permission) {
+    if (scope.role === 'SUPER_ADMIN') return;
+    if (!permission) throw new ForbiddenException('Super admin only');
+    if (!(await this.permissions.can(scope.userId, permission))) {
+      throw new ForbiddenException('You do not have access to this part of the admin panel.');
+    }
   }
 
   /**
@@ -72,7 +89,7 @@ export class AdminService {
     scope: TenantScope,
     query: { page?: number; limit?: number; search?: string; accountType?: string; planId?: string; isActive?: string },
   ) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.tenants.view');
     const page  = Math.max(1, query.page ?? 1);
     const limit = Math.min(100, query.limit ?? 20);
     const skip  = (page - 1) * limit;
@@ -167,7 +184,7 @@ export class AdminService {
   }
 
   async getTenant(scope: TenantScope, tenantId: string) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.tenants.view');
     const tenant = await this.prisma.tenant.findUnique({
       where:   { id: tenantId },
       include: {
@@ -208,7 +225,7 @@ export class AdminService {
   }
 
   async updateTenant(scope: TenantScope, id: string, data: { isActive?: boolean; name?: string; categoryId?: string }) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.tenants.manage');
     const tenant = await this.prisma.tenant.findUnique({ where: { id } });
     if (!tenant) throw new NotFoundException('Tenant not found');
     return this.prisma.tenant.update({ where: { id }, data: data as any });
@@ -217,7 +234,7 @@ export class AdminService {
   // ── Audit Logs ─────────────────────────────────────────────────────────────
 
   async listAuditLogs(scope: TenantScope, query: { tenantId?: string; page?: number; limit?: number; q?: string }) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.audit.view');
     const page  = Math.max(1, query.page ?? 1);
     const limit = Math.min(100, query.limit ?? 20);
     const skip  = (page - 1) * limit;
@@ -251,7 +268,7 @@ export class AdminService {
   // ── Tenant Contacts (admin oversight) ─────────────────────────────────────
 
   async adminGetTenantContacts(scope: TenantScope, tenantId: string, query: { page?: number; limit?: number; search?: string }) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.tenants.view');
     const page  = Math.max(1, query.page ?? 1);
     const limit = Math.min(100, query.limit ?? 20);
     const skip  = (page - 1) * limit;
@@ -273,7 +290,7 @@ export class AdminService {
   // ── Reset Password ─────────────────────────────────────────────────────────
 
   async adminResetPassword(scope: TenantScope, userId: string, newPassword: string) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.tenants.manage');
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new NotFoundException('User not found');
     const hashed = await bcrypt.hash(newPassword, 12);
@@ -289,7 +306,7 @@ export class AdminService {
    * as NaN, and an account that had never been topped up 404'd instead of showing zero.
    */
   async adminGetTenantWallet(scope: TenantScope, tenantId: string) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.tenants.view');
     const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId }, select: { id: true } });
     if (!tenant) throw new NotFoundException('Account not found');
 
@@ -314,7 +331,7 @@ export class AdminService {
    * say what actually happened.
    */
   async adminAdjustWallet(scope: TenantScope, tenantId: string, amount: number, note: string) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.tenants.manage');
     const tenant = await this.prisma.tenant.findUnique({ where: { id: tenantId }, select: { id: true } });
     if (!tenant) throw new NotFoundException('Account not found');
     const reason = (note ?? '').trim();
@@ -348,7 +365,7 @@ export class AdminService {
   // ── Business Categories ────────────────────────────────────────────────────
 
   async listCategories(scope: TenantScope) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.tenants.view');
     const rows = await this.prisma.businessCategory.findMany({
       orderBy: { sortOrder: 'asc' },
       include: { _count: { select: { tenants: true } } },
@@ -366,13 +383,13 @@ export class AdminService {
   }
 
   async createCategory(scope: TenantScope, data: { name: string; isActive?: boolean; sortOrder?: number }) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.categories.manage');
     const created = await this.prisma.businessCategory.create({ data: data as any });
     return { success: true, data: { ...created, accounts: 0 } };
   }
 
   async updateCategory(scope: TenantScope, id: string, data: { name?: string; isActive?: boolean; sortOrder?: number }) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.categories.manage');
     const cat = await this.prisma.businessCategory.findUnique({ where: { id } });
     if (!cat) throw new NotFoundException('Category not found');
     const updated = await this.prisma.businessCategory.update({ where: { id }, data: data as any });
@@ -380,7 +397,7 @@ export class AdminService {
   }
 
   async deleteCategory(scope: TenantScope, id: string) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.categories.manage');
     const cat = await this.prisma.businessCategory.findUnique({ where: { id } });
     if (!cat) throw new NotFoundException('Category not found');
     const usageCount = await this.prisma.tenant.count({ where: { categoryId: id } });
@@ -392,7 +409,7 @@ export class AdminService {
   // ── Message Rates ──────────────────────────────────────────────────────────
 
   async listRates(scope: TenantScope) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.pricing.manage');
     const [platform, customers] = await Promise.all([
       this.rates.listPlatform(),
       this.rates.listCustomerOverrides(),
@@ -402,7 +419,7 @@ export class AdminService {
 
   /** Effective prices for one account, with the platform/reseller values it inherits. */
   async getTenantRates(scope: TenantScope, tenantId: string) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.tenants.view');
     const tenant = await this.prisma.tenant.findUnique({
       where:  { id: tenantId },
       select: { id: true, name: true, accountType: true, parent: { select: { id: true, name: true } } },
@@ -423,7 +440,7 @@ export class AdminService {
     priceMinor: number | null | undefined,
     tenantId?: string | null,
   ) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.pricing.manage');
     const price = priceMinor ?? null;
 
     if (tenantId) {
@@ -454,7 +471,7 @@ export class AdminService {
   // ── Plans ──────────────────────────────────────────────────────────────────
 
   async listPlans(scope: TenantScope) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.tenants.view');
     return this.prisma.plan.findMany({ orderBy: { sortOrder: 'asc' } });
   }
 
@@ -464,12 +481,12 @@ export class AdminService {
     maxContacts: number; maxMsgPerMonth: number; maxAgents: number;
     maxCampaigns: number; aiEnabled?: boolean; features?: string[];
   }) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.plans.manage');
     return this.prisma.plan.create({ data: data as any });
   }
 
   async updatePlan(scope: TenantScope, planId: string, data: Record<string, unknown>) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.plans.manage');
     const plan = await this.prisma.plan.findUnique({ where: { id: planId } });
     if (!plan) throw new NotFoundException('Plan not found');
     return this.prisma.plan.update({ where: { id: planId }, data: data as any });
@@ -478,7 +495,7 @@ export class AdminService {
   // ── Assign plan to tenant ──────────────────────────────────────────────────
 
   async assignPlan(scope: TenantScope, tenantId: string, planId: string, billingCycle: string) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.tenants.manage');
     const plan = await this.prisma.plan.findUnique({ where: { id: planId } });
     if (!plan) throw new NotFoundException('Plan not found');
     const now = new Date();
@@ -511,7 +528,7 @@ export class AdminService {
   // ── Stats ──────────────────────────────────────────────────────────────────
 
   async getStats(scope: TenantScope) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.tenants.view');
 
     const now = new Date();
     const thirtyDaysAgo  = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
@@ -617,7 +634,7 @@ export class AdminService {
   // ── Revenue ────────────────────────────────────────────────────────────────
 
   async getRevenue(scope: TenantScope, query: { range?: string }) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.revenue.view');
 
     const months = query.range === '3m' ? 3 : query.range === '6m' ? 6 : 12;
     const now = new Date();
@@ -690,7 +707,7 @@ export class AdminService {
   }
 
   async getRevenueExport(scope: TenantScope, query: { days?: number }) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.revenue.view');
     const since = new Date(Date.now() - (query.days ?? 30) * 86_400_000);
     const subs  = await this.prisma.subscription.findMany({
       where:   { status: { in: ['ACTIVE', 'TRIALING'] }, createdAt: { gte: since } },
@@ -707,7 +724,7 @@ export class AdminService {
   // ── Reports ─────────────────────────────────────────────────────────────────
 
   async getReports(scope: TenantScope, query: { from?: string; to?: string }) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.revenue.view');
 
     const from = query.from ? new Date(query.from) : new Date(Date.now() - 30 * 86_400_000);
     const to   = query.to   ? new Date(query.to)   : new Date();
@@ -801,7 +818,7 @@ export class AdminService {
   }
 
   async getReportsCsv(scope: TenantScope, query: { from?: string; to?: string }) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.revenue.view');
     const result = await this.getReports(scope, query);
     const { data } = result;
 
@@ -850,7 +867,7 @@ export class AdminService {
    * and the end are recorded against the admin who did it.
    */
   async startViewAs(scope: TenantScope, tenantId: string, userId?: string) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.impersonate');
     if (!tenantId) throw new BadRequestException('Choose an account');
     const tenant = await this.prisma.tenant.findUnique({
       where:  { id: tenantId },
@@ -921,7 +938,7 @@ export class AdminService {
 
   /** Everyone in an account who can be signed in as. */
   async listTenantUsers(scope: TenantScope, tenantId: string) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.impersonate');
     const users = await this.prisma.user.findMany({
       where:  { tenantId, isActive: true, removedAt: null, role: { not: 'SUPER_ADMIN' } },
       select: { id: true, name: true, email: true, role: true, lastLoginAt: true },
@@ -931,7 +948,7 @@ export class AdminService {
   }
 
   async stopViewAs(scope: TenantScope) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.impersonate');
     await this.prisma.auditLog.create({
       data: {
         tenantId: scope.tenantId,
@@ -943,10 +960,197 @@ export class AdminService {
     return { success: true, data: { redirect: '/tenants' } };
   }
 
+  // ── Platform staff ───────────────────────────────────────────────────────────
+
+  /**
+   * The people who help run the platform.
+   *
+   * They live on the platform account like any other user, so everything that already
+   * understands users — sessions, audit rows, the permission resolver — understands them
+   * too. What makes them staff is only where they live and what they have been granted.
+   *
+   * The Super Admin is not among them: there is one, it is the account's owner, and
+   * nobody may create or edit another through here.
+   */
+  async listStaff(scope: TenantScope) {
+    await this.guard(scope, 'platform.staff.manage');
+    const users = await this.prisma.user.findMany({
+      where:  { tenantId: scope.tenantId, role: { not: 'SUPER_ADMIN' as any } },
+      select: {
+        id: true, name: true, email: true, role: true, isActive: true,
+        lastLoginAt: true, createdAt: true, removedAt: true,
+        userPermissions: { select: { permission: true, allowed: true } },
+      },
+      orderBy: [{ isActive: 'desc' }, { createdAt: 'asc' }],
+    });
+    return {
+      staff: users.map((u) => ({
+        id: u.id, name: u.name, email: u.email, role: u.role,
+        isActive: u.isActive && !u.removedAt,
+        lastLoginAt: u.lastLoginAt, createdAt: u.createdAt,
+        grantedCount: u.userPermissions.filter((x) => x.allowed).length,
+      })),
+      total: users.length,
+    };
+  }
+
+  async createStaff(
+    scope: TenantScope,
+    body: { name?: string; email?: string; password?: string; role?: string },
+  ) {
+    await this.guard(scope, 'platform.staff.manage');
+    requireFields(body, ['name', 'email', 'password']);
+    const email = String(body.email).trim().toLowerCase();
+    const role  = (body.role ?? 'ADMIN').toUpperCase();
+
+    // A second Super Admin would be indistinguishable from the first in every record.
+    if (role === 'SUPER_ADMIN' || !isInvitableRole(role)) {
+      throw new BadRequestException('Choose Admin, Manager, Marketing or Agent.');
+    }
+    if (String(body.password).length < 8) {
+      throw new BadRequestException('Use a password of at least 8 characters.');
+    }
+    const clash = await this.prisma.user.findFirst({
+      where:  { email, tenantId: scope.tenantId },
+      select: { id: true },
+    });
+    if (clash) throw new ConflictException('Someone with that email is already here.');
+
+    const user = await this.prisma.user.create({
+      data: {
+        tenantId: scope.tenantId,
+        name:     String(body.name).trim(),
+        email,
+        password: await bcrypt.hash(String(body.password), 10),
+        role:     role as any,
+        isActive: true,
+        emailVerified: true,
+      },
+      select: { id: true, name: true, email: true, role: true },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        tenantId: scope.tenantId, userId: scope.userId,
+        action: 'ADMIN_STAFF_CREATED', resource: 'user', resourceId: user.id,
+        metadata: { email: user.email, role: user.role },
+      },
+    });
+    // They begin able to see the platform and change nothing in it; each power is handed
+    // over deliberately from the permissions screen.
+    return { success: true, data: user };
+  }
+
+  async updateStaff(
+    scope: TenantScope,
+    id: string,
+    body: { name?: string; role?: string; isActive?: boolean },
+  ) {
+    await this.guard(scope, 'platform.staff.manage');
+    const member = await this.staffMember(scope, id);
+    if (member.id === scope.userId && body.isActive === false) {
+      throw new BadRequestException('You cannot deactivate yourself.');
+    }
+    if (body.role !== undefined) {
+      const role = String(body.role).toUpperCase();
+      if (!isInvitableRole(role)) throw new BadRequestException('Choose Admin, Manager, Marketing or Agent.');
+      body = { ...body, role };
+    }
+
+    const updated = await this.prisma.user.update({
+      where: { id: member.id },
+      data: {
+        ...(body.name !== undefined     && { name: String(body.name).trim() }),
+        ...(body.role !== undefined     && { role: body.role as any }),
+        ...(body.isActive !== undefined && { isActive: body.isActive }),
+      },
+      select: { id: true, name: true, email: true, role: true, isActive: true },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        tenantId: scope.tenantId, userId: scope.userId,
+        action: 'ADMIN_STAFF_UPDATED', resource: 'user', resourceId: member.id,
+        metadata: { ...body },
+      },
+    });
+    this.permissions.invalidate(member.id);
+    return { success: true, data: updated };
+  }
+
+  /** What this person may do, and which of it came from their role rather than a grant. */
+  async getStaffPermissions(scope: TenantScope, id: string) {
+    await this.guard(scope, 'platform.staff.manage');
+    const member = await this.staffMember(scope, id);
+    const overrides = new Map(
+      (await this.prisma.userPermission.findMany({
+        where:  { userId: member.id },
+        select: { permission: true, allowed: true },
+      })).map((p) => [p.permission, p.allowed]),
+    );
+    const principal = { role: member.role, accountType: 'PLATFORM', resellerType: null };
+
+    const result: Record<string, { roleDefault: boolean; override: boolean | null; effective: boolean }> = {};
+    for (const p of PLATFORM_PERMISSIONS) {
+      result[p] = {
+        roleDefault: (roleDefaults(member.role, 'PLATFORM') as readonly string[]).includes(p),
+        override:    overrides.has(p) ? overrides.get(p)! : null,
+        effective:   resolvePermission(principal, p as Permission, new Map(), overrides),
+      };
+    }
+    return { role: member.role, permissions: result };
+  }
+
+  async setStaffPermissions(scope: TenantScope, id: string, overrides: Record<string, boolean | null>) {
+    await this.guard(scope, 'platform.staff.manage');
+    const member = await this.staffMember(scope, id);
+    // Editing your own would let you remove the power to put it back, leaving nobody but
+    // the Super Admin able to undo it.
+    if (member.id === scope.userId) {
+      throw new BadRequestException('Ask the Super Admin to change your own access.');
+    }
+
+    const valid = new Set<string>(PLATFORM_PERMISSIONS);
+    await this.prisma.$transaction(async (tx) => {
+      for (const [perm, value] of Object.entries(overrides)) {
+        if (!valid.has(perm)) continue;
+        if (value === null) {
+          await tx.userPermission.deleteMany({ where: { userId: member.id, permission: perm } });
+        } else {
+          await tx.userPermission.upsert({
+            where:  { userId_permission: { userId: member.id, permission: perm } },
+            create: { userId: member.id, permission: perm, allowed: value },
+            update: { allowed: value },
+          });
+        }
+      }
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        tenantId: scope.tenantId, userId: scope.userId,
+        action: 'ADMIN_STAFF_PERMISSIONS_CHANGED', resource: 'user', resourceId: member.id,
+        metadata: { overrides },
+      },
+    });
+    // So it bites on their very next request rather than after the cache expires.
+    this.permissions.invalidate(member.id);
+    return { success: true };
+  }
+
+  private async staffMember(scope: TenantScope, id: string) {
+    const member = await this.prisma.user.findFirst({
+      where:  { id, tenantId: scope.tenantId, role: { not: 'SUPER_ADMIN' as any } },
+      select: { id: true, role: true, email: true },
+    });
+    if (!member) throw new NotFoundException('That person is not on your team');
+    return member;
+  }
+
   // ── White-label ──────────────────────────────────────────────────────────────
 
   async getWhiteLabel(scope: TenantScope) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.whitelabel.manage');
     const [config, resellers] = await Promise.all([
       (this.prisma as any).platformConfig.findUnique({ where: { id: 'platform' } }),
       this.prisma.tenant.findMany({
@@ -1009,7 +1213,7 @@ export class AdminService {
   }
 
   async updateWhiteLabel(scope: TenantScope, data: { whiteLabelFeeMinor?: number; whiteLabelGraceDays?: number }) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.whitelabel.manage');
     const updated = await (this.prisma as any).platformConfig.upsert({
       where:  { id: 'platform' },
       create: { id: 'platform', ...data },
@@ -1035,7 +1239,7 @@ export class AdminService {
       domain?: string | null; subdomain?: string | null;
     },
   ) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.tenants.manage');
 
     let outcome = 'updated';
 
@@ -1163,7 +1367,7 @@ export class AdminService {
   // ── CMS ──────────────────────────────────────────────────────────────────────
 
   async getCmsNewsletter(scope: TenantScope) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.cms.manage');
     const [total, recent] = await Promise.all([
       this.prisma.newsletterSubscriber.count(),
       this.prisma.newsletterSubscriber.findMany({
@@ -1276,7 +1480,7 @@ export class AdminService {
     scope: TenantScope,
     query: { status?: string; resellerId?: string; page?: number; limit?: number },
   ) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.revenue.view');
     const page  = Math.max(1, query.page ?? 1);
     const limit = Math.min(100, query.limit ?? 50);
     const where: any = {};
@@ -1316,7 +1520,7 @@ export class AdminService {
   // ── Platform permissions matrix ───────────────────────────────────────────────
 
   async getPermissionsMatrix(scope: TenantScope) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.staff.manage');
     const rows = await (this.prisma as any).rolePermission.findMany();
     const overrideMap = new Map((rows as any[]).map((r) => [`${r.accountType}:${r.role}:${r.permission}`, r.allowed]));
 
@@ -1348,7 +1552,7 @@ export class AdminService {
     scope: TenantScope,
     data: { accountType: string; role: string; permission: string; allowed: boolean | null },
   ) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.staff.manage');
     const { accountType, role, permission, allowed } = data;
     if (!PERMISSIONS.includes(permission as any)) {
       throw new BadRequestException('Unknown permission');
@@ -1382,7 +1586,7 @@ export class AdminService {
   // ── Tenant Subscription ───────────────────────────────────────────────────────
 
   async getTenantSubscription(scope: TenantScope, tenantId: string) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.tenants.view');
     const sub = await this.prisma.subscription.findUnique({
       where: { tenantId },
       include: { plan: true },
@@ -1433,7 +1637,7 @@ export class AdminService {
     scope: TenantScope,
     body: BulkPriceChange & { target?: 'rates' | 'plans' | 'both' },
   ) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.pricing.manage');
     const target = body.target ?? 'rates';
 
     const rates = target === 'plans' ? [] : await this.prisma.messageRate.findMany({
@@ -1476,7 +1680,7 @@ export class AdminService {
   }
 
   async getPlanEndPolicy(scope: TenantScope) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.pricing.manage');
     const settings = await this.platformSettings();
     return {
       behaviour: settings.planEndBehaviour,
@@ -1497,7 +1701,7 @@ export class AdminService {
     scope: TenantScope,
     body: { behaviour?: string; graceDays?: number; walletEnabled?: boolean },
   ) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.pricing.manage');
     const allowed = ['GRACE', 'BLOCK', 'AUTO_CHARGE'];
     if (body.behaviour && !allowed.includes(body.behaviour)) {
       throw new BadRequestException(`behaviour must be one of ${allowed.join(', ')}.`);
@@ -1535,7 +1739,7 @@ export class AdminService {
       resetUsage?: boolean;
     },
   ) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.tenants.manage');
 
     const sub = await this.prisma.subscription.upsert({
       where: { tenantId },
@@ -1582,7 +1786,7 @@ export class AdminService {
    * `revealWhatsAppToken`, which records who asked.
    */
   async getTenantWhatsApp(scope: TenantScope, tenantId: string) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.tenants.view');
 
     const businesses = await this.prisma.business.findMany({
       where:   { tenantId },
@@ -1684,7 +1888,7 @@ export class AdminService {
    * a separate, deliberate request rather than a field on a page, and it leaves a trail.
    */
   async revealWhatsAppToken(scope: TenantScope, tenantId: string, integrationId: string) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.secrets.reveal');
     const row = await this.prisma.whatsAppIntegration.findFirst({
       where:  { id: integrationId, tenantId },
       select: { id: true, accessToken: true, displayName: true, phoneNumberId: true },
@@ -1711,7 +1915,7 @@ export class AdminService {
   }
 
   async adminWhatsAppAction(scope: TenantScope, tenantId: string, action: string) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.tenants.manage');
     if (action === 'disconnect') {
       await this.prisma.whatsAppIntegration.updateMany({
         where: { tenantId },
@@ -1726,7 +1930,7 @@ export class AdminService {
   // Note: Prisma model is `resellerCommission` (no standalone `commission` model).
 
   async updateCommission(scope: TenantScope, id: string, data: { status: string; note?: string }) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.commissions.manage');
     const existing = await this.prisma.resellerCommission.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Commission not found');
     const updated = await this.prisma.resellerCommission.update({
@@ -1753,7 +1957,7 @@ export class AdminService {
   // ── Plans (deactivate) ────────────────────────────────────────────────────────
 
   async deactivatePlan(scope: TenantScope, id: string) {
-    this.guard(scope);
+    await this.guard(scope, 'platform.plans.manage');
     return this.prisma.plan.update({
       where: { id },
       data:  { isActive: false },
