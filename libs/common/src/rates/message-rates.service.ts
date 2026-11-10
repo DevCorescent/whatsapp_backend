@@ -12,7 +12,7 @@ export const RATE_CATEGORY_LABEL: Record<RateCategoryValue, string> = {
 };
 
 /** Where an effective price came from. `unpriced` means no row at any scope — the message is free. */
-export type RateSource = 'customer' | 'reseller' | 'platform' | 'unpriced';
+export type RateSource = 'customer' | 'reseller' | 'platform' | 'unpriced' | 'charging-off';
 
 export interface ResolvedRate {
   category:   RateCategoryValue;
@@ -46,6 +46,12 @@ const CACHE_TTL_MS = 60_000;
  * its reseller's price for all clients, which wins over the platform default. Every
  * charge, every estimate and every price shown in the UI resolves through here, so the
  * number an operator sets is the number that gets debited.
+ *
+ * Above all of it sits the platform's wallet switch. Turned off, nobody is charged for a
+ * message anywhere on the platform, whatever rows exist underneath — zeroing the rates
+ * instead would have left a reseller free to price their own clients tomorrow and quietly
+ * start charging again. The rows are kept as they are, so turning it back on restores the
+ * prices that were set rather than losing them.
  */
 @Injectable()
 export class MessageRatesService {
@@ -59,6 +65,15 @@ export class MessageRatesService {
   async resolveAll(tenantId: string): Promise<ResolvedRate[]> {
     const cached = this.cache.get(tenantId);
     if (cached && cached.expiresAt > Date.now()) return cached.rates;
+
+    if (!(await this.chargingOn())) {
+      const free = RATE_CATEGORIES.map<ResolvedRate>((category) => ({
+        category, priceMinor: 0, source: 'charging-off',
+        customerMinor: null, resellerMinor: null, platformMinor: null,
+      }));
+      this.cache.set(tenantId, { rates: free, expiresAt: Date.now() + CACHE_TTL_MS });
+      return free;
+    }
 
     const tenant = await this.prisma.tenant.findUnique({
       where:  { id: tenantId },
@@ -112,6 +127,20 @@ export class MessageRatesService {
   async priceFor(tenantId: string, templateCategory: string | null | undefined): Promise<number> {
     const { priceMinor } = await this.resolve(tenantId, rateCategoryForTemplate(templateCategory));
     return priceMinor;
+  }
+
+  /**
+   * The platform's master switch, shared with wallet top-ups. Read on its own so one
+   * database row decides it for every account rather than each caller remembering to ask.
+   */
+  private async chargingOn(): Promise<boolean> {
+    const platform = await this.prisma.tenant.findFirst({
+      where:  { accountType: 'PLATFORM' },
+      select: { settings: { select: { walletEnabled: true } } },
+    }).catch(() => null);
+    // Missing settings mean nothing has been configured yet, and charging for messages
+    // before anyone has set a price is the wrong way to be wrong.
+    return platform?.settings?.walletEnabled === true;
   }
 
   invalidate(tenantId?: string) {
