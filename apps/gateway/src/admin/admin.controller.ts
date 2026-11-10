@@ -261,9 +261,20 @@ export class AdminController {
 
   @Post('view-as')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Start impersonating a client/reseller account (super admin)' })
-  viewAs(@CurrentTenant() scope: TenantScope, @Body('tenantId') tenantId: string) {
-    return this.svc.startViewAs(scope, tenantId);
+  @ApiOperation({ summary: 'Open a client/reseller account, optionally as one of its users (super admin)' })
+  viewAs(
+    @CurrentTenant() scope: TenantScope,
+    @Body('tenantId') tenantId: string,
+    /** Omit to open the account as the Super Admin; name someone to sign in as them. */
+    @Body('userId') userId?: string,
+  ) {
+    return this.svc.startViewAs(scope, tenantId, userId);
+  }
+
+  @Get('tenants/:id/users')
+  @ApiOperation({ summary: 'People in an account who can be signed in as (super admin)' })
+  tenantUsers(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
+    return this.svc.listTenantUsers(scope, id);
   }
 
   @Delete('view-as')

@@ -4,7 +4,8 @@ import {
 import { PrismaService } from '@lib/prisma';
 import {
   TenantScope, PERMISSIONS, accountCeiling, roleDefaults, resolvePermission, MessageRatesService, WalletService,
-  decryptSecret, computeBulkPrices, type BulkPriceChange,} from '@lib/common';
+  decryptSecret, computeBulkPrices, type BulkPriceChange, PermissionsService,
+} from '@lib/common';
 import * as bcrypt from 'bcryptjs';
 
 // ── CMS section metadata (mirrored from lib/cms/sections.ts — no Next.js imports) ──
@@ -36,6 +37,7 @@ export class AdminService {
     private readonly prisma: PrismaService,
     private readonly rates:  MessageRatesService,
     private readonly wallet: WalletService,
+    private readonly permissions: PermissionsService,
   ) {}
 
   private guard(scope: TenantScope) {
@@ -835,12 +837,24 @@ export class AdminService {
 
   // ── View-as ─────────────────────────────────────────────────────────────────
 
-  async startViewAs(scope: TenantScope, tenantId: string) {
+  /**
+   * Opens someone else's account.
+   *
+   * Without `userId` the admin gets the account with their own Super Admin powers, which
+   * is right for fixing something. With one, they become that person — their role, their
+   * permissions, their name on anything they do — which is the only way to see what a
+   * user is actually seeing when they report that something is missing.
+   *
+   * That second mode writes under someone else's name, so it is deliberately narrow: a
+   * Super Admin is never impersonable, nor is the platform account, and both the start
+   * and the end are recorded against the admin who did it.
+   */
+  async startViewAs(scope: TenantScope, tenantId: string, userId?: string) {
     this.guard(scope);
     if (!tenantId) throw new BadRequestException('Choose an account');
     const tenant = await this.prisma.tenant.findUnique({
       where:  { id: tenantId },
-      select: { id: true, slug: true, name: true, isActive: true, accountType: true, resellerType: true },
+      select: { id: true, slug: true, name: true, isActive: true, accountType: true, resellerType: true, parentId: true },
     });
     if (!tenant) throw new NotFoundException('Account not found');
     if (tenant.accountType === 'PLATFORM') {
@@ -849,26 +863,71 @@ export class AdminService {
     if (!tenant.isActive) {
       throw new BadRequestException('This account is suspended. Activate it first to view it.');
     }
+
+    let user: {
+      id: string; name: string | null; email: string; role: string; permissions: string[];
+    } | null = null;
+    if (userId) {
+      const row = await this.prisma.user.findFirst({
+        where:  { id: userId, tenantId: tenant.id },
+        select: { id: true, name: true, email: true, role: true, isActive: true, removedAt: true },
+      });
+      if (!row) throw new NotFoundException('That person is not in this account');
+      if (!row.isActive || row.removedAt) {
+        throw new BadRequestException('That account has been deactivated.');
+      }
+      // One Super Admin signing in as another would make the audit trail useless: there
+      // would be no way to tell which of them did what.
+      if (row.role === 'SUPER_ADMIN') {
+        throw new BadRequestException('A Super Admin cannot be signed in as.');
+      }
+      // Their effective permissions travel in the signed cookie rather than being looked
+      // up per request. Within its two hours a permission change will not be reflected —
+      // the server still refuses what it should, so the cost is a menu item that does
+      // nothing, not access anyone should not have.
+      user = {
+        id: row.id, name: row.name, email: row.email, role: row.role,
+        permissions: await this.permissions.list(row.id),
+      };
+    }
+
     await this.prisma.auditLog.create({
       data: {
         tenantId: scope.tenantId,
         userId:   scope.userId,
-        action:   'ADMIN_VIEW_AS_STARTED',
-        resource: 'tenant',
-        resourceId: tenant.id,
-        metadata: { tenantName: tenant.name },
+        action:   user ? 'ADMIN_IMPERSONATION_STARTED' : 'ADMIN_VIEW_AS_STARTED',
+        resource: user ? 'user' : 'tenant',
+        resourceId: user?.id ?? tenant.id,
+        metadata: user
+          ? { tenantName: tenant.name, userName: user.name, userEmail: user.email, userRole: user.role }
+          : { tenantName: tenant.name },
       },
     });
+
     return {
       success: true,
       data: {
-        tenantId:    tenant.id,
-        tenantSlug:  tenant.slug,
-        tenantName:  tenant.name,
-        accountType: tenant.accountType,
-        redirect:    tenant.accountType === 'RESELLER' ? '/reseller' : '/inbox',
+        tenantId:       tenant.id,
+        tenantSlug:     tenant.slug,
+        tenantName:     tenant.name,
+        accountType:    tenant.accountType,
+        resellerType:   tenant.resellerType,
+        parentTenantId: tenant.parentId,
+        user,
+        redirect:       tenant.accountType === 'RESELLER' ? '/reseller' : '/inbox',
       },
     };
+  }
+
+  /** Everyone in an account who can be signed in as. */
+  async listTenantUsers(scope: TenantScope, tenantId: string) {
+    this.guard(scope);
+    const users = await this.prisma.user.findMany({
+      where:  { tenantId, isActive: true, removedAt: null, role: { not: 'SUPER_ADMIN' } },
+      select: { id: true, name: true, email: true, role: true, lastLoginAt: true },
+      orderBy: [{ role: 'asc' }, { name: 'asc' }],
+    });
+    return { users, total: users.length };
   }
 
   async stopViewAs(scope: TenantScope) {
