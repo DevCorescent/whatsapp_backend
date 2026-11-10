@@ -6,7 +6,17 @@ import {
   TenantScope, decryptSecret, MessageEventsService, NotificationsService,
   HandoverService, LeadQualificationService,
   parseSendError, classifySendError, describeSendError, isKnownSendError,
+  normalizePhone, toSpec, buildSendComponents, missingSendValues, describeMissing,
+  dynamicUrlButtonIndexes, type TemplateSpec,
 } from '@lib/common';
+
+/**
+ * The template's body with its variables filled in, so the thread shows what the customer
+ * received rather than the raw `{{1}}` the template was written with.
+ */
+function renderTemplateBody(spec: TemplateSpec, variables: Record<string, string>): string {
+  return (spec.body ?? '').replace(/\{\{\s*(\w+)\s*\}\}/g, (whole, key) => variables[key] ?? whole);
+}
 
 const WA_API_VERSION = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
 
@@ -99,7 +109,240 @@ export class ConversationsService {
     // Reset unread count
     await this.prisma.conversation.update({ where: { id }, data: { unreadCount: 0 } });
 
-    return { success: true, data: { ...conv, messages, pagination: { page, pageSize, total: msgTotal, totalPages: Math.ceil(msgTotal / pageSize) } } };
+    return {
+      success: true,
+      data: {
+        ...conv,
+        messages,
+        serviceWindow: await this.serviceWindow(scope, id),
+        pagination: { page, pageSize, total: msgTotal, totalPages: Math.ceil(msgTotal / pageSize) },
+      },
+    };
+  }
+
+  /**
+   * Whether a plain message can still reach this person.
+   *
+   * WhatsApp only carries free-form messages for 24 hours after the customer last wrote;
+   * outside that, the one thing that reaches them is an approved template. Nothing here
+   * knew that, so an agent typed a reply, watched it appear in the thread, and it was
+   * refused by Meta seconds later with "more than 24 hours since they last replied" —
+   * wording the agent never saw, on a message that still looked sent.
+   */
+  async serviceWindow(scope: TenantScope, conversationId: string) {
+    const lastInbound = await this.prisma.message.findFirst({
+      where:   { conversationId, tenantId: scope.tenantId, direction: 'INBOUND' },
+      orderBy: { createdAt: 'desc' },
+      select:  { createdAt: true },
+    });
+    if (!lastInbound) {
+      return { open: false, lastInboundAt: null, expiresAt: null, everReplied: false };
+    }
+    const expiresAt = new Date(lastInbound.createdAt.getTime() + 24 * 60 * 60_000);
+    return {
+      open: expiresAt.getTime() > Date.now(),
+      lastInboundAt: lastInbound.createdAt,
+      expiresAt,
+      everReplied: true,
+    };
+  }
+
+  // ── Starting a chat with someone new ───────────────────────────────────────
+
+  /**
+   * Opens a chat with a number, whether or not it is already a contact.
+   *
+   * Until now a conversation could only begin with the customer writing first, so a
+   * business that had someone's number and wanted to reach out had nowhere in the inbox
+   * to do it. The contact and the thread are created if they are missing, and an existing
+   * thread is returned rather than duplicated.
+   *
+   * Nothing is sent here. Whether this can carry a plain message or has to be a template
+   * is the service window's answer, and the caller asks it next.
+   */
+  async startConversation(scope: TenantScope, body: { phone?: string; name?: string }) {
+    const phone = normalizePhone(body?.phone ?? '');
+    if (phone.length < 8 || phone.length > 15) {
+      throw new BadRequestException('Enter a phone number with its country code, like 919876543210.');
+    }
+
+    const integration = await this.prisma.whatsAppIntegration.findFirst({
+      where:   { businessId: scope.businessId, tenantId: scope.tenantId, isActive: true },
+      orderBy: { isDefault: 'desc' },
+      select:  { id: true },
+    });
+    if (!integration) throw new BadRequestException('Connect a WhatsApp number first.');
+
+    const name = body?.name?.trim();
+    const contact = await this.prisma.contact.upsert({
+      where:  { phone_businessId: { phone, businessId: scope.businessId } },
+      create: {
+        tenantId: scope.tenantId, businessId: scope.businessId,
+        phone, name: name || phone, source: 'inbox',
+      },
+      // An existing contact keeps the name it has; a blank one takes the given one.
+      update: name ? { name: undefined } : {},
+      select: { id: true, name: true, phone: true },
+    });
+
+    const existing = await this.prisma.conversation.findFirst({
+      where:  { contactId: contact.id, tenantId: scope.tenantId, businessId: scope.businessId },
+      select: { id: true },
+    });
+    if (existing) {
+      return { success: true, data: { conversationId: existing.id, contact, created: false } };
+    }
+
+    const conversation = await this.prisma.conversation.create({
+      data: {
+        tenantId:   scope.tenantId,
+        businessId: scope.businessId,
+        contactId:  contact.id,
+        whatsappIntegrationId: integration.id,
+        status:     'OPEN',
+        channel:    'WHATSAPP',
+      },
+      select: { id: true },
+    });
+    return { success: true, data: { conversationId: conversation.id, contact, created: true } };
+  }
+
+  // ── Sending an approved template into a chat ───────────────────────────────
+
+  /**
+   * The only message that reaches someone outside the 24-hour window, and therefore the
+   * only way to open a conversation that the customer did not start.
+   *
+   * Refused rather than attempted when the template is missing a value, so the agent is
+   * told which field is empty instead of watching the message fail at Meta.
+   */
+  async sendTemplate(scope: TenantScope, conversationId: string, body: {
+    templateId?: string;
+    bodyVarMapping?: string[];
+    urlButtonMapping?: string[];
+    headerMediaId?: string | null;
+    headerMediaUrl?: string | null;
+  }) {
+    const conv = await this.prisma.conversation.findFirst({
+      where:   { id: conversationId, tenantId: scope.tenantId, businessId: scope.businessId },
+      include: { contact: { select: { phone: true, waId: true, name: true } } },
+    });
+    if (!conv) throw new NotFoundException('Conversation not found');
+    if (!body?.templateId) throw new BadRequestException('Choose a template');
+
+    const integration = conv.whatsappIntegrationId
+      ? await this.prisma.whatsAppIntegration.findUnique({ where: { id: conv.whatsappIntegrationId } })
+      : await this.prisma.whatsAppIntegration.findFirst({
+          where:   { businessId: scope.businessId, isActive: true },
+          orderBy: { isDefault: 'desc' },
+        });
+    if (!integration?.accessToken) throw new BadRequestException('No active WhatsApp number');
+
+    const template = await this.prisma.messageTemplate.findFirst({
+      where: { id: body.templateId, tenantId: scope.tenantId, businessId: scope.businessId },
+    });
+    if (!template || template.status !== 'APPROVED') {
+      throw new BadRequestException('Choose an approved WhatsApp template');
+    }
+    // A media id belongs to the number it was uploaded to, and a template to its account.
+    if (template.wabaId && template.wabaId !== integration.whatsappBusinessId) {
+      throw new BadRequestException('This template belongs to a different WhatsApp number');
+    }
+
+    const spec = toSpec(template);
+    const missing = missingSendValues(spec, {
+      bodyVarMapping:   body.bodyVarMapping,
+      urlButtonMapping: body.urlButtonMapping,
+      headerMediaId:    body.headerMediaId,
+      headerMediaUrl:   body.headerMediaUrl,
+      phones:           [],
+    });
+    if (missing.length) throw new BadRequestException(describeMissing(missing));
+
+    const variables: Record<string, string> = {};
+    (body.bodyVarMapping ?? []).forEach((v, i) => { variables[`${i + 1}`] = v ?? ''; });
+    dynamicUrlButtonIndexes(spec).forEach((buttonIndex, slot) => {
+      variables[`url_${buttonIndex + 1}`] = (body.urlButtonMapping ?? [])[slot] ?? '';
+    });
+
+    const components = buildSendComponents(spec, {
+      variables,
+      headerMediaId:  body.headerMediaId ?? null,
+      headerMediaUrl: body.headerMediaUrl ?? null,
+    });
+
+    const to = conv.contact.phone ?? conv.contact.waId ?? '';
+    if (!to) throw new BadRequestException('Contact has no phone number');
+
+    const accessToken = decryptSecret(integration.accessToken);
+    if (!accessToken) throw new BadRequestException('WhatsApp access token could not be read');
+
+    const res = await fetch(
+      `https://graph.facebook.com/${WA_API_VERSION}/${integration.phoneNumberId}/messages`,
+      {
+        method:  'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          to,
+          type: 'template',
+          template: {
+            name:       template.name,
+            language:   { code: template.language },
+            components: components.length ? components : undefined,
+          },
+        }),
+      },
+    );
+    const json: any = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const parsed = parseSendError(res.status, json);
+      // Meta already explains itself; our sentence says what to do about it.
+      throw new BadRequestException(describeSendError(parsed, classifySendError(parsed.code, parsed.subcode)));
+    }
+
+    const waMessageId = json?.messages?.[0]?.id ?? null;
+    const preview = `${template.name}`;
+    const message = await this.prisma.message.create({
+      data: {
+        tenantId:   scope.tenantId,
+        businessId: scope.businessId,
+        conversationId,
+        sentById:   scope.userId,
+        waMessageId,
+        direction:  'OUTBOUND',
+        type:       'TEMPLATE' as any,
+        content:    renderTemplateBody(spec, variables),
+        metadata:   { templateName: template.name, templateId: template.id } as any,
+        status:     'SENT',
+        isNote:     false,
+      },
+      include: { sentBy: { select: { id: true, name: true } } },
+    });
+
+    await this.prisma.conversation.update({
+      where: { id: conversationId },
+      data:  { lastMessageAt: message.createdAt, lastMessagePreview: preview.slice(0, 100) },
+    });
+
+    // Same path a typed reply takes, so the thread and the list update for everyone
+    // watching rather than only for whoever pressed send.
+    void this.events.messageNew(message.id);
+    void this.events.conversationUpdated(conversationId);
+    return { success: true, data: message };
+  }
+
+  // ── Internal notes ─────────────────────────────────────────────────────────
+
+  /** Every note on this chat, newest first. Notes are never sent to WhatsApp. */
+  async listNotes(scope: TenantScope, conversationId: string) {
+    await this.findOne(scope, conversationId); // 404 guard
+    const notes = await this.prisma.message.findMany({
+      where:   { conversationId, tenantId: scope.tenantId, isNote: true },
+      orderBy: { createdAt: 'desc' },
+      include: { sentBy: { select: { id: true, name: true } } },
+    });
+    return { notes, total: notes.length };
   }
 
   // ── Messages in a conversation ─────────────────────────────────────────────

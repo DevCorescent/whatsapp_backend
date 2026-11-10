@@ -36,6 +36,15 @@ export class ConversationsController {
     });
   }
 
+  // Declared before `:id` so "start" is never read as a conversation id.
+  @Post('start')
+  @RequiresPermission('messages.send')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Open a chat with a number, creating the contact if needed' })
+  start(@CurrentTenant() scope: TenantScope, @Body() body: any) {
+    return this.svc.startConversation(scope, body);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get a conversation by ID' })
   findOne(
@@ -44,6 +53,20 @@ export class ConversationsController {
     @Query('page') page?: string,
   ) {
     return this.svc.findOne(scope, id, { page: Number(page) || 1 });
+  }
+
+  @Get(':id/notes')
+  @ApiOperation({ summary: 'Internal notes on a conversation' })
+  notes(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
+    return this.svc.listNotes(scope, id);
+  }
+
+  @Post(':id/template')
+  @RequiresPermission('messages.send')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Send an approved template — the only message that reaches a closed window' })
+  sendTemplate(@CurrentTenant() scope: TenantScope, @Param('id') id: string, @Body() body: any) {
+    return this.svc.sendTemplate(scope, id, body);
   }
 
   @Get(':id/messages')
