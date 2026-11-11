@@ -245,31 +245,31 @@ export class AuthService {
       throw new BadRequestException('Disposable email addresses are not allowed');
     }
 
-    // Duplicate email check (across all tenants)
-    const existingUser = await this.prisma.user.findFirst({ where: { email: dto.email } });
-    if (existingUser) throw new ConflictException('Email already registered');
-
-    // Resolve invite code (referrer)
-    let referredByCode: string | null = null;
-    if (dto.inviteCode) {
-      const referrer = await this.prisma.user.findUnique({ where: { inviteCode: dto.inviteCode } });
-      if (!referrer) throw new BadRequestException('Invalid invite code');
-      referredByCode = dto.inviteCode;
-    }
-
-    // Generate unique tenant slug
+    // None of these depend on each other, and run one after another they turned a
+    // sign-up into five round trips plus a hash before the first row was written. The
+    // password hash is deliberately slow and now overlaps the reads rather than following
+    // them. Errors are still reported in the order someone would expect to meet them.
     const baseSlug = dto.workspaceName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-    const slug     = await this.uniqueSlug(baseSlug);
+    const invite   = dto.inviteCode?.trim() || null;
 
-    // Generate unique user invite code
-    const userInviteCode = await this.generateInviteCode();
+    const [existingUser, referrer, slug, userInviteCode, starterPlan, hashedPassword] =
+      await Promise.all([
+        this.prisma.user.findFirst({ where: { email: dto.email } }),
+        invite
+          ? this.prisma.user.findUnique({ where: { inviteCode: invite } })
+          : Promise.resolve(null),
+        this.uniqueSlug(baseSlug),
+        this.generateInviteCode(),
+        this.prisma.plan
+          .findFirst({ where: { name: { contains: 'Starter', mode: 'insensitive' } } })
+          .catch(() => null),
+        bcrypt.hash(dto.password, 12),
+      ]);
 
-    // Find STARTER plan
-    const starterPlan = await this.prisma.plan.findFirst({
-      where: { name: { contains: 'Starter', mode: 'insensitive' } },
-    }).catch(() => null);
+    if (existingUser) throw new ConflictException('Email already registered');
+    if (invite && !referrer) throw new BadRequestException('Invalid invite code');
+    const referredByCode: string | null = invite;
 
-    const hashedPassword = await bcrypt.hash(dto.password, 12);
     const trialEnd = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
 
     const { tenant, user } = await this.prisma.$transaction(async (tx) => {
