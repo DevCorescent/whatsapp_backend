@@ -22,11 +22,52 @@ interface IntegrationRow {
   business:   { whatsappAppSecret: string | null } | null;
 }
 
+/**
+ * WhatsApp's message type to one `MessageType` can hold.
+ *
+ * `button` and `reaction` used to map to BUTTON and REACTION, which are not values of
+ * that enum — so the insert threw, the catch rethrew anything but a duplicate, and the
+ * message was lost. Meta then retried and lost it again. Every time a customer tapped a
+ * template's quick-reply button or reacted with an emoji, the reply never arrived and
+ * nothing said so.
+ *
+ * They map to what the chat already expects to read: a button tap is an interactive
+ * reply, and a reaction is stored as text with the emoji in its metadata — which is what
+ * the renderer has always looked for.
+ *
+ * `contacts` and `order` were missing outright and fell through to TEXT with no content,
+ * so a shared contact card and a placed order both read "Unsupported message".
+ */
 const TYPE_MAP: Record<string, string> = {
   text: 'TEXT', image: 'IMAGE', audio: 'AUDIO', video: 'VIDEO',
   document: 'DOCUMENT', sticker: 'STICKER', location: 'LOCATION',
-  interactive: 'INTERACTIVE', button: 'BUTTON', reaction: 'REACTION',
+  interactive: 'INTERACTIVE', button: 'INTERACTIVE', reaction: 'TEXT',
+  contacts: 'TEXT', order: 'TEXT', system: 'SYSTEM',
 };
+
+/** "Ravi Verma" or "Ravi Verma and 2 others" — a shared contact card, in one line. */
+function contactsSummary(message: WAMessage): string | null {
+  const names = (message.contacts ?? [])
+    .map((c: any) => c?.name?.formatted_name?.trim() || c?.name?.first_name?.trim())
+    .filter(Boolean) as string[];
+  if (!names.length) return null;
+  return names.length === 1
+    ? `👤 ${names[0]}`
+    : `👤 ${names[0]} and ${names.length - 1} other${names.length === 2 ? '' : 's'}`;
+}
+
+/** What the customer put in their cart, totalled. */
+function orderSummary(message: WAMessage): string | null {
+  const items = (message as any).order?.product_items ?? [];
+  if (!Array.isArray(items) || !items.length) return '🛒 Order';
+  const count = items.reduce((n: number, i: any) => n + (Number(i?.quantity) || 0), 0);
+  const total = items.reduce(
+    (sum: number, i: any) => sum + (Number(i?.item_price) || 0) * (Number(i?.quantity) || 0),
+    0,
+  );
+  const currency = items[0]?.currency ?? '';
+  return `🛒 ${count} item${count === 1 ? '' : 's'}${total ? ` · ${currency} ${total.toFixed(2)}` : ''}`;
+}
 
 @Injectable()
 export class WebhookService {
@@ -397,6 +438,8 @@ export class WebhookService {
       case 'interactive': return message.interactive?.button_reply?.title ?? message.interactive?.list_reply?.title ?? null;
       case 'button':      return message.button?.text ?? null;
       case 'reaction':    return `${message.reaction?.emoji ?? '👍'} Reaction`;
+      case 'contacts':    return contactsSummary(message);
+      case 'order':       return orderSummary(message);
       default:            return null;
     }
   }
@@ -415,6 +458,8 @@ export class WebhookService {
       case 'interactive': return caption ?? '💬 Interactive';
       case 'button':      return caption ?? '🔘 Button reply';
       case 'reaction':    return caption ?? '👍';
+      case 'contacts':    return caption ?? '👤 Contact card';
+      case 'order':       return caption ?? '🛒 Order';
       // Meta's own 'unsupported': the customer sent something the Cloud API will not pass
       // on to a business at all. Calling it an attachment implied there was a file to
       // open, and there is nothing — not even the type they sent.

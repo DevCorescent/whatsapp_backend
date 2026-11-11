@@ -79,6 +79,22 @@ export interface WAMessage {
   location?: { latitude: number; longitude: number; name?: string; address?: string };
   interactive?: { type: string; button_reply?: { id: string; title: string }; list_reply?: { id: string; title: string } };
   button?: { payload: string; text: string };
+  /**
+   * One or more contact cards the customer shared. Distinct from the envelope's
+   * `contacts`, which names the sender — this is what they sent.
+   */
+  contacts?: {
+    name?: { formatted_name?: string; first_name?: string; last_name?: string };
+    phones?: { phone?: string; wa_id?: string; type?: string }[];
+    emails?: { email?: string; type?: string }[];
+    org?: { company?: string; title?: string };
+  }[];
+  /** A cart placed from the business's catalogue. */
+  order?: {
+    catalog_id?: string;
+    text?: string;
+    product_items?: { product_retailer_id?: string; quantity?: number; item_price?: number; currency?: string }[];
+  };
   reaction?: { message_id: string; emoji: string };
   context?: { from: string; id: string };
   errors?: Array<{
