@@ -321,6 +321,9 @@ export class CallsService {
         include: {
           contact:    { select: { id: true, name: true, phone: true, avatarUrl: true } },
           answeredBy: { select: { id: true, name: true } },
+          // So the call list can offer the recording where the call is, rather than
+          // sending someone to a separate page to find the one they are looking at.
+          recording:  { select: { id: true, durationSec: true, sizeBytes: true } },
         },
       }),
       this.prisma.call.count({ where }),
