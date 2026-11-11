@@ -29,9 +29,42 @@ export class BillingService {
     return { success: true, data: { plans } };
   }
 
+  /**
+   * The plans one account may be put on: the platform's public plans, their own
+   * reseller's plans if they have one, and any plan priced for them alone.
+   *
+   * Two things were wrong without this. An account on a custom plan saw a billing page
+   * that did not list the plan they were on and offered to "upgrade" them to something
+   * smaller; and because a reseller's plans are PUBLIC rows too, every account saw every
+   * reseller's plans, including resellers they have nothing to do with.
+   */
+  private async availablePlans(tenantId: string) {
+    const tenant = await this.prisma.tenant.findUnique({
+      where:  { id: tenantId },
+      select: { parentId: true },
+    });
+    return {
+      isActive: true,
+      OR: [
+        { visibility: 'PUBLIC' as const, resellerId: null },
+        ...(tenant?.parentId ? [{ resellerId: tenant.parentId }] : []),
+        { ownerTenantId: tenantId },
+      ],
+    };
+  }
+
+  /** One plan, only if this account may be put on it. */
+  private async planFor(tenantId: string, planId: string) {
+    const plan = await this.prisma.plan.findFirst({
+      where: { id: planId, ...(await this.availablePlans(tenantId)) },
+    });
+    if (!plan) throw new NotFoundException('Plan not found');
+    return plan;
+  }
+
   async getPlans(scope: TenantScope) {
     const plans = await this.prisma.plan.findMany({
-      where:   { isActive: true, visibility: 'PUBLIC' },
+      where:   await this.availablePlans(scope.tenantId),
       orderBy: { sortOrder: 'asc' },
     });
 
@@ -106,7 +139,9 @@ export class BillingService {
   // ── Unified checkout ───────────────────────────────────────────────────────
 
   async checkout(scope: TenantScope, planId: string) {
-    const plan = await this.getPlanById(planId);
+    // Only a plan this account may be on. A plan id is guessable, and a plan priced for
+    // one customer — possibly at nothing — must not be reachable by anyone else.
+    const plan = await this.planFor(scope.tenantId, planId);
     const price = (plan as any).priceMonthly ?? 0;
 
     if (price <= 0) {
@@ -451,7 +486,7 @@ export class BillingService {
     });
     if (!sub) throw new NotFoundException('Subscription not found');
 
-    const targetPlan = await this.getPlanById(toPlanId);
+    const targetPlan = await this.planFor(scope.tenantId, toPlanId);
 
     const now        = new Date();
     const periodEnd  = sub.currentPeriodEnd;
@@ -922,7 +957,7 @@ export class BillingService {
   // ── Stripe checkout ────────────────────────────────────────────────────────
 
   async createStripeCheckout(scope: TenantScope, planId: string, billingCycle: 'MONTHLY' | 'ANNUAL') {
-    const plan = await this.getPlanById(planId);
+    const plan = await this.planFor(scope.tenantId, planId);
     if (!plan.stripePriceId) throw new BadRequestException('Plan does not have a Stripe price');
 
     const stripeSecretKey = process.env['STRIPE_SECRET_KEY'];

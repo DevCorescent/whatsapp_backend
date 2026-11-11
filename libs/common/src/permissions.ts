@@ -153,6 +153,15 @@ export const INVITABLE_ROLES = ['ADMIN', 'MANAGER', 'MARKETING_USER', 'AGENT'] a
 /** Roles that may manage team members and their permissions. */
 export const TEAM_ADMIN_ROLES = ['SUPER_ADMIN', 'TENANT_OWNER', 'ADMIN'] as const;
 
+/**
+ * Every role a person in a customer's account can hold.
+ *
+ * Wider than INVITABLE_ROLES because the Super Admin can also move ownership — the one
+ * change an account cannot make for itself when the owner has left. SUPER_ADMIN is not
+ * here: it is the platform's own role, and nothing inside an account may reach it.
+ */
+export const TENANT_ROLES = ['TENANT_OWNER', 'ADMIN', 'MANAGER', 'MARKETING_USER', 'AGENT'] as const;
+
 export function isInvitableRole(role: string | null | undefined): boolean {
   return (INVITABLE_ROLES as readonly string[]).includes(role ?? '');
 }

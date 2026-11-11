@@ -279,6 +279,27 @@ export class AdminController {
     return this.svc.listTenantUsers(scope, id);
   }
 
+  @Get('tenants/:id/users/:userId/access')
+  @ApiOperation({ summary: "A customer's user: their role and what they may do" })
+  tenantUserAccess(
+    @CurrentTenant() scope: TenantScope,
+    @Param('id') id: string,
+    @Param('userId') userId: string,
+  ) {
+    return this.svc.getTenantUserAccess(scope, id, userId);
+  }
+
+  @Put('tenants/:id/users/:userId/access')
+  @ApiOperation({ summary: "Change a customer's user's role, or grant and withhold parts of the app" })
+  setTenantUserAccess(
+    @CurrentTenant() scope: TenantScope,
+    @Param('id') id: string,
+    @Param('userId') userId: string,
+    @Body() body: { role?: string; permissions?: Record<string, boolean | null> },
+  ) {
+    return this.svc.setTenantUserAccess(scope, id, userId, body ?? {});
+  }
+
   // ── Platform staff ───────────────────────────────────────────────────────────
 
   @Get('staff')

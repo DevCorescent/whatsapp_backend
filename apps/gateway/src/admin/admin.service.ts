@@ -6,6 +6,7 @@ import {
   TenantScope, PERMISSIONS, accountCeiling, roleDefaults, resolvePermission, MessageRatesService, WalletService,
   decryptSecret, computeBulkPrices, type BulkPriceChange, PermissionsService,
   type Permission, PLATFORM_PERMISSIONS, requireFields, isInvitableRole, StorageService,
+  TENANT_ROLES,
 } from '@lib/common';
 import * as bcrypt from 'bcryptjs';
 import { randomUUID } from 'node:crypto';
@@ -32,6 +33,55 @@ const CMS_SECTIONS_META: Record<string, { label: string; description: string; wh
 };
 
 const CMS_SECTION_KEYS = Object.keys(CMS_SECTIONS_META);
+
+// ── Plan fields an admin may set ──────────────────────────────────────────────
+//
+// The plan body used to be written straight through as `data as any`, so anything the
+// request named reached the column of that name — `id`, `createdAt`, `resellerId`, a
+// plan handed to someone else's reseller. These are the fields the admin screens edit;
+// `resellerId` and `basePlanId` are set by the code that owns them, never by a body.
+
+const PLAN_NUMBERS = [
+  'priceMonthly', 'priceAnnual', 'maxContacts', 'maxMsgPerMonth', 'maxAgents',
+  'maxCampaigns', 'maxFlows', 'sortOrder', 'aiCredits', 'maxStorageMb', 'maxBusinesses',
+  'maxCampaignRecipients', 'maxKnowledgeDocs', 'maxMsgPerDay', 'maxMsgPerHour',
+  'maxQuickReplies', 'maxTemplates', 'maxUploadMb', 'retentionDays',
+] as const;
+
+const PLAN_BOOLEANS = [
+  'aiEnabled', 'ragEnabled', 'whiteLabel', 'advancedAi', 'isActive', 'isPopular',
+  'allowExport', 'callingEnabled', 'walletEnabled',
+] as const;
+
+const PLAN_STRINGS = ['name', 'displayName', 'description', 'stripePriceId'] as const;
+const PLAN_LISTS = ['features', 'allowedAiModels'] as const;
+
+function planFields(body: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of PLAN_NUMBERS) {
+    if (body[key] === undefined) continue;
+    const n = Number(body[key]);
+    if (Number.isFinite(n)) out[key] = n;
+  }
+  for (const key of PLAN_BOOLEANS) {
+    if (body[key] !== undefined) out[key] = Boolean(body[key]);
+  }
+  for (const key of PLAN_STRINGS) {
+    if (body[key] === undefined) continue;
+    const s = String(body[key]).trim();
+    out[key] = s || (key === 'name' || key === 'displayName' ? undefined : null);
+  }
+  for (const key of PLAN_LISTS) {
+    if (Array.isArray(body[key])) out[key] = (body[key] as unknown[]).map(String).filter(Boolean);
+  }
+  if (body['visibility'] === 'PUBLIC' || body['visibility'] === 'PRIVATE') {
+    out['visibility'] = body['visibility'];
+  }
+  if (typeof body['ownerTenantId'] === 'string' || body['ownerTenantId'] === null) {
+    out['ownerTenantId'] = body['ownerTenantId'] || null;
+  }
+  return out;
+}
 
 @Injectable()
 export class AdminService {
@@ -480,32 +530,109 @@ export class AdminService {
 
   async listPlans(scope: TenantScope) {
     await this.guard(scope, 'platform.tenants.view');
-    return this.prisma.plan.findMany({ orderBy: { sortOrder: 'asc' } });
+    // A plan built for one customer is theirs, and the Plans screen has a column saying
+    // whose — which never filled in, because the owner was not loaded. Someone reading
+    // that list to decide what to charge saw every private tier as "no single owner".
+    return this.prisma.plan.findMany({
+      orderBy: [{ sortOrder: 'asc' }, { priceMonthly: 'asc' }],
+      include: { ownerTenant: { select: { id: true, name: true, slug: true } } },
+    });
   }
 
-  async createPlan(scope: TenantScope, data: {
-    name: string; displayName: string; description?: string;
-    priceMonthly: number; priceAnnual: number;
-    maxContacts: number; maxMsgPerMonth: number; maxAgents: number;
-    maxCampaigns: number; aiEnabled?: boolean; features?: string[];
-  }) {
+  /**
+   * A new plan — public, or priced for one account and shown to nobody else.
+   *
+   * The admin form already asked for all of this, including whose plan a private one is
+   * and which plan it was copied from. The server took the body and wrote it straight
+   * through, which broke the whole flow in two ways: the form deliberately omits the
+   * machine name so the server can generate one, and nothing generated it; and the body
+   * carries `cloneFrom`, which is not a column, so Prisma refused the write outright.
+   * Building a plan for a customer failed every time.
+   */
+  async createPlan(scope: TenantScope, data: Record<string, unknown>) {
     await this.guard(scope, 'platform.plans.manage');
-    return this.prisma.plan.create({ data: data as any });
+    requireFields(data, ['displayName']);
+    const fields = planFields(data);
+
+    const ownerTenantId = fields['ownerTenantId'] as string | null | undefined;
+    const isPrivate = fields['visibility'] === 'PRIVATE';
+    if (isPrivate && ownerTenantId) {
+      const owner = await this.prisma.tenant.findUnique({
+        where: { id: ownerTenantId }, select: { id: true },
+      });
+      if (!owner) throw new NotFoundException('That account no longer exists');
+    }
+
+    // A clone is a new plan whose limits came from an existing one; the form has already
+    // copied them across, so all that is left to keep is where they came from.
+    const cloneFrom = typeof data['cloneFrom'] === 'string' ? data['cloneFrom'] : null;
+    const base = cloneFrom
+      ? await this.prisma.plan.findUnique({ where: { id: cloneFrom }, select: { id: true } })
+      : null;
+
+    return this.prisma.plan.create({
+      data: {
+        ...fields,
+        name: await this.uniquePlanName(fields['name'] ?? data['displayName']),
+        ownerTenantId: isPrivate ? ownerTenantId ?? null : null,
+        basePlanId: base?.id ?? null,
+      } as any,
+    });
+  }
+
+  /**
+   * A machine name no other plan has.
+   *
+   * The form leaves this blank for a plan built for one customer — there is nothing
+   * useful for a person to type, and a blank would collide with the next blank — so one
+   * is made from the display name and a suffix added only if that name is taken.
+   */
+  private async uniquePlanName(from: unknown): Promise<string> {
+    const root = String(from ?? '')
+      .toUpperCase()
+      .replace(/[^A-Z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 40) || 'PLAN';
+
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const candidate = attempt === 0 ? root : `${root}_${attempt + 1}`;
+      const taken = await this.prisma.plan.findUnique({
+        where: { name: candidate }, select: { id: true },
+      });
+      if (!taken) return candidate;
+    }
+    return `${root}_${Date.now().toString(36).toUpperCase()}`;
   }
 
   async updatePlan(scope: TenantScope, planId: string, data: Record<string, unknown>) {
     await this.guard(scope, 'platform.plans.manage');
     const plan = await this.prisma.plan.findUnique({ where: { id: planId } });
     if (!plan) throw new NotFoundException('Plan not found');
-    return this.prisma.plan.update({ where: { id: planId }, data: data as any });
+    return this.prisma.plan.update({ where: { id: planId }, data: planFields(data) as any });
   }
 
   // ── Assign plan to tenant ──────────────────────────────────────────────────
 
-  async assignPlan(scope: TenantScope, tenantId: string, planId: string, billingCycle: string) {
-    await this.guard(scope, 'platform.tenants.manage');
+  /**
+   * A plan this account may be put on.
+   *
+   * A plan built for one customer is theirs: its price was agreed with them and may be
+   * nothing at all, so putting somebody else on it would quietly give that price away.
+   * The admin screens already leave another customer's plan out of the dropdown; this
+   * is the rule those screens were written against.
+   */
+  private async assignablePlan(tenantId: string, planId: string) {
     const plan = await this.prisma.plan.findUnique({ where: { id: planId } });
     if (!plan) throw new NotFoundException('Plan not found');
+    if (plan.ownerTenantId && plan.ownerTenantId !== tenantId) {
+      throw new BadRequestException(`${plan.displayName} was built for another customer.`);
+    }
+    return plan;
+  }
+
+  async assignPlan(scope: TenantScope, tenantId: string, planId: string, billingCycle: string) {
+    await this.guard(scope, 'platform.tenants.manage');
+    const plan = await this.assignablePlan(tenantId, planId);
     const now = new Date();
     const end = billingCycle === 'ANNUAL'
       ? new Date(now.getFullYear() + 1, now.getMonth(), now.getDate())
@@ -961,6 +1088,155 @@ export class AdminService {
       orderBy: [{ role: 'asc' }, { name: 'asc' }],
     });
     return { users, total: users.length };
+  }
+
+  /**
+   * What one person in a customer's account may do.
+   *
+   * The same three-state grid the workspace's own Team page shows — allow, role default,
+   * withhold — but reachable from this side, so a customer who asks for "give Priya
+   * campaigns but not billing" doesn't have to be walked through doing it themselves.
+   *
+   * The account's ceiling still applies, and `platform.*` sits outside every ceiling but
+   * the platform account's own: no override here can hand a customer's user any part of
+   * running the platform.
+   */
+  async getTenantUserAccess(scope: TenantScope, tenantId: string, userId: string) {
+    await this.guard(scope, 'platform.tenants.manage');
+    const member = await this.tenantMember(tenantId, userId);
+    const { accountType, resellerType } = await this.accountKind(tenantId);
+
+    const overrides = new Map(member.userPermissions.map((p) => [p.permission, p.allowed]));
+    const roleOverrides = await this.roleOverrides(accountType, member.role);
+    const ceiling = accountCeiling(accountType, resellerType) as readonly string[];
+    const principal = { role: member.role, accountType, resellerType };
+
+    const permissions: Record<string, { roleDefault: boolean; override: boolean | null; effective: boolean }> = {};
+    for (const p of PERMISSIONS) {
+      if (!ceiling.includes(p)) continue; // outside the ceiling it is not grantable at all
+      permissions[p] = {
+        roleDefault: (roleDefaults(member.role, accountType) as readonly string[]).includes(p),
+        override:    overrides.has(p) ? overrides.get(p)! : null,
+        effective:   resolvePermission(principal, p, roleOverrides, overrides),
+      };
+    }
+    return {
+      user: { id: member.id, name: member.name, email: member.email, role: member.role },
+      accountType,
+      roles: TENANT_ROLES,
+      permissions,
+    };
+  }
+
+  async setTenantUserAccess(
+    scope: TenantScope,
+    tenantId: string,
+    userId: string,
+    body: { role?: string; permissions?: Record<string, boolean | null> },
+  ) {
+    await this.guard(scope, 'platform.tenants.manage');
+    const member = await this.tenantMember(tenantId, userId);
+    if (member.id === scope.userId) {
+      throw new BadRequestException('You cannot change your own access here.');
+    }
+
+    const role = body.role && body.role !== member.role ? body.role : null;
+    if (role && !(TENANT_ROLES as readonly string[]).includes(role)) {
+      throw new BadRequestException('That is not a role in a customer account.');
+    }
+
+    const { accountType, resellerType } = await this.accountKind(tenantId);
+    const ceiling = accountCeiling(accountType, resellerType) as readonly string[];
+    const valid = new Set<string>(PERMISSIONS);
+
+    // The same rule the account's own Team page keeps: an owner holds everything, so
+    // withholding one piece from them would be a setting that silently does nothing.
+    const endsAsOwner = (role ?? member.role) === 'TENANT_OWNER';
+    if (endsAsOwner && Object.keys(body.permissions ?? {}).length) {
+      throw new BadRequestException('The account owner always has every permission.');
+    }
+
+    // An account has exactly one owner, so making someone the owner hands it over —
+    // the one change an account cannot make for itself once the owner has left.
+    const outgoingOwner = role === 'TENANT_OWNER'
+      ? await this.prisma.user.findFirst({
+          where:  { tenantId, role: 'TENANT_OWNER', removedAt: null, id: { not: member.id } },
+          select: { id: true },
+        })
+      : null;
+
+    await this.prisma.$transaction(async (tx) => {
+      if (outgoingOwner) {
+        await tx.user.update({ where: { id: outgoingOwner.id }, data: { role: 'ADMIN' as any } });
+      }
+      if (role) {
+        await tx.user.update({ where: { id: member.id }, data: { role: role as any } });
+      }
+      for (const [perm, value] of Object.entries(body.permissions ?? {})) {
+        if (!valid.has(perm)) continue;
+        if (value === null) {
+          await tx.userPermission.deleteMany({ where: { userId: member.id, permission: perm } });
+        } else {
+          if (!ceiling.includes(perm)) continue;
+          await tx.userPermission.upsert({
+            where:  { userId_permission: { userId: member.id, permission: perm } },
+            create: { userId: member.id, permission: perm, allowed: value },
+            update: { allowed: value },
+          });
+        }
+      }
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        tenantId: scope.tenantId, userId: scope.userId,
+        action: 'ADMIN_TENANT_USER_ACCESS_CHANGED', resource: 'user', resourceId: member.id,
+        metadata: {
+          forTenantId: tenantId,
+          role: role ?? member.role,
+          ownershipTakenFrom: outgoingOwner?.id ?? null,
+          overrides: body.permissions ?? {},
+        },
+      },
+    });
+    // So it bites on their very next request rather than after the cache expires.
+    this.permissions.invalidate(member.id);
+    if (outgoingOwner) this.permissions.invalidate(outgoingOwner.id);
+    return { success: true, ownershipTakenFrom: outgoingOwner?.id ?? null };
+  }
+
+  /** A person in a customer's account, never the Super Admin and never a removed row. */
+  private async tenantMember(tenantId: string, userId: string) {
+    const member = await this.prisma.user.findFirst({
+      where:  { id: userId, tenantId, removedAt: null, role: { not: 'SUPER_ADMIN' as any } },
+      select: {
+        id: true, name: true, email: true, role: true,
+        userPermissions: { select: { permission: true, allowed: true } },
+      },
+    });
+    if (!member) throw new NotFoundException('That person is not in this account');
+    return member;
+  }
+
+  /** The account kind, which sets the permission ceiling. */
+  private async accountKind(tenantId: string) {
+    const tenant = await this.prisma.tenant.findUnique({
+      where:  { id: tenantId },
+      select: { accountType: true, resellerType: true },
+    });
+    if (!tenant) throw new NotFoundException('Account not found');
+    return {
+      accountType:  (tenant.accountType as string | undefined) ?? 'CLIENT',
+      resellerType: (tenant.resellerType as string | null | undefined) ?? null,
+    };
+  }
+
+  private async roleOverrides(accountType: string, role: string) {
+    const rows = await this.prisma.rolePermission.findMany({
+      where:  { accountType: accountType as any, role: role as any },
+      select: { accountType: true, role: true, permission: true, allowed: true },
+    }).catch(() => []);
+    return new Map(rows.map((r) => [`${r.accountType}:${r.role}:${r.permission}`, r.allowed]));
   }
 
   async stopViewAs(scope: TenantScope) {
@@ -1864,6 +2140,7 @@ export class AdminService {
     },
   ) {
     await this.guard(scope, 'platform.tenants.manage');
+    if (data.planId) await this.assignablePlan(tenantId, data.planId);
 
     const sub = await this.prisma.subscription.upsert({
       where: { tenantId },
