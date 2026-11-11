@@ -5,9 +5,10 @@ import { PrismaService } from '@lib/prisma';
 import {
   TenantScope, PERMISSIONS, accountCeiling, roleDefaults, resolvePermission, MessageRatesService, WalletService,
   decryptSecret, computeBulkPrices, type BulkPriceChange, PermissionsService,
-  type Permission, PLATFORM_PERMISSIONS, requireFields, isInvitableRole,
+  type Permission, PLATFORM_PERMISSIONS, requireFields, isInvitableRole, StorageService,
 } from '@lib/common';
 import * as bcrypt from 'bcryptjs';
+import { randomUUID } from 'node:crypto';
 
 // ── CMS section metadata (mirrored from lib/cms/sections.ts — no Next.js imports) ──
 
@@ -39,6 +40,7 @@ export class AdminService {
     private readonly rates:  MessageRatesService,
     private readonly wallet: WalletService,
     private readonly permissions: PermissionsService,
+    private readonly storage: StorageService,
   ) {}
 
   /**
@@ -1486,6 +1488,47 @@ export class AdminService {
       },
     });
     return { success: true, data: this.buildEditorSection(key, null) };
+  }
+
+  // ── Brand assets ─────────────────────────────────────────────────────────────
+
+  /**
+   * Stores a logo, favicon or any image the CMS points at, and hands back its URL.
+   *
+   * Image fields took a URL and nothing else, so using one meant finding somewhere else
+   * to host the file first — which for a favicon is most of the work. The same guard as
+   * the CMS itself: a reseller may upload for its own brand, the platform for its own.
+   */
+  async uploadAsset(
+    scope: TenantScope,
+    file: { buffer: Buffer; mimetype: string; originalname: string; size: number },
+  ) {
+    await this.guardCms(scope);
+    if (!file) throw new BadRequestException('No file provided');
+
+    // Favicons are commonly .ico, and SVG is allowed because a logo usually is one.
+    const ALLOWED = new Set([
+      'image/png', 'image/jpeg', 'image/webp', 'image/gif',
+      'image/svg+xml', 'image/x-icon', 'image/vnd.microsoft.icon',
+    ]);
+    if (!ALLOWED.has(file.mimetype)) {
+      throw new BadRequestException(`"${file.mimetype}" is not an image we can serve. Use PNG, JPEG, WebP, SVG or ICO.`);
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      throw new BadRequestException('That image is over 2 MB. A logo or favicon should be far smaller.');
+    }
+
+    const ext  = (file.originalname.split('.').pop() ?? 'png').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const owner = this.cmsOwner(scope) ?? 'platform';
+    const key  = `brand/${owner}/${randomUUID()}.${ext}`;
+
+    const stored = await this.storage.put(key, file.buffer, file.mimetype);
+    if (!stored.url) {
+      throw new BadRequestException(
+        'The file store has no public address configured, so an uploaded image could not be served. Paste a URL instead.',
+      );
+    }
+    return { success: true, data: { url: stored.url, key: stored.key } };
   }
 
   // ── Commissions ──────────────────────────────────────────────────────────────

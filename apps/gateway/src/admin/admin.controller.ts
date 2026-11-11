@@ -1,7 +1,9 @@
 import {
   Controller, Get, Post, Patch, Put, Delete, Body, Param, Query, UseGuards, Res, HttpCode, HttpStatus,
+  UseInterceptors, UploadedFile,
 } from '@nestjs/common';
-import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiConsumes } from '@nestjs/swagger';
 import { JwtAuthGuard, CurrentTenant, TenantScope } from '@lib/common';
 import { Response } from 'express';
 import { AdminService } from './admin.service';
@@ -386,6 +388,15 @@ export class AdminController {
   @ApiOperation({ summary: 'Reset a CMS section to defaults (super admin)' })
   deleteCmsSection(@CurrentTenant() scope: TenantScope, @Param('key') key: string) {
     return this.svc.deleteCmsSection(scope, key);
+  }
+
+  @Post('cms/assets')
+  @HttpCode(HttpStatus.OK)
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({ summary: 'Upload a logo, favicon or CMS image and get its URL' })
+  @UseInterceptors(FileInterceptor('file'))
+  uploadAsset(@CurrentTenant() scope: TenantScope, @UploadedFile() file: any) {
+    return this.svc.uploadAsset(scope, file);
   }
 
   // ── Commissions ──────────────────────────────────────────────────────────────
