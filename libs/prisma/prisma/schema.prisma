@@ -984,6 +984,12 @@ model WhiteLabelConfig {
   accentColor      String?
   /// Lower-case host without scheme or port, e.g. "crm.acme.com". Unique across the platform.
   domain           String?   @unique
+  /// 180x180 PNG for an iOS home screen. Without it iOS crops a screenshot of the page.
+  appleIconUrl     String?
+  /// 1200x630 image shown when a link to this brand is shared — WhatsApp, LinkedIn, Slack.
+  ogImageUrl       String?
+  /// Browser chrome and installed-app colour. Falls back to the brand's primary colour.
+  themeColor       String?
   supportEmail     String?
   supportPhone     String?
   website          String?

@@ -10,6 +10,7 @@ const LIVE_CONFIG = {
 
 const CONFIG_SELECT = {
   tenantId: true, brandName: true, logoUrl: true, faviconUrl: true, primaryColor: true,
+  appleIconUrl: true, ogImageUrl: true, themeColor: true,
   accentColor: true, domain: true, supportEmail: true, supportPhone: true, website: true,
   address: true, loginHeadline: true, loginSubtext: true, subdomain: true, landingEnabled: true,
   landingTitle: true, landingSubtitle: true, termsContent: true, privacyContent: true,

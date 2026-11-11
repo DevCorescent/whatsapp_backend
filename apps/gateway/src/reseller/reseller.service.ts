@@ -135,6 +135,9 @@ export class ResellerService {
       brandName:       config.brandName,
       logoUrl:         config.logoUrl,
       faviconUrl:      config.faviconUrl,
+      appleIconUrl:    config.appleIconUrl,
+      ogImageUrl:      config.ogImageUrl,
+      themeColor:      config.themeColor,
       primaryColor:    config.primaryColor,
       accentColor:     config.accentColor,
       domain:          config.domain,
@@ -160,6 +163,7 @@ export class ResellerService {
 
   async upsertBranding(scope: TenantScope, body: {
     brandName: string; logoUrl?: string; faviconUrl?: string; primaryColor?: string;
+    appleIconUrl?: string; ogImageUrl?: string; themeColor?: string;
     accentColor?: string; domain?: string; supportEmail?: string; supportPhone?: string;
     website?: string; address?: string; loginHeadline?: string; loginSubtext?: string;
     subdomain?: string; landingEnabled?: boolean; landingTitle?: string; landingSubtitle?: string;
@@ -171,6 +175,9 @@ export class ResellerService {
       brandName:       body.brandName,
       logoUrl:         body.logoUrl        || null,
       faviconUrl:      body.faviconUrl     || null,
+      appleIconUrl:    body.appleIconUrl   || null,
+      ogImageUrl:      body.ogImageUrl     || null,
+      themeColor:      body.themeColor     || null,
       primaryColor:    body.primaryColor   ?? '#059669',
       accentColor:     body.accentColor    || null,
       domain:          body.domain?.trim().toLowerCase() || null,
