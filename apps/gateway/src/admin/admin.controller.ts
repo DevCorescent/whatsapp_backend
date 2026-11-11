@@ -390,6 +390,18 @@ export class AdminController {
     return this.svc.deleteCmsSection(scope, key);
   }
 
+  @Get('platform-brand')
+  @ApiOperation({ summary: "The platform's own name, logo and icons" })
+  platformBranding(@CurrentTenant() scope: TenantScope) {
+    return this.svc.getPlatformBranding(scope);
+  }
+
+  @Put('platform-brand')
+  @ApiOperation({ summary: "Change the platform's own name, logo and icons" })
+  savePlatformBranding(@CurrentTenant() scope: TenantScope, @Body() body: any) {
+    return this.svc.updatePlatformBranding(scope, body);
+  }
+
   @Post('cms/assets')
   @HttpCode(HttpStatus.OK)
   @ApiConsumes('multipart/form-data')

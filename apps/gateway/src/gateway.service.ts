@@ -95,6 +95,29 @@ export class GatewayService {
     return Boolean(config);
   }
 
+  /**
+   * The platform's own branding — its name, logo, favicon and icons.
+   *
+   * A white-label reseller could change all of these from day one; the platform itself
+   * could not, because its brand was a constant in the frontend with an environment
+   * variable in front of it. So the one account that cannot be reconfigured without a
+   * deploy was the operator's own.
+   *
+   * Stored on the platform tenant's own config row, read without auth because the login
+   * page needs it before anyone has signed in. Absent, the frontend's defaults stand.
+   */
+  async getPlatformBrand() {
+    const tenant = await this.prisma.tenant.findFirst({
+      where:  { accountType: 'PLATFORM' },
+      select: { id: true },
+    });
+    if (!tenant) return null;
+    return this.prisma.whiteLabelConfig.findUnique({
+      where:  { tenantId: tenant.id },
+      select: CONFIG_SELECT,
+    });
+  }
+
   async getBrandForHost(host: string | null | undefined) {
     if (!host) return null;
     // The same setting the frontend reads, under the same name. These used to be two

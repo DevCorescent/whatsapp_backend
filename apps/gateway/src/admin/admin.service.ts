@@ -1490,6 +1490,73 @@ export class AdminService {
     return { success: true, data: this.buildEditorSection(key, null) };
   }
 
+  // ── The platform's own brand ─────────────────────────────────────────────────
+
+  /**
+   * What the operator's own product is called and what it looks like.
+   *
+   * Every white-label reseller could change this from the start; the platform could not,
+   * because its brand was a constant in the frontend behind an environment variable. So
+   * the one account nobody could reconfigure without a deploy was the operator's own.
+   *
+   * It is kept on the platform tenant's own config row, the same table a reseller's brand
+   * lives in — one shape, one set of fields, and the frontend already knows how to read
+   * it. Nothing here makes the platform a reseller: the host lookup still only matches
+   * live white-label resellers, so this row is read on its own.
+   */
+  async getPlatformBranding(scope: TenantScope) {
+    await this.guard(scope, 'platform.whitelabel.manage');
+    const tenant = await this.platformTenant();
+    const config = await this.prisma.whiteLabelConfig.findUnique({ where: { tenantId: tenant.id } });
+    return { success: true, data: config };
+  }
+
+  async updatePlatformBranding(scope: TenantScope, body: Record<string, any>) {
+    await this.guard(scope, 'platform.whitelabel.manage');
+    const tenant = await this.platformTenant();
+
+    const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+    const payload = {
+      brandName:     text(body.brandName) ?? 'Waboxa',
+      logoUrl:       text(body.logoUrl),
+      faviconUrl:    text(body.faviconUrl),
+      appleIconUrl:  text(body.appleIconUrl),
+      ogImageUrl:    text(body.ogImageUrl),
+      themeColor:    text(body.themeColor),
+      primaryColor:  text(body.primaryColor) ?? '#059669',
+      accentColor:   text(body.accentColor),
+      supportEmail:  text(body.supportEmail),
+      supportPhone:  text(body.supportPhone),
+      website:       text(body.website),
+      address:       text(body.address),
+      loginHeadline: text(body.loginHeadline),
+      loginSubtext:  text(body.loginSubtext),
+    };
+
+    const saved = await this.prisma.whiteLabelConfig.upsert({
+      where:  { tenantId: tenant.id },
+      create: { tenantId: tenant.id, ...payload },
+      update: payload,
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        tenantId: scope.tenantId, userId: scope.userId,
+        action: 'PLATFORM_BRANDING_UPDATED', resource: 'whiteLabelConfig', resourceId: saved.id,
+      },
+    });
+    return { success: true, data: saved };
+  }
+
+  private async platformTenant() {
+    const tenant = await this.prisma.tenant.findFirst({
+      where:  { accountType: 'PLATFORM' },
+      select: { id: true },
+    });
+    if (!tenant) throw new NotFoundException('No platform account exists');
+    return tenant;
+  }
+
   // ── Brand assets ─────────────────────────────────────────────────────────────
 
   /**

@@ -31,6 +31,12 @@ export class GatewayController {
     return this.svc.getBrandForHost(host);
   }
 
+  /** The platform's own branding (public — the login page needs it before sign-in). */
+  @Get('brand/platform')
+  platformBrand() {
+    return this.svc.getPlatformBrand();
+  }
+
   /** White-label brand config for a tenant (public — used by email templates). */
   @Get('brand/by-tenant')
   brandByTenant(@Query('tenantId') tenantId: string) {
