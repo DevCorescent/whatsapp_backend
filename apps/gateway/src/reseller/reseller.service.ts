@@ -456,9 +456,22 @@ export class ResellerService {
 
     const sub  = client.subscription as any;
     const plan = sub?.plan ?? {};
+    // Counted, not assumed. This read a flat 0 against a real allowance, so a reseller
+    // looking at a busy client saw a client who had apparently sent nothing — the one
+    // number that tells them whether the client is getting value from the plan.
+    const periodStart: Date = sub?.currentPeriodStart
+      ?? new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+    const messagesSent = await this.prisma.message.count({
+      where: {
+        tenantId: client.id,
+        direction: 'OUTBOUND',
+        isNote: false,
+        createdAt: { gte: periodStart },
+      },
+    });
     const usage: Record<string, { used: number; limit: number }> = {
       contacts:  { used: (client._count as any).contacts,  limit: plan.maxContacts    ?? 0 },
-      messages:  { used: 0,                                limit: plan.maxMsgPerMonth ?? 0 },
+      messages:  { used: messagesSent,                     limit: plan.maxMsgPerMonth ?? 0 },
       users:     { used: (client._count as any).users,     limit: plan.maxAgents      ?? 0 },
       campaigns: { used: (client._count as any).campaigns, limit: plan.maxCampaigns   ?? 0 },
     };

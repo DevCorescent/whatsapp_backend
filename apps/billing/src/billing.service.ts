@@ -104,13 +104,36 @@ export class BillingService {
     });
     if (!sub) throw new NotFoundException('Subscription not found');
 
-    // Basic usage counters
-    const [contacts, users] = await Promise.all([
+    // Messages, campaigns, storage and AI credits were all reported as a flat zero —
+    // not "we don't track this" but the number 0 next to a real allowance, so every
+    // workspace's billing page said they had sent nothing all month however busy they
+    // had been. Counted over the subscription's own period, because that is when the
+    // allowance resets.
+    const periodStart = sub.currentPeriodStart;
+    const [contacts, users, messages, campaigns, storage] = await Promise.all([
       this.prisma.contact.count({ where: { tenantId: scope.tenantId } }),
-      this.prisma.user.count({ where: { tenantId: scope.tenantId } }),
+      this.prisma.user.count({ where: { tenantId: scope.tenantId, removedAt: null } }),
+      // What they sent. A message arriving is not something they spend an allowance on,
+      // and nor is an internal note, which never leaves the building.
+      this.prisma.message.count({
+        where: {
+          tenantId: scope.tenantId,
+          direction: 'OUTBOUND',
+          isNote: false,
+          createdAt: { gte: periodStart },
+        },
+      }),
+      this.prisma.campaign.count({
+        where: { tenantId: scope.tenantId, createdAt: { gte: periodStart } },
+      }),
+      this.prisma.message.aggregate({
+        where: { tenantId: scope.tenantId, mediaSize: { not: null } },
+        _sum: { mediaSize: true },
+      }),
     ]);
 
     const plan = (sub as any).plan;
+    const storageMb = Math.round((storage._sum.mediaSize ?? 0) / (1024 * 1024));
     // Return flat shape matching Next.js /api/billing (no data wrapper).
     // The TransformInterceptor skips objects that already have a `success` key.
     return {
@@ -128,10 +151,12 @@ export class BillingService {
       usage: {
         contacts: { label: 'Contacts', used: contacts, limit: plan?.maxContacts ?? 0 },
         agents:   { label: 'Agents',   used: users,    limit: plan?.maxAgents   ?? 0 },
-        messages: { label: 'Messages this month', used: 0, limit: plan?.maxMsgPerMonth ?? 0 },
-        campaigns:{ label: 'Campaigns', used: 0, limit: plan?.maxCampaigns ?? 0 },
-        storage:  { label: 'Storage (MB)', used: 0, limit: 0 },
-        ai:       { label: 'AI credits', used: 0, limit: 0 },
+        // "This period", not "this month": the allowance resets when the subscription
+        // renews, which for an annual plan is nothing like the first of the month.
+        messages: { label: 'Messages sent this period', used: messages, limit: plan?.maxMsgPerMonth ?? 0 },
+        campaigns:{ label: 'Campaigns this period', used: campaigns, limit: plan?.maxCampaigns ?? 0 },
+        storage:  { label: 'Storage (MB)', used: storageMb, limit: plan?.maxStorageMb ?? 0 },
+        ai:       { label: 'AI credits', used: sub.aiCreditsUsed ?? 0, limit: plan?.aiCredits ?? 0 },
       },
     };
   }

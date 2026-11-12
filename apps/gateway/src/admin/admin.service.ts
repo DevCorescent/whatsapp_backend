@@ -199,12 +199,19 @@ export class AdminService {
     // month also made every tenant read zero on the 1st, which looks like a broken column
     // rather than a reset. A tenant with no subscription has no period, so it falls back
     // to the month.
+    //
+    // What they sent, and only that. This counted every row in the table, so an inbound
+    // message and an internal note — neither of which spends a send allowance — were
+    // counted against it, and this column disagreed with the figure the customer saw on
+    // their own billing page for the same workspace.
     const msgCounts = tenantIds.length
       ? await this.prisma.$queryRaw<{ tenantId: string; n: bigint }[]>`
           SELECT m."tenantId", COUNT(*) AS n
             FROM "messages" m
             LEFT JOIN "subscriptions" s ON s."tenantId" = m."tenantId"
            WHERE m."tenantId" = ANY(${tenantIds})
+             AND m."direction" = 'OUTBOUND'
+             AND m."isNote" = false
              AND m."createdAt" >= COALESCE(s."currentPeriodStart", ${startOfMonth})
            GROUP BY m."tenantId"`
       : [];
