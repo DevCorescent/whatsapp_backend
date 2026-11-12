@@ -1717,7 +1717,31 @@ export class AdminService {
       where:   { tenantId: this.cmsOwner(scope), page: 'home', key },
       include: { items: { orderBy: { sortOrder: 'asc' } } },
     });
-    return { success: true, data: this.buildEditorSection(key, section) };
+    const data = this.buildEditorSection(key, section);
+    return {
+      success: true,
+      data: key === 'login' ? { ...data, fallback: await this.loginFallback(scope) } : data,
+    };
+  }
+
+  /**
+   * What the sign-in panel says today when the CMS leaves it blank.
+   *
+   * Its headline and subtext are empty on purpose — blank means "use the brand's own",
+   * which is what a white-label reseller needs. But the editor then showed two empty
+   * boxes for the largest text on the page, and nothing anywhere said what was actually
+   * being shown, so the screen read as broken rather than as inherited.
+   */
+  private async loginFallback(scope: TenantScope) {
+    const tenantId = this.cmsOwner(scope) ?? (await this.platformTenant()).id;
+    const brand = await this.prisma.whiteLabelConfig.findUnique({
+      where:  { tenantId },
+      select: { loginHeadline: true, loginSubtext: true },
+    });
+    return {
+      headline: brand?.loginHeadline ?? null,
+      subtext:  brand?.loginSubtext ?? null,
+    };
   }
 
   async updateCmsSection(scope: TenantScope, key: string, payload: any) {
