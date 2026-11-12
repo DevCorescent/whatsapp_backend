@@ -24,6 +24,11 @@ const CMS_SECTIONS_META: Record<string, { label: string; description: string; wh
   messageTypes: { label: 'Message Types', description: 'The WhatsApp message formats the platform can send and receive.', whatsapp: true, collections: ['type'] },
   integrations: { label: 'Integrations',  description: 'The tools and channels the platform connects with.',                           collections: ['integration'] },
   industries:   { label: 'Industries',    description: "The \"who it's for\" strip of industry cards.",                                  collections: ['industry'] },
+  // The one section that is not on the marketing site. It was added to the editor's own
+  // registry and never here, and this list is what the CMS screen is built from — so the
+  // sign-in panel was editable in the code and reachable from nowhere, for the platform
+  // and for every white-label reseller alike.
+  login:        { label: 'Login panel',   description: 'The green panel beside the sign-in and sign-up forms.',                        collections: ['loginFeature'] },
   testimonials: { label: 'Testimonials',  description: 'Customer quotes.',                                                             collections: ['testimonial'] },
   pricing:      { label: 'Pricing',       description: 'Plan cards on the homepage and the /pricing page.',                            collections: ['plan'] },
   faq:          { label: 'FAQ',           description: 'Frequently asked questions.',                                                  collections: ['faq'] },
