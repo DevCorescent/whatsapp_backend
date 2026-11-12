@@ -4,6 +4,7 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { RedisIoAdapter } from '@lib/common';
 import { GatewayModule } from './gateway.module';
+import { GatewayService } from './gateway.service';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 
@@ -64,6 +65,23 @@ async function bootstrap() {
   // it stays open, which is what a local run needs.
   const allowedOrigins = (process.env.FRONTEND_URL ?? '').split(',').map((o) => o.trim()).filter(Boolean);
   const root = (process.env.PLATFORM_ROOT_DOMAIN ?? '').trim().toLowerCase();
+
+  // A reseller's own domain is an origin nobody can list in advance, and the browser
+  // opens the realtime socket against this server directly — so on a custom domain the
+  // handshake was refused and messages stopped arriving live, with the rest of the app
+  // working because it goes through Next's own proxy. The claimed domains are the
+  // answer, cached so a preflight is not a database query.
+  const gateway = app.get(GatewayService);
+  const claimed = new Map<string, { at: number; ok: boolean }>();
+  const CLAIM_TTL = 60_000;
+  const isClaimed = async (host: string): Promise<boolean> => {
+    const hit = claimed.get(host);
+    if (hit && Date.now() - hit.at < CLAIM_TTL) return hit.ok;
+    const ok = await gateway.isDomainAllowed(host).catch(() => false);
+    claimed.set(host, { at: Date.now(), ok });
+    return ok;
+  };
+
   app.enableCors({
     origin: (origin: string | undefined, cb: (err: Error | null, allow?: boolean) => void) => {
       if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) return cb(null, true);
@@ -71,7 +89,8 @@ async function bootstrap() {
       try { host = new URL(origin).hostname.toLowerCase(); } catch { /* malformed */ }
       const local = host === 'localhost' || host === '127.0.0.1';
       const brand = Boolean(root) && (host === root || host.endsWith('.' + root));
-      cb(null, local || brand);
+      if (local || brand) return cb(null, true);
+      void isClaimed(host).then((ok) => cb(null, ok));
     },
     credentials: true,
   });
