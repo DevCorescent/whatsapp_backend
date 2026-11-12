@@ -27,6 +27,82 @@ export function cnameTarget(): string {
   return process.env['CNAME_TARGET'] || 'cname.vercel-dns.com';
 }
 
+export interface DomainCheckResult {
+  domain: string;
+  state: 'connected' | 'pending' | 'not_added' | 'error';
+  message: string;
+  record: { type: 'CNAME'; name: string; value: string };
+}
+
+/**
+ * Whether a reseller's domain actually reaches the app.
+ *
+ * "Check now" used to answer `not_added` with a fixed sentence whatever the state of
+ * the world, so a reseller who had set DNS correctly hours ago was told, forever, to go
+ * and set it. The screen could already draw all four states; nothing ever produced three
+ * of them.
+ *
+ * Two questions, in order, because they fail differently and the fix differs too:
+ * does the name resolve to us, and does the app answer on it? DNS right but no answer
+ * yet is a certificate still being issued — minutes, not a mistake.
+ */
+export async function checkDomainHosting(domain: string): Promise<DomainCheckResult> {
+  const target = cnameTarget();
+  const record = { type: 'CNAME' as const, name: domain, value: target };
+
+  // Ask the domain itself first. Comparing DNS answers against the provider's is not a
+  // reliable test — Vercel serves *.vercel.app and cname.vercel-dns.com from different
+  // anycast pools, so two names that both reach the app resolve to different addresses.
+  // Whether the app answers on this host is the question, and it is answerable directly.
+  try {
+    const res = await fetch(`https://${domain}/api/ping`, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(8000),
+      headers: { 'User-Agent': 'domain-check', 'ngrok-skip-browser-warning': '1' },
+    });
+    const body = res.ok ? await res.json().catch(() => null) : null;
+    if (body?.ok === true) {
+      return { domain, state: 'connected', message: `${domain} is live.`, record };
+    }
+  } catch {
+    // Falls through to DNS, which is what says whether this is "not set up" or
+    // "set up and not ready yet" — two very different things to be told.
+  }
+
+  const dns = await import('node:dns/promises');
+  const [cnames, addresses] = await Promise.all([
+    dns.resolveCname(domain).catch(() => [] as string[]),
+    dns.resolve4(domain).catch(() => [] as string[]),
+  ]);
+  const resolves = cnames.length > 0 || addresses.length > 0;
+  const pointsAtTarget = cnames.some((c) => c.replace(/\.$/, '').toLowerCase() === target.toLowerCase());
+
+  if (!resolves) {
+    return {
+      domain,
+      state: 'not_added',
+      message: `${domain} does not resolve yet. Add the record below at your DNS provider, then check again.`,
+      record,
+    };
+  }
+
+  if (pointsAtTarget) {
+    return {
+      domain,
+      state: 'pending',
+      message: `The record is right and ${domain} is not serving yet — the certificate usually takes a few minutes.`,
+      record,
+    };
+  }
+
+  return {
+    domain,
+    state: 'pending',
+    message: `${domain} resolves, but not to us and it is not serving the app yet. Check the record below matches exactly.`,
+    record,
+  };
+}
+
 export async function attachDomainToHosting(domain: string): Promise<DomainAttachResult> {
   const dnsHint = `Point a CNAME for ${domain} to ${cnameTarget()}.`;
 

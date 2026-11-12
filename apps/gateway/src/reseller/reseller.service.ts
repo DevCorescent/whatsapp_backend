@@ -2,7 +2,7 @@ import {
   Injectable, NotFoundException, ForbiddenException, BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope, MessageRatesService, WalletService, encryptSecret, computeBulkPrices, type BulkPriceChange, attachDomainToHosting, cnameTarget,} from '@lib/common';
+import { TenantScope, MessageRatesService, WalletService, encryptSecret, computeBulkPrices, type BulkPriceChange, attachDomainToHosting, checkDomainHosting,} from '@lib/common';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 
@@ -234,12 +234,7 @@ export class ResellerService {
       select: { domain: true },
     });
     if (!config?.domain) return null;
-    return {
-      domain:  config.domain,
-      state:   'not_added',
-      message: 'Point a CNAME record for this domain at the value shown, then click Check now.',
-      record:  { type: 'CNAME', name: config.domain, value: cnameTarget() },
-    };
+    return checkDomainHosting(config.domain);
   }
 
   async payBrandingFee(scope: TenantScope) {
