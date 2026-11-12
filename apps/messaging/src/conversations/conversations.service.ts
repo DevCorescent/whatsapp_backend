@@ -458,26 +458,30 @@ export class ConversationsService {
       throw new BadRequestException('Either text, media, or interactive payload is required');
     }
 
-    // Load WhatsApp integration for this conversation
-    const integration = conv.whatsappIntegrationId
-      ? await this.prisma.whatsAppIntegration.findUnique({
-          where: { id: conv.whatsappIntegrationId },
-        })
-      : await this.prisma.whatsAppIntegration.findFirst({
-          where: { businessId: scope.businessId, isActive: true },
-        });
-
-    this.logger.log(`sendMessage integration — found=${!!integration} phoneNumberId=${integration?.phoneNumberId ?? 'null'} hasToken=${!!(integration?.accessToken)}`);
-
-    if (!integration) throw new BadRequestException('No active WhatsApp integration found');
-    if (!integration.accessToken) throw new BadRequestException('WhatsApp integration has no access token');
-
-    const to = conv.contact.phone ?? conv.contact.waId ?? '';
-    this.logger.log(`sendMessage contact — to=${to ? to.slice(0, 6) + '***' : 'MISSING'}`);
-    if (!to) throw new BadRequestException('Contact has no phone number');
-
+    // A note is written for the team and never leaves the building, so none of what
+    // sending needs applies to it: no number to send from, no token to send with, no
+    // number to send to. Demanding them anyway meant an expired token or a contact with
+    // no phone also stopped anyone leaving a note — which is exactly the moment a note
+    // is worth writing.
     let waMessageId: string | null = null;
     if (!payload.isNote) {
+      const integration = conv.whatsappIntegrationId
+        ? await this.prisma.whatsAppIntegration.findUnique({
+            where: { id: conv.whatsappIntegrationId },
+          })
+        : await this.prisma.whatsAppIntegration.findFirst({
+            where: { businessId: scope.businessId, isActive: true },
+          });
+
+      this.logger.log(`sendMessage integration — found=${!!integration} phoneNumberId=${integration?.phoneNumberId ?? 'null'} hasToken=${!!(integration?.accessToken)}`);
+
+      if (!integration) throw new BadRequestException('No active WhatsApp integration found');
+      if (!integration.accessToken) throw new BadRequestException('WhatsApp integration has no access token');
+
+      const to = conv.contact.phone ?? conv.contact.waId ?? '';
+      this.logger.log(`sendMessage contact — to=${to ? to.slice(0, 6) + '***' : 'MISSING'}`);
+      if (!to) throw new BadRequestException('Contact has no phone number');
+
       const accessToken = decryptSecret(integration.accessToken);
       if (!accessToken) throw new BadRequestException('WhatsApp integration access token could not be decrypted — check ENCRYPTION_KEY');
       waMessageId = await this.sendWhatsApp(integration.phoneNumberId, accessToken, to, payload);
