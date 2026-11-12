@@ -1,12 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '@lib/prisma';
+import { LIVE_BRAND_CONFIG, brandHostWhere, normalizeHost } from '@lib/common';
 
-const LIVE_CONFIG = {
-  isActive:    true,
-  suspendedAt: null,
-  tenant: { accountType: 'RESELLER' as const, resellerType: 'WHITE_LABEL' as const, isActive: true },
-};
+const LIVE_CONFIG = LIVE_BRAND_CONFIG;
 
 const CONFIG_SELECT = {
   tenantId: true, brandName: true, logoUrl: true, faviconUrl: true, primaryColor: true,
@@ -16,16 +13,6 @@ const CONFIG_SELECT = {
   landingTitle: true, landingSubtitle: true, termsContent: true, privacyContent: true,
 } as const;
 
-/** A host reduced to what can be compared: no scheme, no port, no trailing dot. */
-function normalizeHost(value: string | null | undefined): string {
-  return (value ?? '')
-    .trim()
-    .toLowerCase()
-    .replace(/^https?:\/\//, '')
-    .split('/')[0]
-    .split(':')[0]
-    .replace(/\.$/, '');
-}
 
 @Injectable()
 export class GatewayService {
@@ -75,17 +62,22 @@ export class GatewayService {
    * contract Caddy's `on_demand_tls.ask` expects, and anything cleverer would be a way to
    * fail it.
    */
+  /** The platform's own hostname, however it happens to be configured. */
+  private rootDomain(): string {
+    return normalizeHost(
+      this.cfg.get<string>('PLATFORM_ROOT_DOMAIN') ??
+      this.cfg.get<string>('NEXT_PUBLIC_APP_DOMAIN') ??
+      (this.cfg.get<string>('NEXTAUTH_URL') ?? ''),
+    );
+  }
+
   async isDomainAllowed(host: string | null | undefined): Promise<boolean> {
     const h = normalizeHost(host);
     if (!h) return false;
 
     // The platform's own hostnames are served by the same proxy and are not anyone's
     // white-label domain, so they are allowed on their own terms.
-    const root = normalizeHost(
-      this.cfg.get<string>('PLATFORM_ROOT_DOMAIN') ??
-      this.cfg.get<string>('NEXT_PUBLIC_APP_DOMAIN') ??
-      (this.cfg.get<string>('NEXTAUTH_URL') ?? ''),
-    );
+    const root = this.rootDomain();
     if (root && (h === root || h.endsWith(`.${root}`))) return true;
 
     const config = await this.prisma.whiteLabelConfig.findFirst({
@@ -124,22 +116,9 @@ export class GatewayService {
     // different variables for one idea, so the two halves could disagree about what
     // counts as a subdomain — and with neither set, every brand host fell through to a
     // domain lookup that could never match a config holding only a subdomain.
-    const rootDomain = normalizeHost(
-      this.cfg.get<string>('PLATFORM_ROOT_DOMAIN') ??
-      this.cfg.get<string>('NEXT_PUBLIC_APP_DOMAIN') ??
-      (this.cfg.get<string>('NEXTAUTH_URL') ?? ''),
-    );
-    const h = normalizeHost(host);
-    const sub = rootDomain && h.endsWith(`.${rootDomain}`)
-      ? h.slice(0, -(rootDomain.length + 1))
-      : null;
-
-    // A host may be claimed either way, so both are tried: a reseller on a subdomain
-    // today may point a domain at it tomorrow without the lookup changing.
-    return this.prisma.whiteLabelConfig.findFirst({
-      where:  { OR: [{ domain: h }, ...(sub ? [{ subdomain: sub }] : [])], ...LIVE_CONFIG },
-      select: CONFIG_SELECT,
-    });
+    const where = brandHostWhere(host, this.rootDomain());
+    if (!where) return null;
+    return this.prisma.whiteLabelConfig.findFirst({ where, select: CONFIG_SELECT });
   }
 
   /**

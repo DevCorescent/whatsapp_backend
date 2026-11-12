@@ -5,7 +5,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '@lib/prisma';
-import { PermissionsService } from '@lib/common';
+import { PermissionsService, brandHostWhere, normalizeHost } from '@lib/common';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 import type { RegisterDto } from './dto/register.dto';
@@ -239,7 +239,7 @@ export class AuthService {
 
   // ── Register ───────────────────────────────────────────────────────────────
 
-  async register(dto: RegisterDto) {
+  async register(dto: RegisterDto, host?: string | null) {
     const domain = dto.email.split('@')[1]?.toLowerCase() ?? '';
     if (DISPOSABLE_DOMAINS.has(domain)) {
       throw new BadRequestException('Disposable email addresses are not allowed');
@@ -270,6 +270,8 @@ export class AuthService {
     if (invite && !referrer) throw new BadRequestException('Invalid invite code');
     const referredByCode: string | null = invite;
 
+    const reseller = await this.resellerFor(host, referrer?.tenantId ?? null);
+
     const trialEnd = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
 
     const { tenant, user } = await this.prisma.$transaction(async (tx) => {
@@ -278,6 +280,10 @@ export class AuthService {
           name: dto.workspaceName,
           slug,
           referredByCode,
+          // Who brought them in, as a relation rather than a loose string. Without these
+          // two the workspace belonged to nobody: it never appeared in the reseller's
+          // panel and never earned them a commission, however they had arrived.
+          ...(reseller ? { parentId: reseller, referredById: reseller } : {}),
           accountType: 'CLIENT',
           settings: { create: {} },
         },
@@ -313,6 +319,37 @@ export class AuthService {
     });
 
     return this.login(user);
+  }
+
+  /**
+   * Whose customer this new workspace is.
+   *
+   * Two ways to arrive, and the stronger one wins. Signing up *on a reseller's own
+   * domain* is the clearest statement there is — they are on that reseller's site,
+   * looking at that reseller's brand — so the host decides. An invite code decides only
+   * when the sign-up came through the platform's own front door.
+   *
+   * Only a reseller can be a parent. An invite code from an ordinary customer is a
+   * referral between customers: it is still recorded on the workspace, but it does not
+   * hand their account to somebody else to manage.
+   */
+  private async resellerFor(host: string | null | undefined, inviterTenantId: string | null): Promise<string | null> {
+    const where = brandHostWhere(host, normalizeHost(
+      this.cfg.get<string>('PLATFORM_ROOT_DOMAIN') ??
+      this.cfg.get<string>('NEXT_PUBLIC_APP_DOMAIN') ??
+      (this.cfg.get<string>('NEXTAUTH_URL') ?? ''),
+    ));
+    if (where) {
+      const config = await this.prisma.whiteLabelConfig.findFirst({ where, select: { tenantId: true } });
+      if (config) return config.tenantId;
+    }
+
+    if (!inviterTenantId) return null;
+    const inviter = await this.prisma.tenant.findUnique({
+      where:  { id: inviterTenantId },
+      select: { id: true, accountType: true, isActive: true },
+    });
+    return inviter?.accountType === 'RESELLER' && inviter.isActive ? inviter.id : null;
   }
 
   // ── Forgot password ────────────────────────────────────────────────────────

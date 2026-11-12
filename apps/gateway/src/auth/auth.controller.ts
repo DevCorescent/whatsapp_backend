@@ -1,6 +1,6 @@
 import {
   Controller, Post, Get, Body, Query, UseGuards,
-  HttpCode, HttpStatus, Request, NotFoundException,
+  HttpCode, HttpStatus, Request, NotFoundException, Headers,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
@@ -26,8 +26,10 @@ export class AuthController {
 
   @Post('register')
   @ApiOperation({ summary: 'Register a new workspace and owner account' })
-  register(@Body() dto: RegisterDto) {
-    return this.authService.register(dto);
+  register(@Body() dto: RegisterDto, @Headers('x-brand-host') host?: string) {
+    // Which front door they came through. A reseller's own domain says whose customer
+    // this is far more plainly than any code typed into a box.
+    return this.authService.register(dto, host);
   }
 
   @Post('workspaces')
