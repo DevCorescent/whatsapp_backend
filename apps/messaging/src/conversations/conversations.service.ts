@@ -1,5 +1,5 @@
 import {
-  Injectable, NotFoundException, BadRequestException, Logger,
+  Injectable, NotFoundException, BadRequestException, ForbiddenException, Logger,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
 import {
@@ -7,7 +7,7 @@ import {
   HandoverService, LeadQualificationService,
   parseSendError, classifySendError, describeSendError, isKnownSendError,
   normalizePhone, toSpec, buildSendComponents, missingSendValues, describeMissing,
-  dynamicUrlButtonIndexes, type TemplateSpec,
+  dynamicUrlButtonIndexes, TEAM_ADMIN_ROLES, type TemplateSpec,
 } from '@lib/common';
 
 /**
@@ -346,6 +346,34 @@ export class ConversationsService {
       include: { sentBy: { select: { id: true, name: true } } },
     });
     return { notes, total: notes.length };
+  }
+
+  /**
+   * Take a note back.
+   *
+   * Notes only — the same row type carries sent messages, and a message that reached
+   * someone's phone cannot be unsent by deleting our copy of it, so the filter is part
+   * of the lookup rather than a check afterwards.
+   *
+   * Yours to remove, or an owner's or admin's: a note is usually a mistyped line or
+   * something that stopped being true, and waiting for the person who wrote it to come
+   * back from leave is not a useful rule. Everyone else's stays put.
+   */
+  async deleteNote(scope: TenantScope, conversationId: string, noteId: string) {
+    await this.findOne(scope, conversationId); // 404 guard
+    const note = await this.prisma.message.findFirst({
+      where:  { id: noteId, conversationId, tenantId: scope.tenantId, isNote: true },
+      select: { id: true, sentById: true },
+    });
+    if (!note) throw new NotFoundException('Note not found');
+
+    const canRemoveAnyones = (TEAM_ADMIN_ROLES as readonly string[]).includes(scope.role);
+    if (note.sentById !== scope.userId && !canRemoveAnyones) {
+      throw new ForbiddenException('Only the person who left this note can remove it.');
+    }
+
+    await this.prisma.message.delete({ where: { id: note.id } });
+    return { success: true, id: note.id };
   }
 
   // ── Messages in a conversation ─────────────────────────────────────────────

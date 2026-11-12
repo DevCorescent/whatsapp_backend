@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Patch, Body, Param, Query, UseGuards, HttpCode, HttpStatus,
+  Controller, Get, Post, Patch, Delete, Body, Param, Query, UseGuards, HttpCode, HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
 import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
@@ -59,6 +59,18 @@ export class ConversationsController {
   @ApiOperation({ summary: 'Internal notes on a conversation' })
   notes(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
     return this.svc.listNotes(scope, id);
+  }
+
+  @Delete(':id/notes/:noteId')
+  @RequiresPermission('messages.send')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Remove a note you left — notes only, never a sent message' })
+  deleteNote(
+    @CurrentTenant() scope: TenantScope,
+    @Param('id') id: string,
+    @Param('noteId') noteId: string,
+  ) {
+    return this.svc.deleteNote(scope, id, noteId);
   }
 
   @Post(':id/template')
