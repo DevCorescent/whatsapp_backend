@@ -6,7 +6,7 @@ import {
   TenantScope, PERMISSIONS, accountCeiling, roleDefaults, resolvePermission, MessageRatesService, WalletService,
   decryptSecret, computeBulkPrices, type BulkPriceChange, PermissionsService,
   type Permission, PLATFORM_PERMISSIONS, requireFields, isInvitableRole, StorageService,
-  TENANT_ROLES,
+  TENANT_ROLES, subdomainFromName, isClaimableSubdomain,
 } from '@lib/common';
 import * as bcrypt from 'bcryptjs';
 import { randomUUID } from 'node:crypto';
@@ -294,11 +294,73 @@ export class AdminService {
     };
   }
 
-  async updateTenant(scope: TenantScope, id: string, data: { isActive?: boolean; name?: string; categoryId?: string }) {
+  async updateTenant(
+    scope: TenantScope,
+    id: string,
+    data: {
+      isActive?: boolean; name?: string; categoryId?: string;
+      accountType?: string; resellerType?: string | null; commissionRate?: number | null;
+    },
+  ) {
     await this.guard(scope, 'platform.tenants.manage');
     const tenant = await this.prisma.tenant.findUnique({ where: { id } });
     if (!tenant) throw new NotFoundException('Tenant not found');
-    return this.prisma.tenant.update({ where: { id }, data: data as any });
+
+    // Named rather than written straight through. The body used to reach the column of
+    // whatever name it carried, so `parentId`, `slug` or `referredById` were all one
+    // request away from being set by hand.
+    const payload: Record<string, unknown> = {};
+    if (data.isActive !== undefined) payload.isActive = Boolean(data.isActive);
+    if (typeof data.name === 'string' && data.name.trim()) payload.name = data.name.trim();
+    if (data.categoryId !== undefined) payload.categoryId = data.categoryId || null;
+    if (data.commissionRate !== undefined) {
+      const n = Number(data.commissionRate);
+      payload.commissionRate = Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : null;
+    }
+    if (data.accountType === 'CLIENT' || data.accountType === 'RESELLER') {
+      payload.accountType = data.accountType;
+      payload.resellerType = data.accountType === 'RESELLER'
+        ? (data.resellerType === 'WHITE_LABEL' ? 'WHITE_LABEL' : 'NORMAL')
+        : null;
+    }
+
+    const updated = await this.prisma.tenant.update({ where: { id }, data: payload as any });
+
+    // A white-label brand with no address is not a brand yet: nothing resolves to it,
+    // its login page cannot be reached and its own site is unreachable. Being made
+    // white-label used to leave exactly that — no config row at all, and no address
+    // until the reseller went and typed one. They get one now, and swap it for their
+    // own domain whenever they like.
+    if (payload.resellerType === 'WHITE_LABEL') {
+      await this.ensureBrandAddress(id, updated.name, updated.slug);
+    }
+    return updated;
+  }
+
+  /** Gives a white-label reseller a working address, once, without taking one it has. */
+  private async ensureBrandAddress(tenantId: string, name: string, slug: string) {
+    const existing = await this.prisma.whiteLabelConfig.findUnique({
+      where:  { tenantId },
+      select: { id: true, domain: true, subdomain: true },
+    });
+    if (existing?.domain || existing?.subdomain) return;
+
+    const wanted = subdomainFromName(slug || name);
+    let candidate = isClaimableSubdomain(wanted) ? wanted : `brand-${tenantId.slice(-6)}`;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const taken = await this.prisma.whiteLabelConfig.findFirst({
+        where:  { subdomain: candidate, tenantId: { not: tenantId } },
+        select: { tenantId: true },
+      });
+      if (!taken) break;
+      candidate = `${wanted.slice(0, 24)}-${attempt + 2}`;
+    }
+
+    await this.prisma.whiteLabelConfig.upsert({
+      where:  { tenantId },
+      create: { tenantId, brandName: name, subdomain: candidate },
+      update: { subdomain: candidate },
+    });
   }
 
   // ── Audit Logs ─────────────────────────────────────────────────────────────

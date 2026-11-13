@@ -18,6 +18,34 @@ export function normalizeHost(value: string | null | undefined): string {
     .replace(/\.$/, '');
 }
 
+/**
+ * Subdomains the platform keeps for itself. A reseller handed `admin` or `api` would
+ * take a name the platform answers on, which is a different kind of problem to a clash
+ * between two resellers.
+ */
+export const RESERVED_SUBDOMAINS = new Set([
+  'www', 'app', 'admin', 'api', 'mail', 'smtp', 'ftp', 'static', 'cdn', 'assets', 'docs',
+  'blog', 'help', 'support', 'status', 'billing', 'dashboard', 'login', 'auth', 'demo',
+  'staging', 'dev',
+]);
+
+/** A label that may be used as a reseller's subdomain. Mirrors the frontend's rule. */
+export function isClaimableSubdomain(label: string): boolean {
+  return /^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])?$/.test(label)
+    && label.length >= 3
+    && !RESERVED_SUBDOMAINS.has(label);
+}
+
+/** A name reduced to something that can be a subdomain. */
+export function subdomainFromName(name: string): string {
+  const base = String(name ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 28);
+  return base.length >= 3 ? base : `brand-${base}`.slice(0, 28);
+}
+
 /** Only a live white-label reseller claims a host. */
 export const LIVE_BRAND_CONFIG = {
   isActive:    true,

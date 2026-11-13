@@ -97,7 +97,10 @@ export class AdminController {
   updateTenant(
     @CurrentTenant() scope: TenantScope,
     @Param('id') id: string,
-    @Body() body: { isActive?: boolean; name?: string; categoryId?: string },
+    @Body() body: {
+      isActive?: boolean; name?: string; categoryId?: string;
+      accountType?: string; resellerType?: string | null; commissionRate?: number | null;
+    },
   ) {
     return this.svc.updateTenant(scope, id, body);
   }
