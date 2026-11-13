@@ -44,3 +44,4 @@ export * from './campaigns/campaign-halt.module';
 export * from './rates/bulk-price';
 export * from './hosting/vercel-domains';
 export * from './brand-host';
+export * from './brand-url';

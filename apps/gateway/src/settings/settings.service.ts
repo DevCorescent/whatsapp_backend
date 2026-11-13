@@ -5,7 +5,7 @@ import { PrismaService } from '@lib/prisma';
 import {
   TenantScope, decryptSecret, encryptSecret, sanitizeWhatsAppToken, isMetaAccessToken,
   MessageRatesService, PermissionsService, PERMISSIONS, INVITABLE_ROLES, TEAM_ADMIN_ROLES,
-  MailService,
+  MailService, tenantBaseUrl,
   accountCeiling, roleDefaults, resolvePermission, isInvitableRole,
   parseSendError, classifySendError, isKnownSendError,
 } from '@lib/common';
@@ -728,7 +728,7 @@ export class SettingsService {
       select:  { id: true, name: true, password: true, avatar: true, emailVerified: true, tenantId: true },
     });
     if (!identity) {
-      const appUrl = process.env['APP_URL'] ?? process.env['FRONTEND_URL'] ?? '';
+      const appUrl = await tenantBaseUrl(this.prisma, scope.tenantId);
       throw new ConflictException(
         `No account found for ${email}. Ask them to sign up${appUrl ? ` at ${appUrl}/sign-up` : ''} first, then add them here — they'll use their own password and find this workspace in their workspace switcher.`,
       );
@@ -779,7 +779,9 @@ export class SettingsService {
         workspace: workspace?.name ?? 'a workspace',
         role:      ROLE_LABELS[role] ?? role,
         rejoined:  Boolean(existing),
-        appUrl:    (process.env['APP_URL'] ?? process.env['FRONTEND_URL'] ?? '').split(',')[0].replace(/\/+$/, ''),
+        // Their brand's address, not the platform's. A comma-separated FRONTEND_URL
+        // also used to produce a link that was not a URL.
+        appUrl:    await tenantBaseUrl(this.prisma, scope.tenantId),
       }),
     });
 

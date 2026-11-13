@@ -5,7 +5,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '@lib/prisma';
-import { PermissionsService, brandHostWhere, normalizeHost } from '@lib/common';
+import { PermissionsService, MailService, brandHostWhere, normalizeHost, tenantBaseUrl } from '@lib/common';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 import type { RegisterDto } from './dto/register.dto';
@@ -27,6 +27,52 @@ const DISPOSABLE_DOMAINS = new Set([
   'trashmail.io','trashmail.net','dispostable.com','mailnull.com','maildrop.cc',
 ]);
 
+/**
+ * The two emails the account itself sends.
+ *
+ * Deliberately plain and brand-free in their wording: they go out over the tenant's own
+ * SMTP and carry a link to the tenant's own address, so naming a product here would be
+ * the one line that gave away whose software it is.
+ */
+function actionEmail(d: { name: string; lead: string; body: string; cta: string; url: string; note: string }): string {
+  return `
+<div style="font-family:Helvetica,Arial,sans-serif;font-size:15px;line-height:1.6;color:#1A2B32;max-width:560px">
+  <p>Hi ${escapeHtml(d.name)},</p>
+  <p>${d.lead}</p>
+  <p style="margin:26px 0"><a href="${d.url}" style="background:#0B6E4F;color:#fff;padding:11px 20px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block">${d.cta}</a></p>
+  <p style="color:#5B6B73;font-size:13px">${d.body}</p>
+  <p style="color:#5B6B73;font-size:13px">${d.note}</p>
+  <p style="color:#5B6B73;font-size:12px;word-break:break-all">${d.url}</p>
+</div>`.trim();
+}
+
+function passwordResetEmail(d: { name: string; url: string }): string {
+  return actionEmail({
+    name: d.name,
+    lead: 'Someone asked to reset the password on your account.',
+    cta:  'Choose a new password',
+    url:  d.url,
+    body: 'This link works once and expires in 30 minutes.',
+    note: 'If this was not you, nothing has changed and you can ignore this message.',
+  });
+}
+
+function verifyEmail(d: { name: string; url: string }): string {
+  return actionEmail({
+    name: d.name,
+    lead: 'Please confirm this is your email address.',
+    cta:  'Confirm my email',
+    url:  d.url,
+    body: 'This link expires in 24 hours.',
+    note: 'If you did not create an account, you can ignore this message.',
+  });
+}
+
+function escapeHtml(v: string): string {
+  return v.replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string));
+}
+
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
@@ -36,6 +82,7 @@ export class AuthService {
     private readonly jwt:     JwtService,
     private readonly cfg:     ConfigService,
     private readonly permissions: PermissionsService,
+    private readonly mail: MailService,
   ) {}
 
   // ── Login ──────────────────────────────────────────────────────────────────
@@ -371,10 +418,21 @@ export class AuthService {
       this.prisma.passwordResetToken.create({ data: { userId: user.id, tokenHash, expiresAt } }),
     ]);
 
-    const appUrl   = this.cfg.get('FRONTEND_URL', 'http://localhost:3000');
+    // Their brand's address, not the platform's: a reseller's customer who asks to
+    // reset a password on their supplier's site must not be sent somewhere else.
+    const appUrl   = await tenantBaseUrl(this.prisma, user.tenantId);
     const resetUrl = `${appUrl}/reset-password?token=${token}`;
-    this.logger.log(`Password reset link for ${email}: ${resetUrl}`);
-    // TODO: send email via SMTP when email service is configured
+
+    // This used to log the link and stop — the comment said "send email when the email
+    // service is configured", and the email service had been configured for some time.
+    // So "Forgot password" did nothing a customer could see, and the only copy of the
+    // link was in a server log.
+    const sent = await this.mail.send(user.tenantId, {
+      to:      email,
+      subject: 'Reset your password',
+      html:    passwordResetEmail({ name: user.name ?? email, url: resetUrl }),
+    });
+    if (!sent) this.logger.warn(`No mail configured for tenant ${user.tenantId}; reset link not delivered to ${email}`);
   }
 
   // ── Reset password ─────────────────────────────────────────────────────────
@@ -431,7 +489,7 @@ export class AuthService {
   async resendVerification(email: string): Promise<void> {
     const user = await this.prisma.user.findFirst({
       where:  { email, isActive: true },
-      select: { id: true, name: true, emailVerified: true },
+      select: { id: true, name: true, emailVerified: true, tenantId: true },
     });
     if (!user || user.emailVerified) return; // silent success
 
@@ -443,10 +501,15 @@ export class AuthService {
       data:  { emailVerifyToken: verifyToken, emailVerifyExpiry: expiry },
     });
 
-    const appUrl   = this.cfg.get('FRONTEND_URL', 'http://localhost:3000');
+    const appUrl    = await tenantBaseUrl(this.prisma, user.tenantId);
     const verifyUrl = `${appUrl}/verify-email?token=${verifyToken}`;
-    this.logger.log(`Verify email link for ${email}: ${verifyUrl}`);
-    // TODO: send email via SMTP when email service is configured
+
+    const sent = await this.mail.send(user.tenantId, {
+      to:      email,
+      subject: 'Confirm your email address',
+      html:    verifyEmail({ name: user.name ?? email, url: verifyUrl }),
+    });
+    if (!sent) this.logger.warn(`No mail configured for tenant ${user.tenantId}; verification link not delivered to ${email}`);
   }
 
   // ── Workspace list (for multi-workspace selector) ─────────────────────────
