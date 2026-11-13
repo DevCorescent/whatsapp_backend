@@ -27,11 +27,54 @@ export function cnameTarget(): string {
   return process.env['CNAME_TARGET'] || 'cname.vercel-dns.com';
 }
 
+/** Where an apex domain's A record should point, which a CNAME cannot do. */
+export function apexTarget(): string {
+  return process.env['APEX_IP'] || '76.76.21.21';
+}
+
+/**
+ * The record a reseller actually has to add, in the words their registrar uses.
+ *
+ * Every screen said "add a CNAME", for any domain. A domain bought for a brand is
+ * usually the bare name — nehacomputers.com — and a CNAME is not allowed at the apex of
+ * a zone: registrars refuse it, so the one instruction we gave was impossible to follow
+ * for the commonest case. An apex needs an A record instead.
+ *
+ * The name is what goes in the registrar's form — `@` for the apex, the label alone for
+ * a subdomain — rather than the whole domain, which most forms turn into
+ * crm.nehacomputers.com.nehacomputers.com.
+ */
+export function dnsRecordFor(domain: string, rootDomain?: string | null): { type: 'A' | 'CNAME'; name: string; value: string } {
+  const host = domain.trim().toLowerCase().replace(/\.$/, '');
+  // Two labels is an apex (nehacomputers.com); three or more is a subdomain of it. The
+  // multi-part public suffixes (co.uk, com.au) make three labels an apex too.
+  const parts = host.split('.');
+  const suffixIsTwoPart = /\.(co|com|net|org|gov|edu|ac)\.[a-z]{2}$/.test(host);
+  const apexLabels = suffixIsTwoPart ? 3 : 2;
+
+  if (parts.length <= apexLabels) {
+    return { type: 'A', name: '@', value: apexTarget() };
+  }
+  return {
+    type: 'CNAME',
+    name: parts.slice(0, parts.length - apexLabels).join('.'),
+    value: rootDomain ? rootDomain : cnameTarget(),
+  };
+}
+
+/** The same instruction as a sentence, for places that have no table to draw. */
+export function dnsHintFor(domain: string): string {
+  const r = dnsRecordFor(domain);
+  return r.type === 'A'
+    ? `Add an A record for ${domain} (name "@") pointing to ${r.value}.`
+    : `Add a CNAME record named "${r.name}" pointing to ${r.value}.`;
+}
+
 export interface DomainCheckResult {
   domain: string;
   state: 'connected' | 'pending' | 'not_added' | 'error';
   message: string;
-  record: { type: 'CNAME'; name: string; value: string };
+  record: { type: 'A' | 'CNAME'; name: string; value: string };
 }
 
 /**
@@ -48,7 +91,7 @@ export interface DomainCheckResult {
  */
 export async function checkDomainHosting(domain: string): Promise<DomainCheckResult> {
   const target = cnameTarget();
-  const record = { type: 'CNAME' as const, name: domain, value: target };
+  const record = dnsRecordFor(domain);
 
   // Ask the domain itself first. Comparing DNS answers against the provider's is not a
   // reliable test — Vercel serves *.vercel.app and cname.vercel-dns.com from different
@@ -75,7 +118,11 @@ export async function checkDomainHosting(domain: string): Promise<DomainCheckRes
     dns.resolve4(domain).catch(() => [] as string[]),
   ]);
   const resolves = cnames.length > 0 || addresses.length > 0;
-  const pointsAtTarget = cnames.some((c) => c.replace(/\.$/, '').toLowerCase() === target.toLowerCase());
+  // Judged against the record this domain was told to add: an apex was told to add an
+  // A record, so looking only at its CNAMEs would call a correct setup wrong.
+  const pointsAtTarget = record.type === 'A'
+    ? addresses.includes(record.value)
+    : cnames.some((c) => c.replace(/\.$/, '').toLowerCase() === target.toLowerCase());
 
   if (!resolves) {
     return {
@@ -104,7 +151,7 @@ export async function checkDomainHosting(domain: string): Promise<DomainCheckRes
 }
 
 export async function attachDomainToHosting(domain: string): Promise<DomainAttachResult> {
-  const dnsHint = `Point a CNAME for ${domain} to ${cnameTarget()}.`;
+  const dnsHint = dnsHintFor(domain);
 
   // On our own servers there is no registry to add a domain to: the reverse proxy
   // answers for whatever resolves to it and obtains the certificate on first request.
@@ -120,7 +167,7 @@ export async function attachDomainToHosting(domain: string): Promise<DomainAttac
   if (!token || !project) {
     return {
       status: 'manual',
-      message: `Add ${domain} to the hosting project, then ${dnsHint.toLowerCase()}`,
+      message: `Add ${domain} to the hosting project. ${dnsHint}`,
     };
   }
 
