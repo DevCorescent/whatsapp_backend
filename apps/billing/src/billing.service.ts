@@ -153,7 +153,7 @@ export class BillingService {
     // had been. Counted over the subscription's own period, because that is when the
     // allowance resets.
     const periodStart = sub.currentPeriodStart;
-    const [contacts, users, messages, campaigns, storage] = await Promise.all([
+    const [contacts, users, messages, campaigns, storage, payments] = await Promise.all([
       this.prisma.contact.count({ where: { tenantId: scope.tenantId } }),
       this.prisma.user.count({ where: { tenantId: scope.tenantId, removedAt: null } }),
       // What they sent. A message arriving is not something they spend an allowance on,
@@ -173,6 +173,15 @@ export class BillingService {
         where: { tenantId: scope.tenantId, mediaSize: { not: null } },
         _sum: { mediaSize: true },
       }),
+      // Every payment this workspace has made. The page has a whole invoice table and
+      // was handed an empty array, so an account that had paid was told "no invoices
+      // yet — invoices appear here after your first payment", after their first payment.
+      this.prisma.payment.findMany({
+        where:   { tenantId: scope.tenantId },
+        orderBy: { createdAt: 'desc' },
+        take:    50,
+        select:  { id: true, providerPaymentId: true, amountMinor: true, currency: true, purpose: true, createdAt: true },
+      }),
     ]);
 
     const plan = (sub as any).plan;
@@ -191,7 +200,18 @@ export class BillingService {
       trialEndsAt:        (sub as any).trialEndsAt ?? null,
       hasStripe:          !!(sub as any).stripeSubId,
       hasRazorpay:        !!(sub as any).razorpaySubId,
-      invoices:           [],
+      // A payment that reached us is a paid one; there is no pending state to show.
+      invoices: payments.map((p) => ({
+        id:     p.id,
+        number: p.providerPaymentId,
+        date:   p.createdAt.toISOString(),
+        amount: p.amountMinor / 100,
+        status: 'PAID',
+        // No provider-hosted receipt is stored, and a dead "PDF" button is worse than
+        // none — the table already shows a dash when there is nothing to download.
+        url:    null,
+        pdf:    null,
+      })),
       // What happens next, and when. The grace period was enforced and never mentioned:
       // the guard let a lapsed account keep working for N days and then stopped it, and
       // nothing anywhere told them a clock was running.
