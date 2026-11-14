@@ -89,6 +89,49 @@ export class BillingService {
     };
   }
 
+  /**
+   * How long a lapsed plan keeps working, and how much of that is left.
+   *
+   * The platform decides the length — it is a rule about the product, not a preference
+   * of the account being refused — and the guard has been enforcing it all along. What
+   * was missing is anyone being told: an account's period ended, everything carried on
+   * for a week, and then features started refusing with no warning that a clock had
+   * been running. The dates decide rather than the stored status, because nothing
+   * sweeps lapsed rows the moment they lapse.
+   */
+  private async graceStatus(periodEnd: Date | null, status: string) {
+    const platform = await this.prisma.tenant.findFirst({
+      where:  { accountType: 'PLATFORM' },
+      select: { settings: { select: { planEndBehaviour: true, planEndGraceDays: true } } },
+    });
+    const behaviour = platform?.settings?.planEndBehaviour ?? 'GRACE';
+    const graceDays = platform?.settings?.planEndGraceDays ?? 7;
+
+    const unpaid = ['EXPIRED', 'PAST_DUE', 'CANCELLED'].includes(status);
+    const ended  = periodEnd != null && periodEnd.getTime() <= Date.now();
+    if (!unpaid && !ended) {
+      return { lapsed: false, inGrace: false, graceDays, behaviour, endsAt: null, daysLeft: null };
+    }
+
+    // BLOCK stops the moment the period ends; everything else runs the clock. Nothing is
+    // cut off at the end of a grace period but the paid features — signing in, the
+    // existing chats and the ability to pay all keep working.
+    const endsAt = periodEnd && behaviour !== 'BLOCK'
+      ? new Date(periodEnd.getTime() + graceDays * 86_400_000)
+      : periodEnd;
+    const msLeft = endsAt ? endsAt.getTime() - Date.now() : 0;
+
+    return {
+      lapsed:   true,
+      inGrace:  behaviour !== 'BLOCK' && msLeft > 0,
+      graceDays,
+      behaviour,
+      endsAt:   endsAt ? endsAt.toISOString() : null,
+      // Rounded up, so the last few hours read as "1 day left" rather than "0".
+      daysLeft: msLeft > 0 ? Math.ceil(msLeft / 86_400_000) : 0,
+    };
+  }
+
   async getPlanById(id: string) {
     const plan = await this.prisma.plan.findUnique({ where: { id } });
     if (!plan) throw new NotFoundException('Plan not found');
@@ -134,6 +177,7 @@ export class BillingService {
 
     const plan = (sub as any).plan;
     const storageMb = Math.round((storage._sum.mediaSize ?? 0) / (1024 * 1024));
+    const grace = await this.graceStatus(sub.currentPeriodEnd, sub.status);
     // Return flat shape matching Next.js /api/billing (no data wrapper).
     // The TransformInterceptor skips objects that already have a `success` key.
     return {
@@ -148,6 +192,10 @@ export class BillingService {
       hasStripe:          !!(sub as any).stripeSubId,
       hasRazorpay:        !!(sub as any).razorpaySubId,
       invoices:           [],
+      // What happens next, and when. The grace period was enforced and never mentioned:
+      // the guard let a lapsed account keep working for N days and then stopped it, and
+      // nothing anywhere told them a clock was running.
+      grace,
       usage: {
         contacts: { label: 'Contacts', used: contacts, limit: plan?.maxContacts ?? 0 },
         agents:   { label: 'Agents',   used: users,    limit: plan?.maxAgents   ?? 0 },
