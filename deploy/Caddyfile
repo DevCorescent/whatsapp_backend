@@ -23,6 +23,11 @@
 #   HOSTING_PROVIDER=self        (so the app stops telling people to add the domain
 #                                 to Vercel, which does not apply here)
 #   CNAME_TARGET=app.yourplatform.com
+#   APEX_IP=<this server's IPv4>  (a reseller who connects a bare nehacomputers.com
+#                                  cannot use a CNAME — a zone apex may not hold one —
+#                                  so the panel shows an A record, and without this it
+#                                  would show the hosting provider's address instead of
+#                                  this machine's)
 #   PLATFORM_ROOT_DOMAIN=yourplatform.com
 #
 # Run:  caddy run --config /etc/caddy/Caddyfile
