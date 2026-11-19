@@ -1,3 +1,4 @@
+import { csvCell, csvPhone } from '@lib/common';
 /**
  * The filters a lead list or export can be narrowed by, and the columns an export can
  * carry.
@@ -283,18 +284,12 @@ export function leadsToCsv(leads: LeadRow[], columnKeys: string[]): string {
     : LEAD_COLUMNS.filter((c) => DEFAULT_LEAD_COLUMNS.includes(c.key));
   const columns = chosen.length ? chosen : LEAD_COLUMNS;
 
-  const escape = (v: string | number): string => {
-    const s = String(v ?? '');
-    // A cell a spreadsheet would run as a formula gets an apostrophe, because exported
-    // customer text must never execute. A phone number is the exception worth making:
-    // "+919876543210" opens with a + but is plainly a number, and prefixing every
-    // exported phone with an apostrophe would be its own bug.
-    const looksLikeFormula = /^=/.test(s) || (/^[+\-@]/.test(s) && !/^[+\-]?[\d\s()\-+]+$/.test(s));
-    const safe = looksLikeFormula ? `'${s}` : s;
-    return `"${safe.replace(/"/g, '""')}"`;
-  };
-
-  const header = columns.map((c) => escape(c.label)).join(',');
-  const rows = leads.map((l) => columns.map((c) => escape(c.value(l))).join(','));
+  // The phone column is written as text. Quoting it was never enough: a quoted run of
+  // digits is still a number to Excel, which opened +919876543210 as 9.19876E+11 — the
+  // one column in a leads export somebody needs to be able to dial.
+  const header = columns.map((c) => csvCell(c.label)).join(',');
+  const rows = leads.map((l) =>
+    columns.map((c) => (c.key === 'phone' ? csvPhone(c.value(l)) : csvCell(c.value(l)))).join(','),
+  );
   return [header, ...rows].join('\r\n');
 }
