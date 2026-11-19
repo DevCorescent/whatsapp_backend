@@ -4,7 +4,7 @@ import {
 import { Reflector } from '@nestjs/core';
 import { PrismaService } from '@lib/prisma';
 
-export type PlanFeatureKey = 'aiEnabled' | 'ragEnabled' | 'whiteLabel' | 'advancedAi' | 'allowExport' | 'callingEnabled';
+export type PlanFeatureKey = 'aiEnabled' | 'ragEnabled' | 'whiteLabel' | 'advancedAi' | 'allowExport' | 'callingEnabled' | 'walletEnabled';
 
 const PLAN_FEATURE_KEY = 'planFeature';
 const CACHE_TTL_MS = 60_000;
@@ -96,7 +96,7 @@ export class PlanFeatureGuard implements CanActivate {
         plan: {
           select: {
             name: true, displayName: true, aiEnabled: true, ragEnabled: true, whiteLabel: true,
-            advancedAi: true, allowExport: true, callingEnabled: true,
+            advancedAi: true, allowExport: true, callingEnabled: true, walletEnabled: true,
           },
         },
       },
@@ -119,6 +119,7 @@ export class PlanFeatureGuard implements CanActivate {
           features: {
             aiEnabled: sub.plan.aiEnabled, ragEnabled: sub.plan.ragEnabled, whiteLabel: sub.plan.whiteLabel,
             advancedAi: sub.plan.advancedAi, allowExport: sub.plan.allowExport, callingEnabled: sub.plan.callingEnabled,
+            walletEnabled: sub.plan.walletEnabled,
           },
         }
       : null;
@@ -155,4 +156,5 @@ const FEATURE_LABEL: Record<PlanFeatureKey, string> = {
   advancedAi:     'Advanced AI (lead scoring)',
   allowExport:    'CSV export',
   callingEnabled: 'WhatsApp calling',
+  walletEnabled:  'Wallet top-ups',
 };

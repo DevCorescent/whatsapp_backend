@@ -239,7 +239,7 @@ export class AuthService {
                 plan: {
                   select: {
                     name: true, displayName: true, aiEnabled: true, ragEnabled: true, whiteLabel: true,
-                    advancedAi: true, allowExport: true, callingEnabled: true,
+                    advancedAi: true, allowExport: true, callingEnabled: true, walletEnabled: true,
                   },
                 },
               },
@@ -268,6 +268,7 @@ export class AuthService {
         features: {
           aiEnabled: plan.aiEnabled, ragEnabled: plan.ragEnabled, whiteLabel: plan.whiteLabel,
           advancedAi: plan.advancedAi, allowExport: plan.allowExport, callingEnabled: plan.callingEnabled,
+          walletEnabled: plan.walletEnabled,
         },
       } : null,
       id:             user.id,
