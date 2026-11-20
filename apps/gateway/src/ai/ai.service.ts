@@ -54,8 +54,8 @@ export class AiService {
         headers: {
           'Content-Type':  'application/json',
           'Authorization': `Bearer ${this.openRouterKey}`,
-          'HTTP-Referer':  'https://whatscrm.app',
-          'X-Title':       'WhatsCRM',
+          'HTTP-Referer':  'https://waboxa.com',
+          'X-Title':       'Waboxa',
         },
         body: JSON.stringify({
           model:       this.aiModel,
@@ -403,7 +403,7 @@ export class AiService {
         headers: {
           'Content-Type':  'application/json',
           'Authorization': `Bearer ${apiKey}`,
-          ...(this.openRouterKey ? { 'HTTP-Referer': 'https://whatscrm.app', 'X-Title': 'WhatsCRM' } : {}),
+          ...(this.openRouterKey ? { 'HTTP-Referer': 'https://waboxa.com', 'X-Title': 'Waboxa' } : {}),
         },
         body: JSON.stringify({ model, stream: true, messages: allMessages }),
       });

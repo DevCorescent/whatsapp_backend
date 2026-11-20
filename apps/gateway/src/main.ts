@@ -110,8 +110,8 @@ async function bootstrap() {
 
   // Swagger — available at /api/docs
   const config = new DocumentBuilder()
-    .setTitle('WhatsCRM API')
-    .setDescription('NestJS microservices backend for WhatsCRM')
+    .setTitle('Waboxa API')
+    .setDescription('NestJS microservices backend for Waboxa')
     .setVersion('1.0')
     .addBearerAuth()
     .build();

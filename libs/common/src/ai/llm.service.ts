@@ -66,7 +66,7 @@ export class LlmService {
         headers: {
           'Content-Type': 'application/json',
           Authorization:  `Bearer ${apiKey}`,
-          ...(openRouterKey ? { 'HTTP-Referer': 'https://whatscrm.app', 'X-Title': 'WhatsCRM' } : {}),
+          ...(openRouterKey ? { 'HTTP-Referer': 'https://waboxa.com', 'X-Title': 'Waboxa' } : {}),
         },
         body: JSON.stringify({
           model,
