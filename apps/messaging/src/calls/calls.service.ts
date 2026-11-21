@@ -7,7 +7,7 @@ import {
   TenantScope, RealtimeService, RedisService, MessageEventsService, NotificationsService, AGENT_ROLES, decryptSecret,
   StorageService,
 } from '@lib/common';
-import { MetaCallsClient, MetaCallError } from './meta-calls.client';
+import { MetaCallsClient, MetaCallError, NO_CALL_PERMISSION } from './meta-calls.client';
 
 export const OFFER_TTL_SEC = 120;
 /** Meta gives roughly 30–60 s to answer; we stop ringing in the UI at 60 s. */
@@ -63,6 +63,173 @@ export class CallsService {
 
   // ── Agent actions ───────────────────────────────────────────────────────────
 
+  // ── Call permission (Meta policy) ──────────────────────────────────────────
+  //
+  // A business may not simply ring a WhatsApp user. Meta requires permission, which the
+  // user grants from a prompt inside their own chat, which expires, and which is revoked
+  // after four unanswered calls. Both calling and asking carry rate limits, and Meta has
+  // changed those limits more than once — business-initiated calls went from 10 a day to
+  // 100 in December 2025.
+  //
+  // So nothing here is assumed. Meta is asked what is allowed and the answer is passed to
+  // the screen: the agent sees "Call", "Ask to call", or why neither is possible, rather
+  // than a button that fails with a Graph error code.
+
+  /** Resolves the number to call from and the contact to call, with the usual refusals. */
+  private async callContext(scope: TenantScope, contactId: string, integrationId?: string) {
+    const contact = await this.prisma.contact.findFirst({
+      where:  { id: contactId, tenantId: scope.tenantId, businessId: scope.businessId },
+      select: { id: true, phone: true, name: true },
+    });
+    if (!contact) throw new NotFoundException('That contact is not in this department');
+
+    const integration = integrationId
+      ? await this.prisma.whatsAppIntegration.findFirst({
+          where: { id: integrationId, businessId: scope.businessId, isActive: true },
+        })
+      : await this.prisma.whatsAppIntegration.findFirst({
+          where: { businessId: scope.businessId, isActive: true, isDefault: true },
+        });
+    if (!integration) throw new BadRequestException('No active WhatsApp number to call from');
+
+    const accessToken = integration.accessToken ? decryptSecret(integration.accessToken) : null;
+    if (!accessToken) throw new BadRequestException('This WhatsApp number has no usable access token');
+
+    return { contact, integration, accessToken };
+  }
+
+  /** "You can ask again after 3 pm" beats "limit reached". */
+  private describeLimit(limits?: { limit_expiration_time?: number }[]): string | null {
+    const next = limits
+      ?.map(l => l.limit_expiration_time)
+      .filter((t): t is number => Boolean(t))
+      .sort((a, b) => a - b)[0];
+    if (!next) return null;
+    return `WhatsApp limits how often a business may ask. You can ask again after ${new Date(next * 1000).toLocaleString('en-IN')}.`;
+  }
+
+  /**
+   * What the chat's call button should offer for this contact.
+   *
+   * Cached for a minute per contact: the inbox asks on every thread open, and the answer
+   * only moves when the user answers a permission request — which clears the cache.
+   */
+  async callability(scope: TenantScope, contactId: string, integrationId?: string) {
+    const cacheKey = `callability:${scope.businessId}:${contactId}`;
+    const cached = await this.redis.client.get(cacheKey).catch(() => null);
+    if (cached) {
+      try { return JSON.parse(cached); } catch { /* stale shape — ask again */ }
+    }
+
+    const { contact, integration, accessToken } = await this.callContext(scope, contactId, integrationId);
+
+    // Our own switch comes first: no point asking Meta about a number whose calling we
+    // have turned off ourselves.
+    if (!integration.callingEnabled) {
+      return {
+        canCall: false,
+        canRequest: false,
+        status: 'disabled',
+        expiresAt: null,
+        reason: integration.callingFollowsBusinessHours
+          ? "Calling is closed outside this department's business hours. Change the hours, or switch calling to always on, in Settings → WhatsApp numbers."
+          : 'Calling is switched off for this number. Turn it on in Settings → WhatsApp numbers.',
+      };
+    }
+
+    let state: Awaited<ReturnType<MetaCallsClient['getCallPermission']>>;
+    try {
+      state = await this.meta.getCallPermission(integration.phoneNumberId, accessToken, contact.phone);
+    } catch (err) {
+      // Not being able to ask is not the same as not being allowed. The button stays
+      // available and Meta refuses the call itself if it must, rather than this hiding a
+      // call that would have gone through.
+      this.logger.warn(
+        `call_permissions lookup failed for ${contact.phone}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return { canCall: true, canRequest: false, status: 'unknown', expiresAt: null, reason: null };
+    }
+
+    const action  = (name: string) => state.actions?.find(a => a.action_name === name);
+    const start   = action('start_call');
+    const request = action('send_call_permission_request');
+    const status  = state.permission?.status ?? 'no_permission';
+
+    const canCall    = start?.can_perform_action ?? status !== 'no_permission';
+    const canRequest = request?.can_perform_action ?? false;
+
+    const result = {
+      canCall,
+      canRequest,
+      status,
+      expiresAt: state.permission?.expiration_time
+        ? new Date(state.permission.expiration_time * 1000).toISOString()
+        : null,
+      reason: canCall
+        ? null
+        : canRequest
+          ? `${contact.name ?? 'This contact'} has not allowed calls yet. Ask them, and they can allow it from the chat.`
+          : this.describeLimit(request?.limits)
+            ?? 'WhatsApp will not allow a call to this contact yet, and it will not accept another request right now.',
+    };
+
+    await this.redis.client.set(cacheKey, JSON.stringify(result), 'EX', 60).catch(() => undefined);
+    return result;
+  }
+
+  /**
+   * Sends the in-chat prompt asking the user to allow calls.
+   *
+   * It is written into the thread as an ordinary outbound message, because from the
+   * customer's side that is exactly what it is — and an agent who cannot see that it went
+   * out will send it again, into a limit of one request a day.
+   */
+  async requestCallPermission(scope: TenantScope, contactId: string, integrationId?: string) {
+    const { contact, integration, accessToken } = await this.callContext(scope, contactId, integrationId);
+
+    try {
+      await this.meta.sendCallPermissionRequest(
+        integration.phoneNumberId,
+        accessToken,
+        contact.phone,
+        'So we can help you faster, we would like to call you on WhatsApp.',
+      );
+    } catch (err) {
+      const why = err instanceof MetaCallError ? err.message : 'Could not ask for call permission';
+      throw new BadRequestException(why);
+    }
+
+    const conversation = await this.prisma.conversation.findFirst({
+      where:   { contactId: contact.id, businessId: scope.businessId },
+      select:  { id: true },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    if (conversation) {
+      await this.prisma.message.create({
+        data: {
+          tenantId:       scope.tenantId,
+          businessId:     scope.businessId,
+          conversationId: conversation.id,
+          sentById:       scope.userId,
+          direction:      'OUTBOUND',
+          type:           'INTERACTIVE' as any,
+          content:        'Asked them to allow calls on WhatsApp.',
+          metadata:       { callPermission: { kind: 'request' } } as any,
+          status:         'SENT',
+          isNote:         false,
+        },
+      });
+      await this.prisma.conversation.update({
+        where: { id: conversation.id },
+        data:  { lastMessageAt: new Date(), lastMessagePreview: 'Asked them to allow calls' },
+      });
+    }
+
+    await this.redis.client.del(`callability:${scope.businessId}:${contact.id}`).catch(() => undefined);
+    return { success: true, conversationId: conversation?.id ?? null };
+  }
+
   /**
    * Places a call to a contact.
    *
@@ -109,6 +276,14 @@ export class CallsService {
         integration.phoneNumberId, accessToken, contact.phone, body.sdpOffer,
       ));
     } catch (err) {
+      // 138006 is the one refusal the agent can act on, and Meta's own wording for it
+      // says nothing about what to do. Everything else is passed through as Meta put it.
+      if (err instanceof MetaCallError && err.code === NO_CALL_PERMISSION) {
+        await this.redis.client.del(`callability:${scope.businessId}:${contact.id}`).catch(() => undefined);
+        throw new BadRequestException(
+          `${contact.name ?? 'This contact'} has not allowed calls from this number. Ask them with the "Ask to call" button — they allow it from their own chat.`,
+        );
+      }
       const why = err instanceof MetaCallError ? err.message : 'Could not place the call';
       throw new BadRequestException(why);
     }

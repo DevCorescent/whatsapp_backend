@@ -6,7 +6,7 @@ import type { Queue } from 'bull';
 import { PrismaService } from '@lib/prisma';
 import {
   WebhookDispatchService, MessageEventsService, StorageService, NotificationsService, AGENT_ROLES, decryptSecret,
-  SuppressionService,
+  SuppressionService, RedisService,
 } from '@lib/common';
 import { QUEUE_MEDIA_FETCH } from '@lib/queue';
 import { StatusBufferService } from './status-buffer.service';
@@ -44,6 +44,24 @@ const TYPE_MAP: Record<string, string> = {
   interactive: 'INTERACTIVE', button: 'INTERACTIVE', reaction: 'TEXT',
   contacts: 'TEXT', order: 'TEXT', system: 'SYSTEM',
 };
+
+/**
+ * The customer's answer to "may we call you?", in words.
+ *
+ * Meta delivers it as an ordinary interactive reply, so without this it was stored with
+ * no title at all and showed in the thread as "💬 Interactive" — the one event that
+ * decides whether the agent can call, rendered as nothing.
+ */
+function callPermissionCaption(message: WAMessage): string | null {
+  const reply = (message as any).interactive?.call_permission_reply;
+  if (!reply) return null;
+  if (reply.response !== 'accept') return '🚫 Declined calls from this number';
+  if (reply.is_permanent) return '✅ Allowed calls from this number';
+  const until = Number(reply.expiration_timestamp);
+  return Number.isFinite(until) && until > 0
+    ? `✅ Allowed calls until ${new Date(until * 1000).toLocaleString('en-IN')}`
+    : '✅ Allowed calls from this number';
+}
 
 /** "Ravi Verma" or "Ravi Verma and 2 others" — a shared contact card, in one line. */
 function contactsSummary(message: WAMessage): string | null {
@@ -86,6 +104,7 @@ export class WebhookService {
     private readonly notifications: NotificationsService,
     private readonly suppression:  SuppressionService,
     private readonly cfg:          ConfigService,
+    private readonly redis:        RedisService,
     @InjectQueue(QUEUE_MEDIA_FETCH) private readonly mediaQueue: Queue<MediaFetchJob>,
   ) {}
 
@@ -413,6 +432,14 @@ export class WebhookService {
       ).catch(err => this.logger.warn(`media-fetch enqueue failed for ${savedId}: ${err?.message ?? err}`));
     }
 
+    // The one reply that changes what the agent may do next: drop the cached verdict so
+    // the chat's call button reflects it on the next look rather than a minute later.
+    if ((message as any).interactive?.call_permission_reply) {
+      this.redis.client
+        .del(`callability:${identity.businessId}:${contactRow.id}`)
+        .catch(() => undefined);
+    }
+
     // 6. Chatbot flow + AI auto-reply pipeline — fire-and-forget
     this.pipeline.process({
       tenantId:           identity.tenantId,
@@ -435,7 +462,7 @@ export class WebhookService {
       case 'video':       return message.video?.caption?.trim()    || null;
       case 'document':    return message.document?.caption?.trim() || null;
       case 'location':    return `📍 ${message.location?.name ?? 'Location'}`;
-      case 'interactive': return message.interactive?.button_reply?.title ?? message.interactive?.list_reply?.title ?? null;
+      case 'interactive': return callPermissionCaption(message) ?? message.interactive?.button_reply?.title ?? message.interactive?.list_reply?.title ?? null;
       case 'button':      return message.button?.text ?? null;
       case 'reaction':    return `${message.reaction?.emoji ?? '👍'} Reaction`;
       case 'contacts':    return contactsSummary(message);

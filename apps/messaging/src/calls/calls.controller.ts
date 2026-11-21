@@ -107,6 +107,31 @@ export class CallsController {
     );
   }
 
+  // Declared above `:id` on purpose — Nest matches in order, and `/calls/permission/x`
+  // would otherwise be read as a call whose id is "permission".
+  @Get('permission/:contactId')
+  @RequiresPermission('conversations.view')
+  @ApiOperation({ summary: 'Whether this contact may be called, and whether we may ask' })
+  callability(
+    @CurrentTenant() scope: TenantScope,
+    @Param('contactId') contactId: string,
+    @Query('integrationId') integrationId?: string,
+  ) {
+    return this.svc.callability(scope, contactId, integrationId);
+  }
+
+  @Post('permission/:contactId')
+  @RequiresPermission('conversations.view')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Ask the contact, inside WhatsApp, to allow calls' })
+  requestPermission(
+    @CurrentTenant() scope: TenantScope,
+    @Param('contactId') contactId: string,
+    @Body() body?: { integrationId?: string },
+  ) {
+    return this.svc.requestCallPermission(scope, contactId, body?.integrationId);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'One call' })
   get(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
