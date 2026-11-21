@@ -100,6 +100,8 @@ export interface RealtimeEvents {
   'notification:count':   { unread: number };
   'call:incoming':        RtCallIncoming;
   'call:status':          RtCallStatus;
+  /** The callee picked up: their SDP answer, for the agent who placed the call. */
+  'call:answer':          { callId: string; sdp: string };
   'handover:new':         RtHandover;
   'handover:update':      { id: string; status: string; assignedToId: string | null };
 }

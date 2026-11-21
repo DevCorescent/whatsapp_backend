@@ -46,6 +46,8 @@ export class CallsWebhookService {
       try {
         if (call.event === 'connect' && call.direction === 'USER_INITIATED') {
           await this.onIncoming({ ...identity, whatsappIntegrationId: identity.whatsappIntegrationId }, call, value.contacts ?? [], value.metadata.display_phone_number);
+        } else if (call.event === 'connect' && call.direction === 'BUSINESS_INITIATED') {
+          await this.onAnswered(call);
         } else if (call.event === 'terminate') {
           await this.onTerminate(call, value.errors);
         } else {
@@ -55,6 +57,39 @@ export class CallsWebhookService {
         this.logger.error(`calls webhook ${call.event} ${call.id} failed: ${err?.message ?? err}`);
       }
     }
+  }
+
+  /**
+   * The person we rang has picked up, and this carries their SDP answer.
+   *
+   * This was being ignored. An outgoing call sends Meta an offer and Meta replies here,
+   * once the callee answers, with the half of the negotiation that says where to send
+   * audio. Without applying it the browser has a peer connection with no remote
+   * description, so it never sends a packet — and Meta, having received nothing, ends
+   * the call saying it heard no media from the business. The call rang, connected and
+   * died in silence every time.
+   *
+   * It goes to the agent who placed it rather than the whole business: they are the one
+   * holding the peer connection this answer belongs to.
+   */
+  private async onAnswered(call: WACall) {
+    const sdp = call.session?.sdp;
+    if (!sdp) {
+      this.logger.warn(`BUSINESS_INITIATED connect without an SDP answer for ${call.id}`);
+      return;
+    }
+
+    const row = await this.prisma.call.findFirst({
+      where:  { waCallId: call.id },
+      select: { id: true, answeredById: true, businessId: true },
+    });
+    if (!row?.answeredById) {
+      this.logger.warn(`answer for ${call.id} has no agent to deliver to`);
+      return;
+    }
+
+    this.logger.log(`[call ${row.id}] callee answered — forwarding the SDP answer to its agent`);
+    this.realtime.toUser(row.answeredById, 'call:answer', { callId: row.id, sdp });
   }
 
   private async onIncoming(
