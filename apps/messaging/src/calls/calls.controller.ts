@@ -18,8 +18,8 @@ export class CallsController {
 
   @Get('ice-servers')
   @ApiOperation({ summary: 'ICE servers for the browser RTCPeerConnection' })
-  iceServers() {
-    return { iceServers: this.svc.iceServers() };
+  iceServers(@CurrentTenant() scope: TenantScope) {
+    return { iceServers: this.svc.iceServers(scope.userId) };
   }
 
   @Get()

@@ -1,6 +1,7 @@
 import {
   BadRequestException, ConflictException, GoneException, Injectable, Logger, NotFoundException,
 } from '@nestjs/common';
+import { createHmac } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '@lib/prisma';
 import {
@@ -10,6 +11,8 @@ import {
 import { MetaCallsClient, MetaCallError, NO_CALL_PERMISSION } from './meta-calls.client';
 
 export const OFFER_TTL_SEC = 120;
+/** How long a minted TURN credential stays valid. */
+const TURN_TTL_SEC = 2 * 60 * 60;
 /** Meta gives roughly 30–60 s to answer; we stop ringing in the UI at 60 s. */
 export const RING_TIMEOUT_MS = 60_000;
 
@@ -65,17 +68,46 @@ export class CallsService {
     return `call:offer:${waCallId}`;
   }
 
-  /** STUN from Google always; TURN only when configured (TURN_URLS[,TURN_USERNAME,TURN_CREDENTIAL]). */
-  iceServers(): RTCIceServerLike[] {
+  /**
+   * Where the browser should look for a path to Meta's media servers.
+   *
+   * STUN alone only works when the agent's router happens to be permissive. Behind a
+   * symmetric NAT — most offices, most mobile networks — the address STUN reports is not
+   * the one that will accept Meta's packets, so the call connects, no audio ever
+   * arrives, and Meta ends it saying it heard nothing from the business. A relay is the
+   * answer to that, and it is why TURN is not optional in practice.
+   *
+   * The credential is minted per request and expires, rather than being a fixed username
+   * and password from the environment. This list is handed to every browser that opens
+   * the inbox, so a static pair in it is an open relay published to anyone who looks.
+   * `TURN_STATIC_SECRET` is coturn's `use-auth-secret` scheme: the username carries its
+   * own expiry and the password is an HMAC of it, so the secret itself never leaves the
+   * server.
+   */
+  iceServers(userId?: string): RTCIceServerLike[] {
     const servers: RTCIceServerLike[] = [{ urls: GOOGLE_STUN }];
     const turn = (this.cfg.get<string>('TURN_URLS') ?? '').split(',').map(s => s.trim()).filter(Boolean);
-    if (turn.length) {
+    if (!turn.length) return servers;
+
+    const secret = this.cfg.get<string>('TURN_STATIC_SECRET') || '';
+    if (secret) {
+      // Long enough to outlast a call, short enough that a leaked pair is worth little.
+      const expiry = Math.floor(Date.now() / 1000) + TURN_TTL_SEC;
+      const username = `${expiry}:${userId ?? 'agent'}`;
       servers.push({
         urls: turn,
-        username:   this.cfg.get<string>('TURN_USERNAME') || undefined,
-        credential: this.cfg.get<string>('TURN_CREDENTIAL') || undefined,
+        username,
+        credential: createHmac('sha1', secret).update(username).digest('base64'),
       });
+      return servers;
     }
+
+    // A fixed pair still works for a relay that has no shared secret.
+    servers.push({
+      urls: turn,
+      username:   this.cfg.get<string>('TURN_USERNAME') || undefined,
+      credential: this.cfg.get<string>('TURN_CREDENTIAL') || undefined,
+    });
     return servers;
   }
 
