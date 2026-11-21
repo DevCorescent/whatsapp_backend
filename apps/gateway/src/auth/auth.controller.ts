@@ -56,6 +56,19 @@ export class AuthController {
     return { message: 'Password reset successfully' };
   }
 
+  @Post('change-password')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Change your own password, proving the current one' })
+  async changePassword(
+    @Request() req: any,
+    @Body() body: { currentPassword?: string; newPassword?: string },
+  ) {
+    requireFields(body, ['currentPassword', 'newPassword']);
+    await this.authService.changePassword(req.user.userId, body.currentPassword!, body.newPassword!);
+    return { message: 'Password changed' };
+  }
+
   @Get('me')
   @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Get current authenticated user profile' })

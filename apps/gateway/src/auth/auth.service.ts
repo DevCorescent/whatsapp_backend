@@ -449,6 +449,38 @@ export class AuthService {
 
   // ── Reset password ─────────────────────────────────────────────────────────
 
+  /**
+   * Changing your own password, knowing the current one.
+   *
+   * Separate from the reset flow, which proves identity with an emailed token. Here the
+   * proof is the old password, so it is checked before anything is written — otherwise
+   * anyone who found an unlocked screen could lock the owner out of their own account.
+   */
+  async changePassword(userId: string, currentPassword: string, newPassword: string): Promise<void> {
+    if (!newPassword || newPassword.length < 8) {
+      throw new BadRequestException('Your new password needs at least 8 characters.');
+    }
+
+    const user = await this.prisma.user.findUnique({
+      where:  { id: userId },
+      select: { id: true, email: true, password: true },
+    });
+    if (!user) throw new BadRequestException('Account not found');
+
+    const ok = await bcrypt.compare(currentPassword ?? '', user.password);
+    if (!ok) throw new BadRequestException('That is not your current password.');
+
+    const same = await bcrypt.compare(newPassword, user.password);
+    if (same) throw new BadRequestException('That is already your password.');
+
+    // One person, one password, across every workspace they belong to — the same rule
+    // the reset flow follows, because membership is a row per workspace sharing an email.
+    await this.prisma.user.updateMany({
+      where: { email: user.email },
+      data:  { password: await bcrypt.hash(newPassword, 12) },
+    });
+  }
+
   async resetPassword(token: string, newPassword: string): Promise<void> {
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
