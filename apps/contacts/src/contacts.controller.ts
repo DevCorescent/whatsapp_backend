@@ -24,6 +24,7 @@ export class ContactsController {
     @Query('search')   search?: string,
     @Query('source')   source?: string,
     @Query('tag')      tag?: string,
+    @Query('tagId')    tagId?: string,
     @Query('optedOut') optedOut?: string,
     @Query('segmentId') segmentId?: string,
   ) {
@@ -33,6 +34,7 @@ export class ContactsController {
       search,
       source,
       tag,
+      tagId,
       optedOut: optedOut != null ? optedOut === 'true' : undefined,
       segmentId,
     });

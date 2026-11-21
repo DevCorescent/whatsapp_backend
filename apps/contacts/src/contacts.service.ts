@@ -16,7 +16,7 @@ export class ContactsService {
 
   async findAll(scope: TenantScope, query: {
     page?: number; limit?: number; search?: string;
-    source?: string; tag?: string; optedOut?: boolean; segmentId?: string;
+    source?: string; tag?: string; tagId?: string; optedOut?: boolean; segmentId?: string;
   }) {
     const page  = Math.max(1, query.page ?? 1);
     const limit = Math.min(200, query.limit ?? 20);
@@ -36,7 +36,12 @@ export class ContactsService {
     }
     if (query.source)           where.source   = query.source;
     if (query.optedOut != null) where.optedOut  = query.optedOut;
-    if (query.tag) {
+    // The screen sends an id; `tag` by name is kept for the public API, which documents
+    // it that way. The dropdown had been sending `tagId` to an endpoint that only read
+    // `tag`, so choosing a label changed the control and left the list untouched.
+    if (query.tagId) {
+      where.tags = { some: { tagId: query.tagId } };
+    } else if (query.tag) {
       where.tags = { some: { tag: { name: { equals: query.tag, mode: 'insensitive' } } } };
     }
 
