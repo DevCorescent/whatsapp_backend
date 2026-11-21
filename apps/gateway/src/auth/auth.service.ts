@@ -253,11 +253,22 @@ export class AuthService {
 
     const plan = user.tenant.subscription?.plan ?? null;
 
-    // The two things the UI needs to show the right workspace and the right actions in it.
-    const [permissions, workspaces] = await Promise.all([
+    // The two things the UI needs to show the right workspace and the right actions in
+    // it, plus the platform's master switch for wallets.
+    const [permissions, workspaces, platform] = await Promise.all([
       this.permissions.list(user.id),
       this.listMemberships(user.email, user.tenantId),
+      this.prisma.tenant.findFirst({
+        where:  { accountType: 'PLATFORM' },
+        select: { settings: { select: { walletEnabled: true } } },
+      }).catch(() => null),
     ]);
+    // A wallet needs both the plan and the platform to allow it — which is exactly what
+    // `BillingService.walletAccess` checks before letting anyone top up. This reported
+    // the plan alone, so an account on a plan that includes a wallet saw Wallet in the
+    // sidebar while top-ups were switched off platform-wide, and the screen it led to
+    // refused to do anything.
+    const walletOn = platform?.settings?.walletEnabled === true;
 
     return {
       permissions,
@@ -268,7 +279,7 @@ export class AuthService {
         features: {
           aiEnabled: plan.aiEnabled, ragEnabled: plan.ragEnabled, whiteLabel: plan.whiteLabel,
           advancedAi: plan.advancedAi, allowExport: plan.allowExport, callingEnabled: plan.callingEnabled,
-          walletEnabled: plan.walletEnabled,
+          walletEnabled: plan.walletEnabled && walletOn,
         },
       } : null,
       id:             user.id,

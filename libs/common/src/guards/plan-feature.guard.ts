@@ -119,7 +119,7 @@ export class PlanFeatureGuard implements CanActivate {
           features: {
             aiEnabled: sub.plan.aiEnabled, ragEnabled: sub.plan.ragEnabled, whiteLabel: sub.plan.whiteLabel,
             advancedAi: sub.plan.advancedAi, allowExport: sub.plan.allowExport, callingEnabled: sub.plan.callingEnabled,
-            walletEnabled: sub.plan.walletEnabled,
+            walletEnabled: sub.plan.walletEnabled && policy.walletOn,
           },
         }
       : null;
@@ -133,14 +133,18 @@ export class PlanFeatureGuard implements CanActivate {
    * Read from the PLATFORM tenant rather than the one being checked: it is a rule about
    * the product, not a preference of the customer being refused.
    */
-  private async planEndPolicy(): Promise<{ behaviour: string; graceDays: number }> {
+  private async planEndPolicy(): Promise<{ behaviour: string; graceDays: number; walletOn: boolean }> {
     const platform = await this.prisma.tenant.findFirst({
       where:  { accountType: 'PLATFORM' },
-      select: { settings: { select: { planEndBehaviour: true, planEndGraceDays: true } } },
+      select: { settings: { select: { planEndBehaviour: true, planEndGraceDays: true, walletEnabled: true } } },
     });
     return {
       behaviour: platform?.settings?.planEndBehaviour ?? 'GRACE',
       graceDays: platform?.settings?.planEndGraceDays ?? 7,
+      // The platform's master switch. A plan may include a wallet and the platform still
+      // have top-ups switched off while payment is being set up — in which case nobody
+      // has a wallet, whatever their plan says.
+      walletOn:  platform?.settings?.walletEnabled === true,
     };
   }
 
