@@ -25,6 +25,7 @@ export class ContactsController {
     @Query('source')   source?: string,
     @Query('tag')      tag?: string,
     @Query('optedOut') optedOut?: string,
+    @Query('segmentId') segmentId?: string,
   ) {
     return this.svc.findAll(scope, {
       page:     page    ? Number(page)    : undefined,
@@ -33,6 +34,7 @@ export class ContactsController {
       source,
       tag,
       optedOut: optedOut != null ? optedOut === 'true' : undefined,
+      segmentId,
     });
   }
 

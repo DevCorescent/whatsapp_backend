@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException, ConflictException, BadRequestException, Optional } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope, normalizePhone } from '@lib/common';
+import { TenantScope, normalizePhone, buildWhere, type SegmentRule } from '@lib/common';
 import { InboundPipelineService } from '../../../apps/messaging/src/webhook/inbound-pipeline.service';
 
 @Injectable()
@@ -16,7 +16,7 @@ export class ContactsService {
 
   async findAll(scope: TenantScope, query: {
     page?: number; limit?: number; search?: string;
-    source?: string; tag?: string; optedOut?: boolean;
+    source?: string; tag?: string; optedOut?: boolean; segmentId?: string;
   }) {
     const page  = Math.max(1, query.page ?? 1);
     const limit = Math.min(200, query.limit ?? 20);
@@ -38,6 +38,34 @@ export class ContactsService {
     if (query.optedOut != null) where.optedOut  = query.optedOut;
     if (query.tag) {
       where.tags = { some: { tag: { name: { equals: query.tag, mode: 'insensitive' } } } };
+    }
+
+    // Narrowing to a segment means evaluating its rules, because a segment is a rule and
+    // not a stored membership. The dropdown has been sending this id all along and the
+    // list ignored it: picking a segment changed the control and nothing else, so the
+    // screen said it was showing one group of people while showing everybody.
+    //
+    // The same evaluator the Segments screen and the campaign sender use, so all three
+    // answer with the same people.
+    if (query.segmentId) {
+      const segment = await this.prisma.segment.findFirst({
+        where:  { id: query.segmentId, tenantId: scope.tenantId, businessId: scope.businessId },
+        select: { filters: true },
+      });
+      if (segment) {
+        const filters = segment.filters as { rules?: unknown } | null;
+        const rules = Array.isArray(filters?.rules) ? (filters.rules as SegmentRule[]) : [];
+        const segWhere = await buildWhere(this.prisma, scope.tenantId, scope.businessId, rules);
+        Object.assign(where, segWhere, {
+          // The segment's own AND must not clobber a tag/search clause already set.
+          ...(where.AND || (segWhere as any).AND
+            ? { AND: [...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []),
+                      ...((segWhere as any).AND ?? [])] }
+            : {}),
+          ...(where.OR ? { OR: where.OR } : {}),
+          ...(where.tags ? { tags: where.tags } : {}),
+        });
+      }
     }
 
     const [contacts, total] = await this.prisma.withRetry(() => Promise.all([
