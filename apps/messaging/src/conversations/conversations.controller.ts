@@ -47,6 +47,14 @@ export class ConversationsController {
     return this.svc.startConversation(scope, body);
   }
 
+  // Declared above `:id`, which would otherwise read this as a conversation called
+  // "agents". Nest matches in declaration order.
+  @Get('agents')
+  @ApiOperation({ summary: 'Teammates a conversation can be assigned to' })
+  agents(@CurrentTenant() scope: TenantScope) {
+    return this.svc.assignableAgents(scope);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get a conversation by ID' })
   findOne(

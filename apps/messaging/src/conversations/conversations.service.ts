@@ -101,6 +101,29 @@ export class ConversationsService {
     return { success: true, data: conversations, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) }, businessId: scope.businessId };
   }
 
+  /**
+   * Who a chat can be handed to.
+   *
+   * Deliberately not `GET /settings/team`: that needs `users.manage`, so an agent — the
+   * person most likely to be reassigning a chat — cannot call it, and it returns emails
+   * and AI credit counters that have no business in a dropdown. The inbox was building
+   * the list from whoever already appeared as an assignee on a loaded row, so a
+   * teammate who had never been assigned anything could never be assigned anything.
+   */
+  async assignableAgents(scope: TenantScope) {
+    const users = await this.prisma.user.findMany({
+      where: {
+        tenantId: scope.tenantId,
+        isActive: true,
+        removedAt: null,
+        role: { in: ['AGENT', 'MANAGER', 'ADMIN', 'TENANT_OWNER'] as any },
+      },
+      select: { id: true, name: true, avatar: true },
+      orderBy: { name: 'asc' },
+    });
+    return { agents: users };
+  }
+
   // ── Get one ────────────────────────────────────────────────────────────────
 
   async findOne(scope: TenantScope, id: string, query: { page?: number } = {}) {
