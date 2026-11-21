@@ -8,7 +8,7 @@ export class BlacklistService {
 
   async list(scope: TenantScope, query: { page?: number; limit?: number; search?: string }) {
     const page   = Math.max(1, query.page ?? 1);
-    const limit  = Math.min(100, query.limit ?? 20);
+    const limit  = Math.min(200, query.limit ?? 20);
     const skip   = (page - 1) * limit;
     const search = (query.search ?? '').trim();
     const digits = search.replace(/\D/g, '');
@@ -124,7 +124,7 @@ export class BlacklistService {
   }
 
   async history(scope: TenantScope, query: { phone?: string; limit?: number } = {}) {
-    const limit = Math.min(200, query.limit ?? 100);
+    const limit = Math.min(200, query.limit ?? 20);
     const rows = await this.prisma.auditLog.findMany({
       where: {
         tenantId:   scope.tenantId,

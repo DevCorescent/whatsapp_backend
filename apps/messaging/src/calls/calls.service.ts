@@ -308,7 +308,7 @@ export class CallsService {
 
   async list(scope: TenantScope, query: { page?: number; limit?: number; status?: string; contactId?: string; conversationId?: string }) {
     const page  = Math.max(1, query.page ?? 1);
-    const limit = Math.min(100, query.limit ?? 30);
+    const limit = Math.min(200, query.limit ?? 30);
     const where: any = { tenantId: scope.tenantId, businessId: scope.businessId };
     if (query.status)         where.status = query.status;
     if (query.contactId)      where.contactId = query.contactId;
@@ -482,7 +482,7 @@ export class CallsService {
   /** Recordings for this department, newest first, with who was on the call. */
   async listRecordings(scope: TenantScope, query: { page?: number; limit?: number } = {}) {
     const page  = Math.max(1, query.page ?? 1);
-    const limit = Math.min(100, query.limit ?? 20);
+    const limit = Math.min(200, query.limit ?? 20);
 
     const where = { tenantId: scope.tenantId, businessId: scope.businessId };
     const [rows, total] = await Promise.all([

@@ -369,7 +369,7 @@ Reply with JSON only, no prose:
     } = {},
   ) {
     const page  = Math.max(1, query.page ?? 1);
-    const limit = Math.min(100, query.limit ?? 25);
+    const limit = Math.min(200, query.limit ?? 20);
 
     const where: Record<string, unknown> = { tenantId: scope.tenantId, businessId: scope.businessId };
     if (query.status && query.status !== 'ALL') where.status = query.status;

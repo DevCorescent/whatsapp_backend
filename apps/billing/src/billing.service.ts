@@ -780,7 +780,7 @@ export class BillingService {
 
   async getWallet(scope: TenantScope, query: { page?: number; limit?: number } = {}) {
     const page  = Math.max(1, Number(query.page) || 1);
-    const limit = Math.min(100, Number(query.limit) || 20);
+    const limit = Math.min(200, Number(query.limit) || 20);
 
     const [wallet, rates, access] = await Promise.all([
       this.prisma.wallet.findUnique({ where: { tenantId: scope.tenantId } }),
@@ -924,7 +924,7 @@ export class BillingService {
 
   async getWalletTransactions(scope: TenantScope, query: { page?: number; limit?: number }) {
     const page  = Math.max(1, query.page ?? 1);
-    const limit = Math.min(100, query.limit ?? 20);
+    const limit = Math.min(200, query.limit ?? 20);
     const skip  = (page - 1) * limit;
 
     const [transactions, total] = await Promise.all([

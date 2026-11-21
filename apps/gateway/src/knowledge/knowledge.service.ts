@@ -74,7 +74,7 @@ export class KnowledgeService {
 
   async listDocs(scope: TenantScope, query: { page?: number; limit?: number; search?: string }) {
     const page  = Math.max(1, query.page ?? 1);
-    const limit = Math.min(100, query.limit ?? 20);
+    const limit = Math.min(200, query.limit ?? 20);
     const skip  = (page - 1) * limit;
     const where: any = { tenantId: scope.tenantId, businessId: scope.businessId };
     if (query.search) where.name = { contains: query.search, mode: 'insensitive' };
@@ -440,7 +440,7 @@ export class KnowledgeService {
 
   async getFaqInterests(scope: TenantScope, query: { page?: number; limit?: number }) {
     const page  = Math.max(1, query.page ?? 1);
-    const limit = Math.min(100, query.limit ?? 20);
+    const limit = Math.min(200, query.limit ?? 20);
     const skip  = (page - 1) * limit;
     const where = { tenantId: scope.tenantId, businessId: scope.businessId };
     const [interactions, total] = await Promise.all([

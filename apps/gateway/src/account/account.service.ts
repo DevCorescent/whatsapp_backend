@@ -55,7 +55,7 @@ export class AccountService {
 
   async listAuditLogs(scope: TenantScope, q: AuditLogQuery) {
     const page  = Math.max(1, q.page ?? 1);
-    const limit = Math.min(100, q.limit ?? 20);
+    const limit = Math.min(200, q.limit ?? 20);
     const skip  = (page - 1) * limit;
     const where: Record<string, unknown> = { tenantId: scope.tenantId };
     if (q.q) {

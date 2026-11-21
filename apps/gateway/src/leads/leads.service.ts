@@ -76,7 +76,7 @@ export class LeadsService {
     query: LeadFilterQuery & { page?: number; limit?: number },
   ) {
     const page  = Math.max(1, query.page  ?? 1);
-    const limit = Math.min(100, query.limit ?? 20);
+    const limit = Math.min(200, query.limit ?? 20);
     const where = buildLeadWhere(scope, query);
 
     const [leads, total, stats] = await Promise.all([

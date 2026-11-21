@@ -275,7 +275,7 @@ export class ResellerService {
   async listClients(scope: TenantScope, query: { page?: number; limit?: number; search?: string }) {
     await this.guardReseller(scope);
     const page  = Math.max(1, query.page ?? 1);
-    const limit = Math.min(100, query.limit ?? 20);
+    const limit = Math.min(200, query.limit ?? 20);
     const skip  = (page - 1) * limit;
 
     const where: any = { parentId: scope.tenantId };
@@ -759,7 +759,7 @@ export class ResellerService {
   async listCommissions(scope: TenantScope, query: { page?: number; limit?: number; status?: string }) {
     await this.guardReseller(scope);
     const page  = Math.max(1, query.page ?? 1);
-    const limit = Math.min(100, query.limit ?? 20);
+    const limit = Math.min(200, query.limit ?? 20);
     const skip  = (page - 1) * limit;
 
     const where: any = { resellerId: scope.tenantId };

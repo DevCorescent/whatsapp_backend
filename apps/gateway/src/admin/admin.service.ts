@@ -148,7 +148,7 @@ export class AdminService {
   ) {
     await this.guard(scope, 'platform.tenants.view');
     const page  = Math.max(1, query.page ?? 1);
-    const limit = Math.min(100, query.limit ?? 20);
+    const limit = Math.min(200, query.limit ?? 20);
     const skip  = (page - 1) * limit;
 
     const where: any = {};
@@ -368,7 +368,7 @@ export class AdminService {
   async listAuditLogs(scope: TenantScope, query: { tenantId?: string; page?: number; limit?: number; q?: string }) {
     await this.guard(scope, 'platform.audit.view');
     const page  = Math.max(1, query.page ?? 1);
-    const limit = Math.min(100, query.limit ?? 20);
+    const limit = Math.min(200, query.limit ?? 20);
     const skip  = (page - 1) * limit;
     const where: any = {};
     if (query.tenantId) where.tenantId = query.tenantId;
@@ -402,7 +402,7 @@ export class AdminService {
   async adminGetTenantContacts(scope: TenantScope, tenantId: string, query: { page?: number; limit?: number; search?: string }) {
     await this.guard(scope, 'platform.tenants.view');
     const page  = Math.max(1, query.page ?? 1);
-    const limit = Math.min(100, query.limit ?? 20);
+    const limit = Math.min(200, query.limit ?? 20);
     const skip  = (page - 1) * limit;
     const where: any = { tenantId };
     if (query.search) {
@@ -1980,7 +1980,7 @@ export class AdminService {
   ) {
     await this.guard(scope, 'platform.revenue.view');
     const page  = Math.max(1, query.page ?? 1);
-    const limit = Math.min(100, query.limit ?? 50);
+    const limit = Math.min(200, query.limit ?? 20);
     const where: any = {};
     if (query.status)     where.status     = query.status;
     if (query.resellerId) where.resellerId = query.resellerId;

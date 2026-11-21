@@ -43,7 +43,7 @@ export class ConversationsService {
     assignedToId?: string; isAiActive?: boolean; whatsappIntegrationId?: string;
   }) {
     const page  = Math.max(1, query.page ?? 1);
-    const limit = Math.min(100, query.limit ?? 30);
+    const limit = Math.min(200, query.limit ?? 30);
     const skip  = (page - 1) * limit;
 
     const where: any = { tenantId: scope.tenantId, businessId: scope.businessId };
@@ -384,7 +384,7 @@ export class ConversationsService {
     await this.findOne(scope, conversationId); // 404 guard
 
     const page  = Math.max(1, query.page ?? 1);
-    const limit = Math.min(100, query.limit ?? 50);
+    const limit = Math.min(200, query.limit ?? 50);
 
     const total = await this.prisma.message.count({ where: { conversationId, tenantId: scope.tenantId } });
     const skipFromEnd = (page - 1) * limit;

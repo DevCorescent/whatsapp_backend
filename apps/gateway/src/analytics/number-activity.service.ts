@@ -54,7 +54,7 @@ export class NumberActivityService {
     } = {},
   ) {
     const page   = Math.max(1, query.page ?? 1);
-    const limit  = Math.min(200, query.limit ?? 50);
+    const limit  = Math.min(200, query.limit ?? 20);
     const offset = (page - 1) * limit;
     const view   = query.view ?? 'mine';
 
