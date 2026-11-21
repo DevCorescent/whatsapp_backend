@@ -1,6 +1,6 @@
 import { Injectable, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope } from '@lib/common';
+import { TenantScope, withCountryCode } from '@lib/common';
 
 @Injectable()
 export class BlacklistService {
@@ -64,13 +64,32 @@ export class BlacklistService {
     };
   }
 
+  /**
+   * Block some numbers, and say what happened to each one.
+   *
+   * Two things were wrong here. The counts came back as numbers while the screen expected
+   * the numbers themselves — it calls `.join` on the invalid ones to put them back in the
+   * box — so blocking anything threw "Cannot read properties of undefined" and the screen
+   * reported a failure after a successful write. And the only normalising was stripping
+   * non-digits, while the screen promises a country code is added: a number blocked as
+   * 9865856989 never matched a contact stored as 919865856989, so the block was accepted,
+   * listed, and never stopped a single message.
+   *
+   * A number that cannot be one is now returned rather than quietly skipped.
+   */
   async create(scope: TenantScope, data: { phones: string[]; reason?: string; scope?: string }) {
     const added: string[] = [];
     const alreadyListed: string[] = [];
+    const invalid: string[] = [];
 
     for (const raw of data.phones) {
-      const phone = raw.replace(/\D/g, '');
-      if (!phone) continue;
+      const phone = withCountryCode(raw);
+      // E.164 allows 15 digits; below 8 nothing is dialable. Kept as typed so the screen
+      // can put it back in the box for the person to correct.
+      if (phone.length < 8 || phone.length > 15) {
+        if (String(raw ?? '').trim()) invalid.push(String(raw).trim());
+        continue;
+      }
 
       const existing = await this.prisma.blacklistEntry.findUnique({
         where: { tenantId_phone: { tenantId: scope.tenantId, phone } },
@@ -91,7 +110,7 @@ export class BlacklistService {
       }
     }
 
-    return { success: true, data: { added: added.length, alreadyListed: alreadyListed.length } };
+    return { success: true, data: { added, alreadyListed, invalid } };
   }
 
   async remove(scope: TenantScope, id: string) {

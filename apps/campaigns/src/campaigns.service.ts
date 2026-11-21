@@ -7,7 +7,7 @@ import { Queue } from 'bull';
 import { PrismaService } from '@lib/prisma';
 import {
   TenantScope, MessageRatesService, RedisService, classifySendError, requireFields,
-  normalizePhone, decryptSecret, toSpec, missingSendValues, describeMissing,
+  normalizePhone, withCountryCode, decryptSecret, toSpec, missingSendValues, describeMissing,
   dynamicUrlButtonIndexes,
 } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
@@ -237,7 +237,11 @@ export class CampaignsService {
     // ── 3. Check exclusions in parallel ────────────────────────────────────
     const [blacklistEntries, optedOutContacts, existingContacts] = await Promise.all([
       this.prisma.blacklistEntry.findMany({
-        where:  { phone: { in: uniqueNumbers }, OR: [{ tenantId: scope.tenantId }, { tenantId: null }] },
+        // Both spellings asked for, because both exist in the table.
+        where:  {
+          phone: { in: [...new Set(uniqueNumbers.flatMap(n => [n, withCountryCode(n), normalizePhone(n).slice(-10)]))] },
+          OR: [{ tenantId: scope.tenantId }, { tenantId: null }],
+        },
         select: { phone: true },
       }),
       this.prisma.contact.findMany({
@@ -250,7 +254,11 @@ export class CampaignsService {
       }),
     ]);
 
-    const blacklistedPhones = new Set(blacklistEntries.map(b => b.phone));
+    // Compared with the country code on both sides. Contacts and blacklist rows were
+    // written in two spellings over the product's life — 9865856989 and 919865856989 —
+    // and an exact match let a blocked number straight through whenever the two halves
+    // disagreed, which is the one case a blacklist exists for.
+    const blacklistedPhones = new Set(blacklistEntries.map(b => withCountryCode(b.phone)));
     const optedOutPhones    = new Set(optedOutContacts.map(c => c.phone));
     const contactMap        = new Map(existingContacts.map(c => [c.phone, c]));
 
@@ -259,7 +267,7 @@ export class CampaignsService {
     const validNumbers: string[] = [];
 
     for (const phone of uniqueNumbers) {
-      if (blacklistedPhones.has(phone)) {
+      if (blacklistedPhones.has(withCountryCode(phone))) {
         excluded.push({ phone, name: contactMap.get(phone)?.name ?? null, reason: 'blacklisted' });
       } else if (optedOutPhones.has(phone)) {
         excluded.push({ phone, name: contactMap.get(phone)?.name ?? null, reason: 'opted_out' });

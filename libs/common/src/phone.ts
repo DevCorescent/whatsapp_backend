@@ -31,6 +31,28 @@ export function requirePhone(raw: string, field = 'phone'): string {
   return phone;
 }
 
+/**
+ * The same number, with a country code on the front when it plainly has none.
+ *
+ * Numbers are pasted into this product by people, from spreadsheets and phone contacts,
+ * and in India they are written as ten digits. The blacklist screen says so — "numbers
+ * without a country code get +91" — and nothing did it, so a number blocked as
+ * 9865856989 never matched a contact stored as 919865856989 and the block silently did
+ * nothing at all.
+ *
+ * Only a bare ten-digit number is assumed to be national; anything else is already
+ * carrying its own code and is left alone.
+ */
+export function withCountryCode(raw: string, defaultCode?: string): string {
+  const digits = normalizePhone(raw);
+  // Guarded because this is handed straight to `.map`, which calls it with the index as
+  // a second argument — and a number there silently became the country code.
+  const given = typeof defaultCode === 'string' ? defaultCode : undefined;
+  const code = (given ?? process.env['DEFAULT_COUNTRY_CODE'] ?? '91').replace(/\D/g, '');
+  if (!digits || !code) return digits;
+  return digits.length === 10 ? `${code}${digits}` : digits;
+}
+
 /** With the `+` back on, for display and for anything shown to a customer. */
 export function displayPhone(phone: string): string {
   const digits = normalizePhone(phone);

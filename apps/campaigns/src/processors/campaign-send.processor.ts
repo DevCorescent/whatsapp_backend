@@ -6,6 +6,7 @@ import {
   WebhookDispatchService, NotificationsService, MessageRatesService, WalletService, MANAGER_ROLES, decryptSecret,
   buildSendComponents, toSpec, RedisService, SuppressionService, CampaignHaltService,
   classifySendError, describeSendError, parseSendError, type ParsedSendError,
+  normalizePhone, withCountryCode,
 } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
 import { CampaignProgressService } from '../campaign-progress.service';
@@ -132,8 +133,18 @@ export class CampaignSendProcessor {
       // A person can opt out while the campaign is running — the webhook arrives in the
       // middle of a long send. Launch already filtered the list, so this catches only
       // those who changed their mind since, which is exactly the case worth catching.
+      // Both spellings, because the table holds both: a number blocked as ten digits
+      // never matched a recipient stored with its country code, so the last check before
+      // a send let it through.
       const blocked = await this.prisma.blacklistEntry.findFirst({
-        where:  { phone: recipient.phone, OR: [{ tenantId }, { tenantId: null }] },
+        where:  {
+          phone: { in: [...new Set([
+            recipient.phone,
+            withCountryCode(recipient.phone),
+            normalizePhone(recipient.phone).slice(-10),
+          ])].filter(Boolean) },
+          OR: [{ tenantId }, { tenantId: null }],
+        },
         select: { source: true },
       });
       if (blocked) {
