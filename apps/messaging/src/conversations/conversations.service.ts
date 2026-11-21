@@ -52,6 +52,7 @@ export class ConversationsService {
   async findAll(scope: TenantScope, query: {
     page?: number; limit?: number; status?: string; search?: string;
     assignedToId?: string; isAiActive?: boolean; whatsappIntegrationId?: string;
+    hasAiReply?: boolean;
   }) {
     const page  = Math.max(1, query.page ?? 1);
     const limit = Math.min(200, query.limit ?? 30);
@@ -61,14 +62,23 @@ export class ConversationsService {
     if (query.status)        where.status      = query.status;
     if (query.assignedToId)  where.assignedToId = query.assignedToId;
     if (query.isAiActive != null) where.isAiActive = query.isAiActive;
+    // "The AI handled this one" is a fact about what was said, not about the switch:
+    // a thread the AI answered last week still counts after someone turns it off, and a
+    // thread with the switch newly on has not been handled by anything yet.
+    if (query.hasAiReply) where.messages = { some: { isAiGenerated: true } };
     // A workspace can connect several WhatsApp numbers, and a thread belongs to the one
     // it arrived on. Filtering by it is how someone works one number's inbox at a time.
     if (query.whatsappIntegrationId) where.whatsappIntegrationId = query.whatsappIntegrationId;
     if (query.search) {
-      where.contact = { OR: [
-        { name:  { contains: query.search, mode: 'insensitive' } },
-        { phone: { contains: query.search } },
-      ]};
+      // Top-level OR rather than a nested one on `contact`, so the last message counts
+      // too: people search the inbox for what was said at least as often as for who
+      // said it, and the sidebar used to look for that itself over the rows it had
+      // already loaded — which meant anything past the first page was unfindable.
+      where.OR = [
+        { contact: { name:  { contains: query.search, mode: 'insensitive' } } },
+        { contact: { phone: { contains: query.search } } },
+        { lastMessagePreview: { contains: query.search, mode: 'insensitive' } },
+      ];
     }
 
     const [conversations, total] = await Promise.all([
