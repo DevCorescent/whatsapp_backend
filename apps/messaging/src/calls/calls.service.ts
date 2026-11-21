@@ -28,6 +28,24 @@ const CALL_LABEL: Record<CallStatusValue, string> = {
   COMPLETED: 'Voice call', MISSED: 'Missed call', REJECTED: 'Call declined', FAILED: 'Call failed',
 };
 
+/**
+ * The same event reads differently from each end.
+ *
+ * "Incoming call" on a call the agent placed, and "Missed call" on one the customer
+ * never picked up, both describe the other party's experience rather than what happened
+ * here. Only the three that differ are overridden; the rest read the same either way.
+ */
+const CALL_LABEL_OUT: Partial<Record<CallStatusValue, string>> = {
+  RINGING: 'Calling…',
+  MISSED:  'No answer',
+  REJECTED: 'Call declined',
+};
+
+function callLabel(status: CallStatusValue, direction?: string | null): string {
+  if (direction === 'OUTBOUND' && CALL_LABEL_OUT[status]) return CALL_LABEL_OUT[status]!;
+  return CALL_LABEL[status] ?? status;
+}
+
 @Injectable()
 export class CallsService {
   private readonly logger = new Logger(CallsService.name);
@@ -310,6 +328,37 @@ export class CallsService {
       },
     });
 
+    // The thread needs a row for this call, and only the inbound path ever wrote one.
+    // So an outgoing call left no trace in the conversation at all: `afterTransition`
+    // patches the bubble only `if (systemMessageId)`, and there was never one to patch.
+    // Every call ever shown in a thread has been an incoming one.
+    if (conversation) {
+      const sys = await this.prisma.message.create({
+        data: {
+          tenantId:       scope.tenantId,
+          businessId:     scope.businessId,
+          conversationId: conversation.id,
+          sentById:       scope.userId,
+          direction:      'OUTBOUND',
+          status:         'SENT',
+          type:           'SYSTEM',
+          content:        callLabel('RINGING', 'OUTBOUND'),
+          metadata:       { call: { callId: call.id, status: 'RINGING', direction: 'OUTBOUND' } } as any,
+        },
+        select: { id: true },
+      });
+      // Merged, not replaced: the inbound path keeps `displayPhoneNumber` here too.
+      await this.prisma.call.update({
+        where: { id: call.id },
+        data:  { metadata: { ...(call.metadata as object ?? {}), systemMessageId: sys.id } as any },
+      });
+      await this.prisma.conversation.update({
+        where: { id: conversation.id },
+        data:  { lastMessageAt: new Date(), lastMessagePreview: '📞 Outgoing call' },
+      }).catch(() => undefined);
+      void this.events.messageNew(sys.id);
+    }
+
     this.logger.log(`Outgoing call ${call.id} to ${contact.name ?? contact.phone}`);
     return call;
   }
@@ -462,7 +511,7 @@ export class CallsService {
     const meta = (call.metadata as Record<string, unknown> | null) ?? {};
     const systemMessageId = typeof meta.systemMessageId === 'string' ? meta.systemMessageId : null;
     if (systemMessageId) {
-      const label = CALL_LABEL[call.status as CallStatusValue] ?? call.status;
+      const label = callLabel(call.status as CallStatusValue, call.direction);
       const content = call.status === 'COMPLETED' && call.durationSec != null ? `${label} · ${formatDuration(call.durationSec)}` : label;
       const patch = {
         content,
