@@ -817,7 +817,7 @@ export class CampaignsService {
   /** Stop sending but keep the pending recipients, so it can be picked up later. */
   async pause(scope: TenantScope, id: string, reason?: string) {
     const existing = await this.findOne(scope, id);
-    if (!['RUNNING', 'PROCESSING'].includes(existing.status)) {
+    if (existing.status !== 'RUNNING') {
       throw new BadRequestException('Only a running campaign can be paused');
     }
     await this.prisma.campaign.update({

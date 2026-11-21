@@ -1790,6 +1790,9 @@ enum LeadScoreLabel {
   QUALIFIED
 }
 
+/// PROCESSING and SENT used to sit here beside RUNNING and COMPLETED, meaning the same
+/// things. Nothing ever wrote either of them and no row has ever held one; they only
+/// existed as two more filter tabs and an extra branch in every status check.
 enum CampaignStatus {
   DRAFT
   SCHEDULED
@@ -1797,8 +1800,6 @@ enum CampaignStatus {
   COMPLETED
   FAILED
   PAUSED
-  PROCESSING
-  SENT
   CANCELLED
 }
 

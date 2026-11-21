@@ -77,7 +77,7 @@ export class CampaignHaltService {
       : null;                                           // most of it did — leave it complete
 
     const halted = await this.prisma.campaign.updateMany({
-      where: { id: campaignId, status: { in: ['RUNNING', 'PROCESSING', 'COMPLETED'] } },
+      where: { id: campaignId, status: { in: ['RUNNING', 'COMPLETED'] } },
       data: {
         ...(nextStatus ? { status: nextStatus } : {}),
         haltedAt: new Date(),
