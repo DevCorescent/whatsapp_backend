@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
+import { PrismaService } from '@lib/prisma';
 import {
   OnGatewayConnection, OnGatewayDisconnect, SubscribeMessage, MessageBody,
   ConnectedSocket, WebSocketGateway, WebSocketServer,
@@ -67,7 +68,40 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
 
   @WebSocketServer() server!: Server;
 
-  constructor(private readonly jwt: JwtService) {}
+  constructor(
+    private readonly jwt: JwtService,
+    private readonly prisma: PrismaService,
+  ) {}
+
+  /**
+   * A route change disconnects and reconnects in the same second.
+   *
+   * Without a pause between the last socket closing and calling someone offline, every
+   * teammate's dot flickers grey all day as they move around the app. The timer is
+   * cancelled the moment they reconnect.
+   */
+  private readonly goingOffline = new Map<string, NodeJS.Timeout>();
+  private static readonly OFFLINE_GRACE_MS = 10_000;
+
+  /** Tells the business what this person's dot should say now. */
+  private async announce(identity: SocketIdentity, online: boolean) {
+    if (!identity.businessId) return;
+    const row = await this.prisma.user
+      .findUnique({ where: { id: identity.userId }, select: { presenceStatus: true } })
+      .catch(() => null);
+    const override = row?.presenceStatus ?? null;
+    const state =
+      override === 'BUSY' || override === 'AWAY'
+        ? override
+        : !online ? 'OFFLINE'
+        : identity.visible ? 'ONLINE' : 'AWAY';
+
+    this.server?.to(rooms.business(identity.businessId)).emit('presence:update', {
+      userId: identity.userId,
+      state,
+      manual: Boolean(override),
+    });
+  }
 
   handleConnection(socket: Socket) {
     const token = socket.handshake.auth?.token as string | undefined;
@@ -99,16 +133,43 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     void socket.join(rooms.user(identity.userId));
     if (identity.businessId) void socket.join(rooms.business(identity.businessId));
 
+    const pending = this.goingOffline.get(identity.userId);
+    if (pending) {
+      clearTimeout(pending);
+      this.goingOffline.delete(identity.userId);
+    }
+    void this.prisma.user
+      .update({ where: { id: identity.userId }, data: { lastLoginAt: new Date() } })
+      .catch(() => undefined);
+    void this.announce(identity, true);
+
     this.logger.log(`WS connected user=${identity.userId} business=${identity.businessId || '-'} sid=${socket.id}`);
   }
 
   handleDisconnect(socket: Socket) {
     const id = socket.data as Partial<SocketIdentity>;
-    if (id?.userId) this.logger.log(`WS disconnected user=${id.userId} sid=${socket.id}`);
+    if (!id?.userId) return;
+    this.logger.log(`WS disconnected user=${id.userId} sid=${socket.id}`);
+
+    const identity = id as SocketIdentity;
+    const timer = setTimeout(() => {
+      this.goingOffline.delete(identity.userId);
+      void (async () => {
+        // Another tab may still be open — only the last one leaving is going offline.
+        const left = await this.server
+          ?.in(rooms.user(identity.userId)).fetchSockets().catch(() => []);
+        if (left && left.length > 0) return;
+        void this.announce(identity, false);
+      })();
+    }, RealtimeGateway.OFFLINE_GRACE_MS);
+
+    this.goingOffline.set(identity.userId, timer);
   }
 
   @SubscribeMessage('presence')
   onPresence(@ConnectedSocket() socket: Socket, @MessageBody() body: RealtimeClientEvents['presence']) {
-    (socket.data as SocketIdentity).visible = Boolean(body?.visible);
+    const identity = socket.data as SocketIdentity;
+    identity.visible = Boolean(body?.visible);
+    void this.announce(identity, true);
   }
 }

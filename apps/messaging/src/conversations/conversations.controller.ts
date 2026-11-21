@@ -49,6 +49,13 @@ export class ConversationsController {
 
   // Declared above `:id`, which would otherwise read this as a conversation called
   // "agents". Nest matches in declaration order.
+  @Patch('presence')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Set or clear your own Away/Busy' })
+  setPresence(@CurrentTenant() scope: TenantScope, @Body() body: { status?: string | null }) {
+    return this.svc.setPresence(scope, body?.status ?? null);
+  }
+
   @Get('agents')
   @ApiOperation({ summary: 'Teammates a conversation can be assigned to' })
   agents(@CurrentTenant() scope: TenantScope) {

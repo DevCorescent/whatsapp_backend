@@ -3,7 +3,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
 import {
-  TenantScope, decryptSecret, MessageEventsService, NotificationsService,
+  TenantScope, decryptSecret, MessageEventsService, NotificationsService, RealtimeService,
   HandoverService, LeadQualificationService,
   parseSendError, classifySendError, describeSendError, isKnownSendError,
   normalizePhone, toSpec, buildSendComponents, missingSendValues, describeMissing,
@@ -45,6 +45,7 @@ export class ConversationsService {
     private readonly notifications: NotificationsService,
     private readonly handover: HandoverService,
     private readonly qualification: LeadQualificationService,
+    private readonly realtime: RealtimeService,
   ) {}
 
   // ── List ───────────────────────────────────────────────────────────────────
@@ -118,10 +119,50 @@ export class ConversationsService {
         removedAt: null,
         role: { in: ['AGENT', 'MANAGER', 'ADMIN', 'TENANT_OWNER'] as any },
       },
-      select: { id: true, name: true, avatar: true },
+      select: { id: true, name: true, avatar: true, presenceStatus: true },
       orderBy: { name: 'asc' },
     });
-    return { agents: users };
+
+    // Who is actually connected, asked of the sockets rather than a column — a laptop
+    // closing cannot write a row, so a stored flag would leave people online forever.
+    const online = await this.realtime.onlineUsersInBusiness(scope.businessId);
+
+    return {
+      agents: users.map(u => ({
+        id:     u.id,
+        name:   u.name,
+        avatar: u.avatar,
+        presence: this.realtime.presenceFor(online.has(u.id), true, u.presenceStatus),
+        presenceManual: Boolean(u.presenceStatus),
+      })),
+    };
+  }
+
+  /**
+   * Setting, or clearing, your own Away/Busy.
+   *
+   * Only the override is stored. Online and offline follow the socket, so there is
+   * nothing here to go stale when a browser closes without saying goodbye. Clearing it
+   * hands the dot back to the connection, which is why "Auto" has to be offerable.
+   */
+  async setPresence(scope: TenantScope, status: string | null) {
+    const allowed = ['AWAY', 'BUSY'];
+    const next = status && allowed.includes(status) ? status : null;
+    if (status && !next) throw new BadRequestException('Status must be AWAY, BUSY, or empty to follow your connection.');
+
+    await this.prisma.user.update({
+      where: { id: scope.userId },
+      data:  { presenceStatus: next, presenceUpdatedAt: new Date() },
+    });
+
+    const online = await this.realtime.onlineUsersInBusiness(scope.businessId);
+    const state = this.realtime.presenceFor(online.has(scope.userId), true, next);
+    this.realtime.toBusiness(scope.businessId, 'presence:update', {
+      userId: scope.userId,
+      state,
+      manual: Boolean(next),
+    });
+    return { state, manual: Boolean(next) };
   }
 
   // ── Get one ────────────────────────────────────────────────────────────────

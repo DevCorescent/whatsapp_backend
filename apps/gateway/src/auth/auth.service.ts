@@ -229,7 +229,7 @@ export class AuthService {
       where:  { id: userId },
       select: {
         id: true, email: true, name: true, role: true, tenantId: true,
-        avatar: true, isActive: true,
+        avatar: true, isActive: true, presenceStatus: true,
         tenant: {
           select: {
             slug: true, name: true, accountType: true,
@@ -288,6 +288,8 @@ export class AuthService {
       role:           user.role,
       tenantId:       user.tenantId,
       avatar:         user.avatar ?? null,
+      // So a chosen Away/Busy survives a reload rather than snapping back to Online.
+      presenceStatus: user.presenceStatus ?? null,
       tenantSlug:     user.tenant.slug,
       tenantName:     user.tenant.name,
       accountType:    user.tenant.accountType,

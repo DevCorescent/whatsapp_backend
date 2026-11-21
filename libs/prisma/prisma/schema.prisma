@@ -256,6 +256,12 @@ model User {
   phone                String?
   isActive             Boolean              @default(true)
   lastLoginAt          DateTime?
+  /// A status this person chose for themselves: AWAY or BUSY, or null to follow their
+  /// connection. Only the override is stored — whether someone is online is decided by
+  /// whether a socket is open, and a column saying so would be stale the moment a tab
+  /// closed without warning, leaving everyone permanently "online" after a crash.
+  presenceStatus       String?
+  presenceUpdatedAt    DateTime?
   createdAt            DateTime             @default(now())
   updatedAt            DateTime             @updatedAt
   /// This agent's own share of the workspace AI allowance, per billing period.

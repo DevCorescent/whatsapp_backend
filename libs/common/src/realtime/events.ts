@@ -102,8 +102,19 @@ export interface RealtimeEvents {
   'call:status':          RtCallStatus;
   /** The callee picked up: their SDP answer, for the agent who placed the call. */
   'call:answer':          { callId: string; sdp: string };
+  'presence:update':      RtPresence;
   'handover:new':         RtHandover;
   'handover:update':      { id: string; status: string; assignedToId: string | null };
+}
+
+/** Online is socket truth; AWAY and BUSY are what the person chose. */
+export type PresenceState = 'ONLINE' | 'AWAY' | 'BUSY' | 'OFFLINE';
+
+export interface RtPresence {
+  userId: string;
+  state: PresenceState;
+  /** True when the person set it themselves rather than it following their connection. */
+  manual: boolean;
 }
 
 /** A conversation the AI has just passed to a person. */

@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { RealtimeGateway, type SocketIdentity } from './realtime.gateway';
-import { rooms, type RealtimeEventName, type RealtimeEvents } from './events';
+import { rooms, type PresenceState, type RealtimeEventName, type RealtimeEvents } from './events';
 
 /**
  * The one way the backend talks to connected browsers. Every emit is room-scoped,
@@ -39,6 +39,24 @@ export class RealtimeService {
 
   toUsers<E extends RealtimeEventName>(userIds: string[], event: E, payload: RealtimeEvents[E]) {
     for (const id of new Set(userIds)) this.toUser(id, event, payload);
+  }
+
+
+  /**
+   * What a teammate's dot should say, from the two halves that decide it.
+   *
+   * Connectivity is read from the sockets, never from a column: a laptop closing does
+   * not get to write a row, so a stored "online" would be a claim nobody ever retracts.
+   * The chosen status is read from the row, because it must survive a reload and be
+   * visible to someone who was not connected when it was set.
+   *
+   * One function so the gateway, the REST reply and the broadcast cannot disagree about
+   * the same person at the same moment.
+   */
+  presenceFor(online: boolean, visible: boolean, override?: string | null): PresenceState {
+    if (override === 'BUSY' || override === 'AWAY') return override;
+    if (!online) return 'OFFLINE';
+    return visible ? 'ONLINE' : 'AWAY';
   }
 
   /** True when the user has at least one connected socket whose tab is visible. */
