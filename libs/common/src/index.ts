@@ -46,3 +46,4 @@ export * from './hosting/vercel-domains';
 export * from './brand-host';
 export * from './brand-url';
 export * from './csv';
+export * from './segments/segment-filters';

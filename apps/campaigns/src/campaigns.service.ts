@@ -8,7 +8,7 @@ import { PrismaService } from '@lib/prisma';
 import {
   TenantScope, MessageRatesService, RedisService, classifySendError, requireFields,
   normalizePhone, withCountryCode, decryptSecret, toSpec, missingSendValues, describeMissing,
-  dynamicUrlButtonIndexes, StorageService,
+  dynamicUrlButtonIndexes, StorageService, buildWhere, type SegmentRule,
 } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
 import { CampaignProgressService } from './campaign-progress.service';
@@ -209,10 +209,30 @@ export class CampaignsService {
         select: { contact: { select: { phone: true } } },
       });
       rawNumbers = members.map(m => m.contact.phone).filter(Boolean);
-    } else if (segmentId || all) {
-      // Segment rows hold dynamic filters evaluated by lib/segments.ts.
-      // Without importing that evaluator here we fall back to all non-opted-out
-      // contacts for the business; a proper implementation would resolve filters.
+    } else if (segmentId) {
+      // A segment is a saved rule, so it is evaluated now, against the contacts as they
+      // stand. This used to fall through to "every contact in the business" because the
+      // evaluator lived in another app and was not reachable from here — so choosing a
+      // segment of fifty people sent the campaign to the whole list, at a cost per
+      // message, with that segment's name on it.
+      const segment = await this.prisma.segment.findFirst({
+        where:  { id: segmentId, tenantId: scope.tenantId, businessId: scope.businessId },
+        select: { id: true, name: true, filters: true },
+      });
+      if (!segment) throw new BadRequestException('That segment does not exist here.');
+
+      const filters = segment.filters as { rules?: unknown } | null;
+      const rules = Array.isArray(filters?.rules) ? (filters.rules as SegmentRule[]) : [];
+      const where = await buildWhere(this.prisma, scope.tenantId, scope.businessId, rules);
+      const contacts = await this.prisma.contact.findMany({
+        where:  { ...where, optedOut: false } as any,
+        select: { phone: true },
+      });
+      if (!contacts.length) {
+        throw new BadRequestException(`No contact matches "${segment.name}" right now.`);
+      }
+      rawNumbers = contacts.map(c => c.phone);
+    } else if (all) {
       const contacts = await this.prisma.contact.findMany({
         where:  { businessId: scope.businessId, tenantId: scope.tenantId, optedOut: false },
         select: { phone: true },
