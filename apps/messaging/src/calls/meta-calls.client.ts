@@ -1,5 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { WA_API_VERSION } from '@lib/common';
+import {
+  WA_API_VERSION, parseSendError, classifySendError, describeSendError,
+} from '@lib/common';
 
 export interface MetaCallingSettings {
   status: 'ENABLED' | 'DISABLED';
@@ -50,6 +52,29 @@ export interface CallPermissionState {
 export class MetaCallsClient {
   private readonly logger = new Logger(MetaCallsClient.name);
 
+  /**
+   * Meta's failure as a sentence someone can act on.
+   *
+   * Its errors arrive as a JSON envelope, and putting that on the screen tells the
+   * reader nothing they can do: "Authentication Error, code 190, fbtrace_id As3Eu…" is
+   * the token having expired, which has an obvious remedy nobody could guess from the
+   * text. The send path already maps these codes to plain instructions, so calling
+   * borrows the same table rather than inventing a second one.
+   */
+  private failure(path: string, status: number, body: string): MetaCallError {
+    let json: unknown = null;
+    try { json = JSON.parse(body); } catch { /* not JSON — keep the text */ }
+
+    const parsed = parseSendError(status, json);
+    const message = parsed.code
+      ? describeSendError(parsed, classifySendError(parsed.code, parsed.subcode))
+      : (parsed.message ?? body.slice(0, 200) ?? `Meta returned ${status}`);
+
+    // The envelope stays in the log, where the trace id is worth having.
+    this.logger.warn(`Meta ${path} ${status}: ${body.slice(0, 300)}`);
+    return new MetaCallError(message, status, parsed.code ?? undefined);
+  }
+
   private async post(phoneNumberId: string, accessToken: string, path: string, body: Record<string, unknown>) {
     const res = await fetch(`https://graph.facebook.com/${WA_API_VERSION}/${phoneNumberId}/${path}`, {
       method:  'POST',
@@ -57,17 +82,7 @@ export class MetaCallsClient {
       body:    JSON.stringify(body),
     });
     const text = await res.text();
-    if (!res.ok) {
-      let message = text.slice(0, 300);
-      let code: number | undefined;
-      try {
-        const json = JSON.parse(text);
-        message = json?.error?.message ?? message;
-        code = json?.error?.code;
-      } catch { /* raw */ }
-      this.logger.warn(`Meta ${path} ${res.status}: ${message}`);
-      throw new MetaCallError(message, res.status, code);
-    }
+    if (!res.ok) throw this.failure(path, res.status, text);
     try { return JSON.parse(text); } catch { return {}; }
   }
 
@@ -117,7 +132,7 @@ export class MetaCallsClient {
     const res = await fetch(`https://graph.facebook.com/${WA_API_VERSION}/${phoneNumberId}/settings`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
-    if (!res.ok) throw new MetaCallError((await res.text()).slice(0, 300), res.status);
+    if (!res.ok) throw this.failure('settings', res.status, await res.text());
     const json = (await res.json()) as { calling?: MetaCallingSettings };
     return json.calling ?? null;
   }
@@ -139,16 +154,7 @@ export class MetaCallsClient {
       `?user_wa_id=${encodeURIComponent(userWaId)}`;
     const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
     const text = await res.text();
-    if (!res.ok) {
-      let message = text.slice(0, 300);
-      let code: number | undefined;
-      try {
-        const json = JSON.parse(text);
-        message = json?.error?.message ?? message;
-        code = json?.error?.code;
-      } catch { /* raw */ }
-      throw new MetaCallError(message, res.status, code);
-    }
+    if (!res.ok) throw this.failure('call_permissions', res.status, text);
     try { return JSON.parse(text) as CallPermissionState; } catch { return {}; }
   }
 
