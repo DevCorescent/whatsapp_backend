@@ -697,6 +697,33 @@ export class CallsService {
     return { url, expiresInSec: 3600, mimeType: recording.mimeType };
   }
 
+  /**
+   * The recording for a call, by the call's own id.
+   *
+   * The thread knows which call it is showing, not which recording — so without this,
+   * listening back meant leaving the conversation for the Recordings page and finding
+   * the row again by time and number.
+   *
+   * Absent is a normal answer, not an error: a missed call has nothing to play, and a
+   * recording is uploaded after the call ends, so one asked for too early simply is not
+   * there yet.
+   */
+  async recordingForCall(scope: TenantScope, callId: string) {
+    const recording = await this.prisma.callRecording.findFirst({
+      where:   { callId, tenantId: scope.tenantId, businessId: scope.businessId },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!recording) return { url: null, mimeType: null, durationSec: null };
+
+    const url = await this.storage.presignGet(recording.storageKey, 3600);
+    return {
+      url,
+      expiresInSec: 3600,
+      mimeType:     recording.mimeType,
+      durationSec:  recording.durationSec ?? null,
+    };
+  }
+
   // ── Internal ────────────────────────────────────────────────────────────────
 
   private async find(scope: TenantScope, callId: string) {

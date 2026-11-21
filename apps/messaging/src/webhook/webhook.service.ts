@@ -352,6 +352,18 @@ export class WebhookService {
       identity, phone, { name: contactName, waId: contactWaId },
     );
 
+    // Swipe-to-reply: WhatsApp names the quoted message in `context.id`. We were
+    // dropping it, so a customer answering one of several questions arrived as a bare
+    // "Ji" with nothing to say which question it answered — the thread already knows how
+    // to draw a quote, it was never given one for an inbound message.
+    const quotedId = (message as any).context?.id as string | undefined;
+    const replyToId = quotedId
+      ? (await this.prisma.message.findFirst({
+          where:  { waMessageId: quotedId, tenantId: identity.tenantId },
+          select: { id: true },
+        }).catch(() => null))?.id ?? null
+      : null;
+
     // 3. Save message + update conversation (idempotent via waMessageId unique)
     let savedId: string;
     try {
@@ -366,6 +378,7 @@ export class WebhookService {
             status:         'DELIVERED',
             type:           (TYPE_MAP[message.type] ?? 'TEXT') as any,
             content,
+            replyToId,
             mediaType:      media ? message.type : null,
             mediaMimeType:  media?.mimeType ?? null,
             metadata:       {

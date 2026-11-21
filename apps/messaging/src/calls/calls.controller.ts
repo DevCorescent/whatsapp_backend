@@ -132,6 +132,12 @@ export class CallsController {
     return this.svc.requestCallPermission(scope, contactId, body?.integrationId);
   }
 
+  @Get(':id/recording-url')
+  @ApiOperation({ summary: 'A short-lived link to this call recording, for playback in the chat' })
+  callRecordingUrl(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {
+    return this.svc.recordingForCall(scope, id);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'One call' })
   get(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {

@@ -124,6 +124,11 @@ export class ConversationsService {
       success: true,
       data: {
         ...conv,
+        // Serving this thread is what marks it read, so the payload has to describe the
+        // state the caller is being handed. It was echoing back the count from the row
+        // read moments earlier — a number this very request had just invalidated — so
+        // the inbox was told "1 unread" about the conversation it was opening.
+        unreadCount: 0,
         messages,
         serviceWindow: await this.serviceWindow(scope, id),
         pagination: { page, pageSize, total: msgTotal, totalPages: Math.ceil(msgTotal / pageSize) },
