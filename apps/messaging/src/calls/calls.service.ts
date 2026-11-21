@@ -320,6 +320,7 @@ export class CallsService {
     const accessToken = integration.accessToken ? decryptSecret(integration.accessToken) : null;
     if (!accessToken) throw new BadRequestException('This WhatsApp number has no usable access token');
 
+    this.logger.log(`[outgoing call] offering candidates: ${this.describeCandidates(body.sdpOffer)}`);
     let callId: string;
     try {
       ({ callId } = await this.meta.connect(
@@ -395,6 +396,28 @@ export class CallsService {
     return call;
   }
 
+  /**
+   * What kinds of network path an SDP actually offers, for the log.
+   *
+   * When Meta says it received no media, the first question is whether we ever gave it
+   * a route to us. "host" is a LAN address Meta cannot reach, "srflx" is what STUN
+   * guessed and only works through a permissive NAT, "relay" is the TURN server and is
+   * the one that works from anywhere. No relay in the line below means the browser
+   * never got a TURN credential or could not use it, which is a different fault from
+   * media being blocked on the way.
+   */
+  private describeCandidates(sdp: string): string {
+    const types = (sdp.match(/a=candidate:\S[^\r\n]*typ (\w+)/g) ?? [])
+      .map(m => m.split('typ ')[1]?.trim())
+      .filter(Boolean);
+    if (!types.length) return 'none';
+    const counted = types.reduce<Record<string, number>>((acc, t) => {
+      acc[t] = (acc[t] ?? 0) + 1;
+      return acc;
+    }, {});
+    return Object.entries(counted).map(([t, n]) => `${t}×${n}`).join(' ');
+  }
+
   async accept(scope: TenantScope, callId: string, sdpAnswer: string) {
     if (!sdpAnswer?.includes('a=')) throw new BadRequestException('A WebRTC SDP answer is required');
     const call = await this.find(scope, callId);
@@ -413,6 +436,7 @@ export class CallsService {
     }
 
     const { phoneNumberId, accessToken } = await this.credentials(call.whatsappIntegrationId);
+    this.logger.log(`[call ${call.id}] answering with candidates: ${this.describeCandidates(sdpAnswer)}`);
     try {
       await this.meta.preAccept(phoneNumberId, accessToken, call.waCallId, sdpAnswer);
       await this.meta.accept(phoneNumberId, accessToken, call.waCallId, sdpAnswer, call.id);
