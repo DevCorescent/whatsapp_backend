@@ -48,7 +48,6 @@ import { NotificationsModule } from './notifications/notifications.module';
 import { HandoverApiModule }   from './handover/handover-api.module';
 import { OnboardingModule }   from './onboarding/onboarding.module';
 import { QuickRepliesModule } from './quick-replies/quick-replies.module';
-import { ContactListsModule } from './contact-lists/contact-lists.module';
 import { ClickModule } from './click/click.module';
 import { CatalogueModule } from './catalogue/catalogue.module';
 import { ResellerModule }     from './reseller/reseller.module';
@@ -135,7 +134,6 @@ import { CallsModule }        from './calls/calls.module';
     ChatbotModule,
     TicketsModule,
     QuickRepliesModule,
-    ContactListsModule,
     ClickModule,
     CatalogueModule,
 

@@ -73,19 +73,6 @@ export class CampaignsController {
     return this.svc.addContacts(scope, id, contacts ?? []);
   }
 
-  @Post(':id/contacts-from-lists')
-  @RequiresPermission('campaigns.send')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Fill campaign recipients from hand-picked contact lists' })
-  addContactsFromLists(
-    @CurrentTenant() scope: TenantScope,
-    @Param('id') id: string,
-    @Body() body: { listIds?: string[] },
-  ) {
-    requireFields(body, ['listIds']);
-    return this.svc.addContactsFromLists(scope, id, body.listIds!);
-  }
-
   @Post(':id/duplicate')
   @RequiresPermission('campaigns.send')
   @HttpCode(HttpStatus.OK)

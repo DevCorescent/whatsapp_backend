@@ -106,7 +106,7 @@ export class CampaignsService {
     // Route to broadcast handler for any audience-based creation
     if (
       Array.isArray(data.numbers) || data.segmentId || data.all ||
-      Array.isArray(data.contactIds) || Array.isArray(data.contactListIds)
+      Array.isArray(data.contactIds)
     ) {
       requireFields(data, ['name', 'templateId']);
       return this.createBroadcast(scope, data);
@@ -142,7 +142,6 @@ export class CampaignsService {
       segmentId,
       all               = false,
       contactIds,
-      contactListIds,
       excludeContactIds = [] as string[],
       recipientFields   = {} as Record<string, Record<string, string>>,
       scheduledAt,
@@ -193,22 +192,6 @@ export class CampaignsService {
         select: { phone: true },
       });
       rawNumbers = contacts.map(c => c.phone);
-    } else if (Array.isArray(contactListIds) && contactListIds.length > 0) {
-      // Hand-picked groups. A list that is not this department's is refused rather than
-      // quietly contributing nobody, which would look like an empty list instead of the
-      // wrong one being chosen.
-      const lists = await this.prisma.contactList.findMany({
-        where:  { id: { in: contactListIds }, tenantId: scope.tenantId, businessId: scope.businessId },
-        select: { id: true },
-      });
-      if (lists.length !== new Set(contactListIds).size) {
-        throw new BadRequestException('One of those contact lists does not exist here.');
-      }
-      const members = await this.prisma.contactListMember.findMany({
-        where:  { listId: { in: contactListIds } },
-        select: { contact: { select: { phone: true } } },
-      });
-      rawNumbers = members.map(m => m.contact.phone).filter(Boolean);
     } else if (segmentId) {
       // A segment is a saved rule, so it is evaluated now, against the contacts as they
       // stand. This used to fall through to "every contact in the business" because the
@@ -530,58 +513,6 @@ export class CampaignsService {
       data:  { totalCount: count },
     });
     return { added: contacts.length, total: count };
-  }
-
-  /**
-   * Fills a campaign's recipients from hand-picked contact lists.
-   *
-   * The people are copied in as they stand now, rather than the campaign holding a
-   * reference to the list. A broadcast is a thing that happened to a known set of
-   * people: if someone is added to the list tomorrow they did not receive yesterday's
-   * send, and the report has to keep saying so.
-   *
-   * Contacts with no phone number are skipped rather than failing the whole call, and
-   * counted back so the screen can say how many were left out and why.
-   */
-  async addContactsFromLists(scope: TenantScope, campaignId: string, listIds: string[]) {
-    await this.findOne(scope, campaignId);
-
-    const ids = [...new Set((listIds ?? []).filter(Boolean))];
-    if (!ids.length) throw new BadRequestException('listIds is required.');
-
-    const lists = await this.prisma.contactList.findMany({
-      where:  { id: { in: ids }, tenantId: scope.tenantId, businessId: scope.businessId },
-      select: { id: true },
-    });
-    if (lists.length !== ids.length) {
-      throw new BadRequestException('One of those contact lists does not exist here.');
-    }
-
-    const members = await this.prisma.contactListMember.findMany({
-      where:  { listId: { in: ids } },
-      select: { contact: { select: { id: true, phone: true } } },
-    });
-
-    // One person in two chosen lists is still one recipient.
-    const byId = new Map(members.map((m) => [m.contact.id, m.contact]));
-    const reachable = [...byId.values()].filter((c) => Boolean(c.phone?.trim()));
-    const withoutPhone = byId.size - reachable.length;
-
-    if (!reachable.length) {
-      throw new BadRequestException('Nobody in those lists has a phone number to message.');
-    }
-
-    await this.prisma.campaignContact.createMany({
-      data: reachable.map((c) => ({
-        campaignId, phone: c.phone!, contactId: c.id, status: 'PENDING' as const,
-      })),
-      skipDuplicates: true,
-    });
-
-    const total = await this.prisma.campaignContact.count({ where: { campaignId } });
-    await this.prisma.campaign.update({ where: { id: campaignId }, data: { totalCount: total } });
-
-    return { added: reachable.length, withoutPhone, total };
   }
 
   // ── Duplicate ──────────────────────────────────────────────────────────────
