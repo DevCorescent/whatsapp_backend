@@ -18,6 +18,17 @@ function renderTemplateBody(spec: TemplateSpec, variables: Record<string, string
   return (spec.body ?? '').replace(/\{\{\s*(\w+)\s*\}\}/g, (whole, key) => variables[key] ?? whole);
 }
 
+/**
+ * The same, for a TEXT header. Its slots are numbered from one like the body's, but the
+ * values are collected separately, so they are keyed `header_n`.
+ */
+function renderTemplateHeading(spec: TemplateSpec, variables: Record<string, string>): string {
+  return (spec.headerContent ?? '').replace(
+    /\{\{\s*(\w+)\s*\}\}/g,
+    (whole, key) => variables[`header_${key}`] ?? variables[key] ?? whole,
+  );
+}
+
 const WA_API_VERSION = process.env.WHATSAPP_API_VERSION ?? 'v20.0';
 
 const MEDIA_PREVIEW: Record<string, string> = {
@@ -306,6 +317,13 @@ export class ConversationsService {
 
     const waMessageId = json?.messages?.[0]?.id ?? null;
     const preview = `${template.name}`;
+    const headerType = spec.headerType?.toUpperCase() ?? null;
+
+    // Everything the customer was actually shown, not just the body. The thread used to
+    // keep the body alone, so a template sent with an image header appeared as a wall of
+    // text: no picture, no heading, no buttons — nothing the agent could check against
+    // what the customer was looking at. `mediaId` is the key the media endpoint already
+    // reads, so storing it is all the picture needs to load.
     const message = await this.prisma.message.create({
       data: {
         tenantId:   scope.tenantId,
@@ -316,7 +334,20 @@ export class ConversationsService {
         direction:  'OUTBOUND',
         type:       'TEMPLATE' as any,
         content:    renderTemplateBody(spec, variables),
-        metadata:   { templateName: template.name, templateId: template.id } as any,
+        mediaUrl:   body.headerMediaUrl?.trim() || null,
+        metadata:   {
+          templateName: template.name,
+          templateId:   template.id,
+          headerType,
+          headerText:   headerType === 'TEXT' ? renderTemplateHeading(spec, variables) : null,
+          mediaId:      body.headerMediaId || undefined,
+          footer:       spec.footer ?? null,
+          buttons:      (spec.buttons ?? []).map((b, i) => ({
+            type: b.type,
+            text: b.text ?? null,
+            url:  b.type === 'URL' ? (variables[`url_${i + 1}`] || b.url || null) : null,
+          })),
+        } as any,
         status:     'SENT',
         isNote:     false,
       },
