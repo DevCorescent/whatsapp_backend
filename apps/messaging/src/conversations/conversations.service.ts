@@ -234,6 +234,8 @@ export class ConversationsService {
     headerVarMapping?: string[];
     headerMediaId?: string | null;
     headerMediaUrl?: string | null;
+    /** Our own copy of an uploaded header file, which outlives Meta's media id. */
+    headerMediaStoredUrl?: string | null;
   }) {
     const conv = await this.prisma.conversation.findFirst({
       where:   { id: conversationId, tenantId: scope.tenantId, businessId: scope.businessId },
@@ -334,7 +336,7 @@ export class ConversationsService {
         direction:  'OUTBOUND',
         type:       'TEMPLATE' as any,
         content:    renderTemplateBody(spec, variables),
-        mediaUrl:   body.headerMediaUrl?.trim() || null,
+        mediaUrl:   body.headerMediaUrl?.trim() || body.headerMediaStoredUrl?.trim() || null,
         metadata:   {
           templateName: template.name,
           templateId:   template.id,

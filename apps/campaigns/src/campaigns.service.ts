@@ -8,7 +8,7 @@ import { PrismaService } from '@lib/prisma';
 import {
   TenantScope, MessageRatesService, RedisService, classifySendError, requireFields,
   normalizePhone, withCountryCode, decryptSecret, toSpec, missingSendValues, describeMissing,
-  dynamicUrlButtonIndexes,
+  dynamicUrlButtonIndexes, StorageService,
 } from '@lib/common';
 import { QUEUE_CAMPAIGN_SEND, CampaignSendJob } from '@lib/queue';
 import { CampaignProgressService } from './campaign-progress.service';
@@ -30,6 +30,7 @@ export class CampaignsService {
     private readonly progress: CampaignProgressService,
     private readonly rates: MessageRatesService,
     private readonly redis: RedisService,
+    private readonly storage: StorageService,
   ) {}
 
   // ── List ───────────────────────────────────────────────────────────────────
@@ -1019,6 +1020,34 @@ export class CampaignsService {
       throw new BadRequestException(`WhatsApp refused the upload: ${why}`);
     }
     const result: any = await res.json();
-    return { mediaId: result.id, mimeType: file.mimetype };
+
+    // Meta drops a media id after about 30 days, and that id was the only copy we kept:
+    // the header image of every template sent through here vanished from the thread a
+    // month later, with nothing left to re-render it from. Our own copy outlives Meta's
+    // and is what the sent message is stored against.
+    //
+    // Best-effort on purpose — the upload to Meta has already succeeded, and the send
+    // works whether or not we keep a copy. Failing here would refuse a send over a
+    // problem the person can do nothing about.
+    let storedUrl: string | null = null;
+    let storageKey: string | null = null;
+    if (this.storage.isConfigured()) {
+      try {
+        const key = this.storage.mediaKey({
+          tenantId:   scope.tenantId,
+          businessId: scope.businessId,
+          id:         `hdr-${randomUUID()}`,
+          mimeType:   file.mimetype,
+          filename:   file.originalname,
+        });
+        const stored = await this.storage.put(key, file.buffer, file.mimetype);
+        storedUrl  = stored.url;
+        storageKey = stored.key;
+      } catch (err: any) {
+        this.logger.warn(`Storage put failed for header media ${file.originalname}: ${err?.message ?? err}`);
+      }
+    }
+
+    return { mediaId: result.id, mimeType: file.mimetype, storedUrl, storageKey };
   }
 }
