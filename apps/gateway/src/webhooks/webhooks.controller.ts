@@ -45,7 +45,7 @@ export class WebhooksController {
   @ApiOperation({ summary: 'Create a webhook endpoint' })
   createEndpoint(
     @CurrentTenant() scope: TenantScope,
-    @Body() body: { url: string; events: string[]; description?: string },
+    @Body() body: { url: string; events: string[]; description?: string; headerKey?: string; headerValue?: string },
   ) {
     return this.svc.createEndpoint(scope, body);
   }
@@ -55,7 +55,7 @@ export class WebhooksController {
   updateEndpoint(
     @CurrentTenant() scope: TenantScope,
     @Param('id') id: string,
-    @Body() body: { url?: string; events?: string[]; isActive?: boolean; description?: string },
+    @Body() body: { url?: string; events?: string[]; isActive?: boolean; description?: string; headerKey?: string | null; headerValue?: string | null },
   ) {
     return this.svc.updateEndpoint(scope, id, body);
   }

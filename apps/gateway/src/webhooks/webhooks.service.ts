@@ -27,7 +27,7 @@ export class WebhooksService {
     return { success: true, endpoints };
   }
 
-  async createEndpoint(scope: TenantScope, data: { url: string; events: string[]; description?: string }) {
+  async createEndpoint(scope: TenantScope, data: { url: string; events: string[]; description?: string; headerKey?: string; headerValue?: string }) {
     const secret = crypto.randomBytes(24).toString('hex');
     return this.prisma.webhookEndpoint.create({
       data: {
@@ -37,11 +37,13 @@ export class WebhooksService {
         secret,
         isActive:    true,
         description: data.description ?? null,
+        headerKey:   data.headerKey?.trim() || null,
+        headerValue: data.headerValue?.trim() || null,
       },
     });
   }
 
-  async updateEndpoint(scope: TenantScope, id: string, data: { url?: string; events?: string[]; isActive?: boolean; description?: string }) {
+  async updateEndpoint(scope: TenantScope, id: string, data: { url?: string; events?: string[]; isActive?: boolean; description?: string; headerKey?: string | null; headerValue?: string | null }) {
     const endpoint = await this.prisma.webhookEndpoint.findUnique({ where: { id } });
     if (!endpoint) throw new NotFoundException('Webhook endpoint not found');
     if (endpoint.tenantId !== scope.tenantId) throw new ForbiddenException('Access denied');

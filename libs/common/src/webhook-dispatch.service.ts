@@ -27,7 +27,7 @@ export class WebhookDispatchService {
   }
 
   private async deliver(
-    ep: { id: string; url: string; secret: string },
+    ep: { id: string; url: string; secret: string; headerKey?: string | null; headerValue?: string | null },
     event: string,
     payloadJson: string,
   ) {
@@ -44,6 +44,9 @@ export class WebhookDispatchService {
           'Content-Type': 'application/json',
           'X-Webhook-Signature': `sha256=${sig}`,
           'X-Webhook-Event': event,
+          // A key the receiver issued, when it authenticates that way round rather than
+          // by our signature. Never allowed to replace the two above.
+          ...(ep.headerKey && ep.headerValue ? { [ep.headerKey]: ep.headerValue } : {}),
         },
         body: payloadJson,
         signal: AbortSignal.timeout(10_000),

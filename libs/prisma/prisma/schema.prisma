@@ -1675,6 +1675,11 @@ model WebhookEndpoint {
   events      String[]          @default([])
   isActive    Boolean           @default(true)
   description String?
+  /// An extra header to send with every delivery, for a receiver that authenticates by
+  /// a key of its own rather than by our signature. Optional: most do not need it, and
+  /// the signature is there either way.
+  headerKey   String?
+  headerValue String?
   createdAt   DateTime          @default(now())
   updatedAt   DateTime          @updatedAt
   deliveries  WebhookDelivery[]
