@@ -705,7 +705,8 @@ export class InboundPipelineService {
             metadata: { interactive: action.menu.interactive, flowId: flow.id },
           });
           sentCount += 1;
-        } catch {
+        } catch (err: any) {
+          this.logger.warn(`Flow ${flow.id} menu send failed, falling back to text: ${err?.message ?? err}`);
           try {
             const sent = await this.sendText(creds, contact.phone, action.menu.text);
             await this.persistBotMessage(conversation, {
@@ -713,7 +714,9 @@ export class InboundPipelineService {
               metadata: { flowId: flow.id },
             });
             sentCount += 1;
-          } catch { /* skip */ }
+          } catch (err2: any) {
+            this.logger.error(`Flow ${flow.id} could not send its menu at all: ${err2?.message ?? err2}`);
+          }
         }
         continue;
       }
@@ -725,7 +728,13 @@ export class InboundPipelineService {
             metadata: { flowId: flow.id },
           });
           sentCount += 1;
-        } catch { /* skip */ }
+        } catch (err: any) {
+          // Swallowed until now, which is how a flow came to "match but send nothing"
+          // and hand the conversation to the AI with no trace of why.
+          this.logger.error(
+            `Flow ${flow.id} failed to send from node ${action.nodeId}: ${err?.message ?? err}`,
+          );
+        }
       }
     }
 
