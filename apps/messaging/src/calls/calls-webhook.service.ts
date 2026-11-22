@@ -88,6 +88,17 @@ export class CallsWebhookService {
       return;
     }
 
+    // Answered, and nothing said so. An outgoing call was left RINGING for its whole
+    // length, so when it ended the terminate handler saw a call that had never been
+    // picked up and recorded it as missed — a conversation both people had just had,
+    // filed as "No answer" with no duration.
+    await this.calls.transition(row.id, ['RINGING', 'CONNECTING'], {
+      status: 'IN_PROGRESS',
+      answeredAt: new Date(),
+    }).catch((err: unknown) => {
+      this.logger.warn(`could not mark ${row.id} answered: ${String(err).slice(0, 120)}`);
+    });
+
     this.logger.log(`[call ${row.id}] callee answered — forwarding the SDP answer to its agent`);
     this.realtime.toUser(row.answeredById, 'call:answer', { callId: row.id, sdp });
   }
