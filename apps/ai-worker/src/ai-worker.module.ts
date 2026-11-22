@@ -3,6 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bull';
 import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from '@lib/prisma';
+import { RealtimeModule } from '@lib/common';
 import { QUEUE_INBOUND_MESSAGE, QUEUE_AI_REPLY, QUEUE_CAMPAIGN_SEND, QUEUE_TEMPLATE_SYNC } from '@lib/queue';
 import { WhatsAppApiService } from './whatsapp/whatsapp-api.service';
 import { AiService } from './ai/ai.service';
@@ -33,6 +34,9 @@ import { CronService } from './cron/cron.service';
       { name: QUEUE_TEMPLATE_SYNC },
     ),
     PrismaModule,
+    // No sockets live in this process; RealtimeService falls back to the Redis emitter,
+    // so a queue processor or cron here can push to a browser like the gateway does.
+    RealtimeModule,
   ],
   providers: [
     WhatsAppApiService,

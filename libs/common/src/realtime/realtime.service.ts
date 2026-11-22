@@ -1,5 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { RealtimeGateway, type SocketIdentity } from './realtime.gateway';
+import { Emitter } from '@socket.io/redis-emitter';
+import { RedisService } from '../redis/redis.service';
+import { RealtimeGateway, REALTIME_NAMESPACE, type SocketIdentity } from './realtime.gateway';
 import { rooms, type PresenceState, type RealtimeEventName, type RealtimeEvents } from './events';
 
 /**
@@ -9,17 +11,43 @@ import { rooms, type PresenceState, type RealtimeEventName, type RealtimeEvents 
 @Injectable()
 export class RealtimeService {
   private readonly logger = new Logger(RealtimeService.name);
+  private emitter?: Emitter;
 
-  constructor(private readonly gateway: RealtimeGateway) {}
+  constructor(
+    private readonly gateway: RealtimeGateway,
+    private readonly redis: RedisService,
+  ) {}
 
   private get server() {
     return this.gateway.server;
   }
 
+  /**
+   * How a process with no sockets of its own reaches the browsers.
+   *
+   * `waboxa-worker` boots through `createApplicationContext` — no HTTP server, so no
+   * websocket adapter, so `gateway.server` is undefined there and every emit from a queue
+   * processor or a cron returned silently. Nothing was lost yet only because the live
+   * inbound and auto-reply path runs inside the gateway; the first job moved out of it
+   * would have gone quiet with no error to find.
+   *
+   * The emitter writes straight into the same Redis channel `@socket.io/redis-adapter`
+   * listens on, so the gateways deliver it exactly once between them. Publishing on a
+   * channel of our own and re-emitting in each gateway would have sent one event per
+   * instance to every browser.
+   */
+  private get emitTarget() {
+    if (this.server) return this.server;
+    if (!this.emitter) {
+      this.emitter = new Emitter(this.redis.client).of(REALTIME_NAMESPACE);
+      this.logger.log(`No local socket server — emitting through Redis on ${REALTIME_NAMESPACE}`);
+    }
+    return this.emitter;
+  }
+
   private emit(room: string, event: RealtimeEventName, payload: unknown) {
-    if (!this.server) return;
     try {
-      this.server.to(room).emit(event, payload);
+      this.emitTarget.to(room).emit(event, payload);
     } catch (err: any) {
       this.logger.warn(`emit ${event} → ${room} failed: ${err?.message ?? err}`);
     }

@@ -773,13 +773,19 @@ export class InboundPipelineService {
       const trimmed = query.trim();
       const isShortQuery = trimmed.split(/\s+/).length <= 3;
 
+      // A document with no text cannot answer anything, and taking only three means an
+      // empty one keeps a real one out. Older uploads were stored with `content = NULL`
+      // and `isIndexed = true`, so this workspace's three usable documents were being
+      // crowded out by four blank PDFs and the AI answered from the prompt alone.
+      const readable = { businessId, isIndexed: true, content: { not: null } } as const;
+
       // For short/greeting messages ("Hi", "Hello", "test") there's nothing to ILIKE-match,
       // so we load all indexed docs to give the AI business context regardless.
       // For longer messages we try a content match first, then fall back to all docs.
       let docs = await this.prisma.knowledgeDoc.findMany({
         where: isShortQuery
-          ? { businessId, isIndexed: true }
-          : { businessId, isIndexed: true, content: { contains: trimmed, mode: 'insensitive' } },
+          ? readable
+          : { ...readable, content: { not: null, contains: trimmed, mode: 'insensitive' } },
         take: 3,
         select: { name: true, content: true, metadata: true },
       });
@@ -787,7 +793,7 @@ export class InboundPipelineService {
       // Fallback: long query had no ILIKE hits → still inject top docs for context
       if (!docs.length && !isShortQuery) {
         docs = await this.prisma.knowledgeDoc.findMany({
-          where: { businessId, isIndexed: true },
+          where: readable,
           take:  3,
           select: { name: true, content: true, metadata: true },
         });

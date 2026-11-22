@@ -15,6 +15,7 @@ export * from './realtime/message-events.service';
 export * from './realtime/redis-io.adapter';
 export * from './storage/storage.service';
 export * from './storage/storage.module';
+export * from './knowledge/extract-text';
 export * from './whatsapp/meta-media';
 export * from './whatsapp/send-errors';
 export * from './ai/llm.service';

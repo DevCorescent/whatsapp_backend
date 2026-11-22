@@ -1,8 +1,9 @@
 import {
   Controller, Get, Post, Put, Patch, Delete,
-  Body, Param, Query, UseGuards, HttpCode, HttpStatus,
+  Body, Param, Query, UseGuards, UseInterceptors, UploadedFiles, HttpCode, HttpStatus,
 } from '@nestjs/common';
-import { ApiTags, ApiBearerAuth, ApiOperation } from '@nestjs/swagger';
+import { FilesInterceptor } from '@nestjs/platform-express';
+import { ApiTags, ApiBearerAuth, ApiOperation, ApiConsumes } from '@nestjs/swagger';
 import { JwtAuthGuard, CurrentTenant, TenantScope, PermissionGuard, RequiresPermission } from '@lib/common';
 import { KnowledgeService } from './knowledge.service';
 
@@ -48,9 +49,24 @@ export class KnowledgeController {
     });
   }
 
+  /**
+   * Upload one or more files, or add a URL.
+   *
+   * The dialog has always posted files here as multipart, and this route had no
+   * interceptor for it: the bytes never reached the handler, so every uploaded document
+   * was stored with no text in it. JSON bodies (a URL, or content pasted by an
+   * integration) still work exactly as before.
+   */
   @Post()
-  @ApiOperation({ summary: 'Create a knowledge doc' })
-  createDoc(@CurrentTenant() scope: TenantScope, @Body() body: any) {
+  @ApiOperation({ summary: 'Create knowledge docs from uploaded files, a URL, or raw content' })
+  @ApiConsumes('multipart/form-data', 'application/json')
+  @UseInterceptors(FilesInterceptor('files', 20, { limits: { fileSize: 10 * 1024 * 1024 } }))
+  createDoc(
+    @CurrentTenant() scope: TenantScope,
+    @UploadedFiles() files: Express.Multer.File[] | undefined,
+    @Body() body: any,
+  ) {
+    if (files?.length) return this.svc.createDocsFromFiles(scope, files);
     return this.svc.createDoc(scope, body);
   }
 

@@ -2,7 +2,9 @@ import { Injectable, NotFoundException, BadRequestException, ForbiddenException,
 import { createHash, randomBytes } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '@lib/prisma';
-import { TenantScope, MessageEventsService } from '@lib/common';
+import {
+  TenantScope, MessageEventsService, docTypeOf, extractFileText, extractUrlText,
+} from '@lib/common';
 import { AiService } from '../ai/ai.service';
 
 const FLOW_TRIGGER_TYPES = [
@@ -78,10 +80,14 @@ export class KnowledgeService {
     const skip  = (page - 1) * limit;
     const where: any = { tenantId: scope.tenantId, businessId: scope.businessId };
     if (query.search) where.name = { contains: query.search, mode: 'insensitive' };
-    const [docs, total] = await Promise.all([
+    const [rows, total] = await Promise.all([
       this.prisma.knowledgeDoc.findMany({ where, skip, take: limit, orderBy: { createdAt: 'desc' } }),
       this.prisma.knowledgeDoc.count({ where }),
     ]);
+    // The list shipped every document's full text to the browser and never displayed a
+    // character of it — a single long PDF is a couple of hundred kilobytes of payload.
+    // How much text there is, is the one thing the list does need to know.
+    const docs = rows.map(({ content, ...doc }) => ({ ...doc, textLength: content?.length ?? 0 }));
     return { docs, total, page, limit };
   }
 
@@ -93,25 +99,86 @@ export class KnowledgeService {
     return doc;
   }
 
-  async createDoc(scope: TenantScope, data: {
-    name: string; type: string; url?: string; content?: string; metadata?: unknown;
+  /**
+   * "Indexed" means the AI can read this document.
+   *
+   * There is no vector store wired up and no ingest worker — retrieval is a text match
+   * over the `content` column — so the flag has only ever had one honest meaning: there
+   * is text here. It used to be written `false` on create and then set `true` by nothing
+   * at all, which is how four PDFs with no text in them came to be listed as indexed
+   * while the auto-reply quietly found nothing to say.
+   */
+  private async saveDoc(scope: TenantScope, data: {
+    name: string; type: string; url?: string | null; content: string;
+    problem?: string | null; metadata?: Record<string, unknown>;
   }) {
-    const doc = await this.prisma.knowledgeDoc.create({
+    return this.prisma.knowledgeDoc.create({
       data: {
         tenantId:   scope.tenantId,
         businessId: scope.businessId,
         name:       data.name,
         type:       data.type,
-        url:        data.url,
-        content:    data.content,
-        metadata:   data.metadata as any,
-        isIndexed:  false,
+        url:        data.url ?? null,
+        content:    data.content || null,
+        isIndexed:  data.content.length > 0,
+        metadata:   {
+          ...(data.metadata ?? {}),
+          ...(data.problem ? { problem: data.problem } : {}),
+        } as any,
       },
     });
-    if (this.queue && doc.content) {
-      await this.queue.add('ingest', { docId: doc.id, businessId: scope.businessId });
+  }
+
+  /** Files from the upload dialog: read each one's text, then store it. */
+  async createDocsFromFiles(scope: TenantScope, files: Express.Multer.File[]) {
+    const docs = [];
+    for (const file of files) {
+      const name = file.originalname || 'Document';
+      const { text, problem } = await extractFileText(file.buffer, name, file.mimetype);
+      docs.push(
+        await this.saveDoc(scope, {
+          name,
+          type:    docTypeOf(name, file.mimetype),
+          content: text,
+          problem,
+          metadata: { size: file.size },
+        }),
+      );
     }
-    return doc;
+    const unreadable = docs.filter((d) => !d.isIndexed).length;
+    return {
+      success: true,
+      docs,
+      ...(unreadable
+        ? { warning: `${unreadable} of ${docs.length} file${docs.length === 1 ? '' : 's'} had no readable text.` }
+        : {}),
+    };
+  }
+
+  async createDoc(scope: TenantScope, data: {
+    name: string; type: string; url?: string; content?: string; metadata?: unknown;
+  }) {
+    if (!data?.name || !data?.type) {
+      throw new BadRequestException('A document needs a name and a type.');
+    }
+
+    // A URL used to be stored as a bare link with no text behind it, so "indexing" a web
+    // page added a row the AI could never read. Fetch it here instead.
+    if (data.type === 'URL' && data.url && !data.content) {
+      const { text, problem } = await extractUrlText(data.url);
+      return this.saveDoc(scope, {
+        name: data.name, type: 'URL', url: data.url, content: text, problem,
+        metadata: (data.metadata as Record<string, unknown>) ?? undefined,
+      });
+    }
+
+    return this.saveDoc(scope, {
+      name:    data.name,
+      type:    data.type,
+      url:     data.url,
+      content: data.content ?? '',
+      metadata: (data.metadata as Record<string, unknown>) ?? undefined,
+    });
   }
 
   async updateDoc(scope: TenantScope, id: string, data: { name?: string }) {
@@ -149,19 +216,35 @@ export class KnowledgeService {
     });
   }
 
+  /**
+   * Read the document again.
+   *
+   * A web page is fetched afresh, which is the only case where re-reading can find
+   * anything new. An uploaded file cannot be: the bytes are not kept anywhere, so there
+   * is nothing to re-read and the answer is to upload it again.
+   *
+   * This used to set `isIndexed: false` and push a job onto a queue with no consumer, so
+   * pressing Reindex on a working document took it away from the AI permanently.
+   */
   async reindexDoc(scope: TenantScope, id: string) {
     const doc = await this.getDoc(scope, id);
+
+    if (doc.type === 'URL' && doc.url) {
+      const { text, problem } = await extractUrlText(doc.url);
+      if (!text) throw new BadRequestException(problem ?? 'That page had no readable text.');
+      return this.prisma.knowledgeDoc.update({
+        where: { id },
+        data:  { content: text, isIndexed: true },
+      });
+    }
+
     if (!doc.content) {
-      throw new BadRequestException('Document has no content to index. Re-upload the file first.');
+      throw new BadRequestException(
+        'This document has no text stored, and the original file was not kept. Upload it again.',
+      );
     }
-    const updated = await this.prisma.knowledgeDoc.update({
-      where: { id },
-      data:  { isIndexed: false, vectorIds: [], chunkCount: 0 },
-    });
-    if (this.queue) {
-      await this.queue.add('ingest', { docId: id, businessId: scope.businessId });
-    }
-    return updated;
+
+    return this.prisma.knowledgeDoc.update({ where: { id }, data: { isIndexed: true } });
   }
 
   // ── FAQ state (stored in doc.metadata) ─────────────────────────────────────
