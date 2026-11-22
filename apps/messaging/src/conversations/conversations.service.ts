@@ -95,6 +95,9 @@ export class ConversationsService {
             select: { id: true, displayName: true, phoneNumber: true },
           },
         },
+        // Three relations, which is three more queries one after another by default.
+        // See the note in contacts.findAll: the database is a quarter of a second away.
+        relationLoadStrategy: 'join',
       }),
       this.prisma.conversation.count({ where }),
     ]);

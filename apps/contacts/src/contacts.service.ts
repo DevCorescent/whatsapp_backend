@@ -78,6 +78,10 @@ export class ContactsService {
         where, skip, take: limit,
         orderBy: { createdAt: 'desc' },
         include: { tags: { include: { tag: true } } },
+        // Two levels of include is three sequential queries by default — contacts, then
+        // their tag links, then the tags — and the database is 242 ms away, so this one
+        // list cost three quarters of a second of pure waiting. A join does it in one.
+        relationLoadStrategy: 'join',
       }),
       this.prisma.contact.count({ where }),
     ]), 'contacts list');
