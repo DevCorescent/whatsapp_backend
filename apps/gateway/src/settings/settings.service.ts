@@ -494,16 +494,43 @@ export class SettingsService {
     const appId     = process.env.WHATSAPP_APP_ID;
     const appSecret = process.env.WHATSAPP_APP_SECRET;
 
+    /**
+     * Exchange Meta's one-time code for the number's access token.
+     *
+     * This used to swallow the result: a failed exchange left `accessToken` as an empty
+     * string, the row below was created anyway, and the screen showed a connected number
+     * that said "No access token is stored" — while Meta's explanation for the refusal
+     * was discarded unread. Deleting the row did not help either, because the next
+     * attempt recreated it the same way.
+     *
+     * Nothing is written now unless there is a token, and whatever Meta said comes back
+     * to the person who pressed the button.
+     */
+    const version = process.env.WHATSAPP_API_VERSION ?? 'v21.0';
     let accessToken = '';
     try {
-      const url = `https://graph.facebook.com/v20.0/oauth/access_token?client_id=${appId}&client_secret=${appSecret}&code=${data.code}`;
-      const res: any = await fetch(url);
-      if (res.ok) {
-        const json: any = await res.json();
-        accessToken = json.access_token ?? '';
+      const url = `https://graph.facebook.com/${version}/oauth/access_token`
+        + `?client_id=${encodeURIComponent(appId ?? '')}`
+        + `&client_secret=${encodeURIComponent(appSecret ?? '')}`
+        + `&code=${encodeURIComponent(data.code)}`;
+      const res  = await fetch(url);
+      const json: any = await res.json().catch(() => null);
+      accessToken = json?.access_token ?? '';
+
+      if (!res.ok || !accessToken) {
+        const reason = json?.error?.message ?? `Meta answered ${res.status}`;
+        this.logger.error(
+          `Embedded Signup token exchange failed — waba=${data.wabaId} phoneNumberId=${data.phoneNumberId} ` +
+          `status=${res.status} code=${json?.error?.code ?? '-'} ${reason}`,
+        );
+        throw new BadRequestException(
+          `WhatsApp connected at Meta, but the access token could not be collected: ${reason}`,
+        );
       }
-    } catch {
-      // fallback: token remains empty; caller can re-try
+    } catch (err) {
+      if (err instanceof BadRequestException) throw err;
+      this.logger.error(`Embedded Signup token exchange could not reach Meta: ${(err as Error).message}`);
+      throw new BadRequestException('Could not reach Meta to finish connecting this number. Try again.');
     }
 
     return this.prisma.whatsAppIntegration.upsert({
