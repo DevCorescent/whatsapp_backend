@@ -618,6 +618,18 @@ export class SettingsService {
     }
   }
 
+  /**
+   * Quality and verification for every active number, asked of Meta now.
+   *
+   * The access token is stored encrypted. This used to put the column straight into the
+   * Authorization header, so Meta was handed ciphertext and answered 401 for every number
+   * on every workspace — the settings card said "Meta refused the credentials" about
+   * numbers that were sending and receiving perfectly well. `decryptSecret` is what the
+   * send path and `testIntegration` have always used.
+   *
+   * A failure now carries Meta's own reason instead of a bare ERROR, worded by the same
+   * rules the send path uses so one problem does not get two descriptions.
+   */
   async getWhatsAppHealth(scope: TenantScope) {
     const integrations = await this.prisma.withRetry(
       () => this.prisma.whatsAppIntegration.findMany({
@@ -630,35 +642,44 @@ export class SettingsService {
 
     return Promise.all(
       integrations.map(async (integration) => {
+        const base = {
+          integrationId: integration.id,
+          phoneNumber:   integration.phoneNumber,
+          qualityRating: null as string | null,
+          status:        null as string | null,
+        };
+
+        const accessToken = decryptSecret(integration.accessToken);
+        if (!accessToken) {
+          return { ...base, error: 'No access token is stored for this number. Reconnect it.' };
+        }
+
         try {
           const url = `https://graph.facebook.com/${apiVersion}/${integration.phoneNumberId}`;
-          const res = await fetch(url, {
-            headers: { Authorization: `Bearer ${integration.accessToken}` },
-          });
+          const res  = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+          const json: any = await res.json().catch(() => ({}));
 
           if (!res.ok) {
-            return {
-              integrationId: integration.id,
-              phoneNumber:   integration.phoneNumber,
-              qualityRating: null,
-              status:        'ERROR',
-            };
+            const parsed = parseSendError(res.status, json);
+            const rule   = classifySendError(parsed.code, parsed.subcode);
+            const error  = isKnownSendError(parsed.code, parsed.subcode)
+              ? rule.reason
+              : (json?.error?.message ?? `Meta answered ${res.status}`);
+            this.logger.warn(
+              `whatsapp-health ${integration.phoneNumberId} — code=${parsed.code} subcode=${parsed.subcode} ${error}`,
+            );
+            return { ...base, error };
           }
 
-          const json: any = await res.json();
           return {
             integrationId: integration.id,
             phoneNumber:   json.display_phone_number ?? integration.phoneNumber,
             qualityRating: json.quality_rating ?? null,
-            status:        json.code_verification_status ?? 'UNKNOWN',
+            status:        json.code_verification_status ?? null,
+            error:         null as string | null,
           };
         } catch {
-          return {
-            integrationId: integration.id,
-            phoneNumber:   integration.phoneNumber,
-            qualityRating: null,
-            status:        'ERROR',
-          };
+          return { ...base, error: 'Could not reach Meta to check this number.' };
         }
       }),
     );
