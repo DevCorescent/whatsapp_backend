@@ -489,10 +489,27 @@ export class SettingsService {
   }
 
   async connectEmbeddedSignup(scope: TenantScope, data: {
-    code: string; phoneNumberId: string; wabaId: string;
+    code?: string; token?: string; phoneNumberId: string; wabaId: string;
   }) {
     const appId     = process.env.WHATSAPP_APP_ID;
     const appSecret = process.env.WHATSAPP_APP_SECRET;
+
+    /**
+     * Meta's one-time authorization code, under either name.
+     *
+     * The browser has always sent it as `token` and this read `data.code`, so every
+     * Embedded Signup put `code=undefined` on the exchange URL and Meta answered
+     * "Invalid verification code format" — which nobody saw, because the failure was
+     * swallowed and a tokenless number was written instead. `token` is the wrong word
+     * for it and the caller now sends `code`; both are accepted so an older client
+     * still works.
+     */
+    const code = (data.code ?? data.token ?? '').trim();
+    if (!code) {
+      throw new BadRequestException(
+        'Meta did not return an authorization code. Run the connection again without closing its window.',
+      );
+    }
 
     /**
      * Exchange Meta's one-time code for the number's access token.
@@ -512,7 +529,7 @@ export class SettingsService {
       const url = `https://graph.facebook.com/${version}/oauth/access_token`
         + `?client_id=${encodeURIComponent(appId ?? '')}`
         + `&client_secret=${encodeURIComponent(appSecret ?? '')}`
-        + `&code=${encodeURIComponent(data.code)}`;
+        + `&code=${encodeURIComponent(code)}`;
       const res  = await fetch(url);
       const json: any = await res.json().catch(() => null);
       accessToken = json?.access_token ?? '';
