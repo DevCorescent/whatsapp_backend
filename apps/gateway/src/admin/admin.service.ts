@@ -1,5 +1,5 @@
 import {
-  Injectable, NotFoundException, ForbiddenException, BadRequestException, ConflictException,
+  Injectable, Logger, NotFoundException, ForbiddenException, BadRequestException, ConflictException,
 } from '@nestjs/common';
 import { PrismaService } from '@lib/prisma';
 import {
@@ -100,6 +100,8 @@ const CUSTOMERS = { accountType: { not: 'PLATFORM' } } as const;
 
 @Injectable()
 export class AdminService {
+  private readonly logger = new Logger(AdminService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly rates:  MessageRatesService,
@@ -151,6 +153,107 @@ export class AdminService {
   }
 
   // ── Tenants ────────────────────────────────────────────────────────────────
+
+  /**
+   * Create a workspace for someone, the way sign-up would have.
+   *
+   * Mirrors `AuthService.register` deliberately — tenant, settings, owner, subscription
+   * and the first business — because a workspace missing any one of them is subtly
+   * broken, and two code paths that disagree about what a new account consists of is
+   * how that happens. The password is generated and returned once; it is never stored
+   * in plain text and cannot be read back, so the panel shows it to be copied now.
+   */
+  async provisionTenant(
+    scope: TenantScope,
+    body: {
+      name?: string; slug?: string; ownerEmail?: string; plan?: string;
+      trialDays?: number; accountType?: string; resellerType?: string;
+      commissionRate?: number; resellerId?: string | null;
+    },
+  ) {
+    await this.guard(scope, 'platform.tenants.manage');
+
+    const name  = body.name?.trim();
+    const email = body.ownerEmail?.trim().toLowerCase();
+    if (!name)  throw new BadRequestException('A workspace name is required.');
+    if (!email) throw new BadRequestException("The owner's email address is required.");
+
+    const slug = (body.slug?.trim() || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''));
+    if (!slug) throw new BadRequestException('That name has no letters or digits to build a web address from.');
+
+    const [clashUser, clashSlug] = await Promise.all([
+      this.prisma.user.findFirst({ where: { email }, select: { id: true } }),
+      this.prisma.tenant.findFirst({ where: { slug }, select: { id: true } }),
+    ]);
+    if (clashUser) throw new BadRequestException(`${email} already has an account.`);
+    if (clashSlug) throw new BadRequestException(`The web address "${slug}" is taken. Choose another.`);
+
+    const isReseller  = body.accountType === 'RESELLER';
+    const planName    = (body.plan ?? 'starter').toLowerCase();
+    const plan = isReseller ? null : await this.prisma.plan.findFirst({
+      where: { name: { equals: planName, mode: 'insensitive' } },
+      select: { id: true },
+    });
+
+    const trialDays = Math.max(0, Number(body.trialDays ?? 0));
+    const trialEnd  = new Date(Date.now() + trialDays * 86_400_000);
+
+    // Readable over the phone, and long enough that it is not worth guessing. They are
+    // told to change it on first sign-in.
+    const tempPassword = `Wx-${randomUUID().replace(/-/g, '').slice(0, 10)}`;
+    const hashed = await bcrypt.hash(tempPassword, 12);
+
+    const created = await this.prisma.$transaction(async (tx) => {
+      const tenant = await tx.tenant.create({
+        data: {
+          name, slug,
+          accountType:  (isReseller ? 'RESELLER' : 'CLIENT') as any,
+          ...(isReseller ? { resellerType: body.resellerType as any, commissionRate: body.commissionRate ?? null } : {}),
+          ...(!isReseller && body.resellerId ? { parentId: body.resellerId, referredById: body.resellerId } : {}),
+          settings: { create: {} },
+        },
+      });
+
+      const user = await tx.user.create({
+        data: {
+          tenantId: tenant.id,
+          name:     email.split('@')[0],
+          email,
+          password: hashed,
+          role:     'TENANT_OWNER',
+          emailVerified: true,
+        },
+      });
+
+      await tx.business.create({ data: { tenantId: tenant.id, name, slug } });
+
+      if (plan) {
+        await tx.subscription.create({
+          data: {
+            tenantId: tenant.id,
+            planId:   plan.id,
+            status:   trialDays > 0 ? 'TRIALING' : 'ACTIVE',
+            billingCycle: 'MONTHLY',
+            currentPeriodStart: new Date(),
+            currentPeriodEnd:   trialDays > 0 ? trialEnd : new Date(Date.now() + 30 * 86_400_000),
+            ...(trialDays > 0 ? { trialEndsAt: trialEnd } : {}),
+          },
+        });
+      }
+
+      return { tenant, user };
+    });
+
+    this.logger.log(`Provisioned ${isReseller ? 'reseller' : 'customer'} ${slug} for ${email}`);
+    return {
+      tenant: {
+        id: created.tenant.id, name: created.tenant.name,
+        slug: created.tenant.slug, accountType: created.tenant.accountType,
+      },
+      user: { email: created.user.email, name: created.user.name },
+      tempPassword,
+    };
+  }
 
   async listTenants(
     scope: TenantScope,

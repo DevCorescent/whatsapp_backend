@@ -86,6 +86,26 @@ export class AdminController {
     });
   }
 
+  /**
+   * Create a customer by hand.
+   *
+   * The Add customer button in the admin panel has always posted here and there has
+   * never been a handler, so it answered 404 and the only way into the platform was
+   * public sign-up.
+   */
+  @Post('tenants')
+  @ApiOperation({ summary: 'Provision a customer or reseller workspace (super admin)' })
+  provisionTenant(
+    @CurrentTenant() scope: TenantScope,
+    @Body() body: {
+      name?: string; slug?: string; ownerEmail?: string; plan?: string;
+      trialDays?: number; accountType?: string; resellerType?: string;
+      commissionRate?: number; resellerId?: string | null;
+    },
+  ) {
+    return this.svc.provisionTenant(scope, body);
+  }
+
   @Get('tenants/:id')
   @ApiOperation({ summary: 'Get a tenant with full details (super admin)' })
   getTenant(@CurrentTenant() scope: TenantScope, @Param('id') id: string) {

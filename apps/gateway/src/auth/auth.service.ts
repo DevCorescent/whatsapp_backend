@@ -362,6 +362,15 @@ export class AuthService {
         },
       });
 
+      // A workspace needs one of these to be usable at all: contacts, conversations,
+      // campaigns and the WhatsApp connection all hang off a business, and sign-up
+      // created a tenant without one. Every new account therefore opened on "Create or
+      // select a business first, then connect your WhatsApp number here" — on the very
+      // screen they had just been sent to, for a thing they had already named.
+      await tx.business.create({
+        data: { tenantId: tenant.id, name: dto.workspaceName, slug },
+      });
+
       if (starterPlan) {
         await tx.subscription.create({
           data: {
