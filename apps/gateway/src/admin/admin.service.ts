@@ -88,6 +88,16 @@ function planFields(body: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
+/**
+ * Who counts as a customer.
+ *
+ * Everything here is a figure about the business the platform does, and the
+ * platform's own workspace is not business it does with itself. The user count
+ * beside these already excluded the super admin; the tenant counts did not, so
+ * every total was one too many and a freshly emptied platform read "1 customer".
+ */
+const CUSTOMERS = { accountType: { not: 'PLATFORM' } } as const;
+
 @Injectable()
 export class AdminService {
   constructor(
@@ -151,7 +161,11 @@ export class AdminService {
     const limit = Math.min(200, query.limit ?? 20);
     const skip  = (page - 1) * limit;
 
-    const where: any = {};
+    // The platform's own workspace is not one of its customers. It holds the super
+    // admin, so it can never be deleted, and without this it sat in the Customers list
+    // for good — "1 customer" on a platform with none. Still reachable by filtering
+    // account type explicitly, so nothing is hidden from an operator who asks for it.
+    const where: any = query.accountType === 'PLATFORM' ? {} : { accountType: { not: 'PLATFORM' } };
     if (query.search) {
       // An email is how the platform operator actually knows a customer — it is what
       // they were given in a support message, and what they type here. Searching only
@@ -757,17 +771,18 @@ export class AdminService {
       planBreakdownRaw,
       cancelledThisMonth,
     ] = await Promise.all([
-      this.prisma.tenant.count(),
-      this.prisma.tenant.count({ where: { isActive: true } }),
+      this.prisma.tenant.count({ where: CUSTOMERS }),
+      this.prisma.tenant.count({ where: { ...CUSTOMERS, isActive: true } }),
       this.prisma.user.count({ where: { role: { not: 'SUPER_ADMIN' } } }),
       this.prisma.message.count({ where: { createdAt: { gte: thirtyDaysAgo } } }),
-      this.prisma.tenant.count({ where: { createdAt: { gte: thisMonthStart } } }),
-      this.prisma.tenant.count({ where: { createdAt: { gte: lastMonthStart, lt: thisMonthStart } } }),
+      this.prisma.tenant.count({ where: { ...CUSTOMERS, createdAt: { gte: thisMonthStart } } }),
+      this.prisma.tenant.count({ where: { ...CUSTOMERS, createdAt: { gte: lastMonthStart, lt: thisMonthStart } } }),
       this.prisma.subscription.findMany({
         where:   { status: { in: ['ACTIVE', 'TRIALING'] } },
         include: { plan: { select: { priceMonthly: true, displayName: true, name: true } } },
       }),
       this.prisma.tenant.findMany({
+        where:   CUSTOMERS,
         orderBy: { createdAt: 'desc' },
         take:    5,
         include: {
@@ -776,7 +791,7 @@ export class AdminService {
         },
       }),
       this.prisma.tenant.findMany({
-        where:   { createdAt: { gte: thirtyDaysAgo } },
+        where:   { ...CUSTOMERS, createdAt: { gte: thirtyDaysAgo } },
         select:  { createdAt: true },
         orderBy: { createdAt: 'asc' },
       }),
@@ -953,8 +968,8 @@ export class AdminService {
       walletDebits,
       topTenantsByMessages,
     ] = await Promise.all([
-      this.prisma.tenant.count(),
-      this.prisma.tenant.count({ where: { createdAt: { gte: from, lte: to } } }),
+      this.prisma.tenant.count({ where: CUSTOMERS }),
+      this.prisma.tenant.count({ where: { ...CUSTOMERS, createdAt: { gte: from, lte: to } } }),
       this.prisma.message.count({ where: { createdAt: { gte: from, lte: to } } }),
       this.prisma.message.count({ where: { createdAt: { gte: from, lte: to }, direction: 'INBOUND' } }),
       this.prisma.message.count({ where: { createdAt: { gte: from, lte: to }, direction: 'OUTBOUND' } }),
