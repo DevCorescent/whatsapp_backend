@@ -642,8 +642,12 @@ export class InboundPipelineService {
         setLeadStage: async (node) => {
           const name = node.stageName?.trim();
           if (!name) return;
+          // Stages belong to the workspace, not to one of its numbers — PipelineStage
+          // has no businessId at all. Asking for one made Prisma reject the query, and
+          // the engine's catch around this executor swallowed it, so a "move to stage"
+          // step in a flow has always done nothing at all and said nothing about it.
           const stage = await this.prisma.pipelineStage.findFirst({
-            where:  { businessId: conversation.businessId, name: { equals: name, mode: 'insensitive' } },
+            where:  { tenantId: conversation.tenantId, name: { equals: name, mode: 'insensitive' } },
             select: { id: true },
           });
           if (!stage) {
