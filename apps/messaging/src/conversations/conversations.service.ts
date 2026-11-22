@@ -141,13 +141,6 @@ export class ConversationsService {
     };
   }
 
-  /**
-   * Setting, or clearing, your own Away/Busy.
-   *
-   * Only the override is stored. Online and offline follow the socket, so there is
-   * nothing here to go stale when a browser closes without saying goodbye. Clearing it
-   * hands the dot back to the connection, which is why "Auto" has to be offerable.
-   */
   /** Only the stored override. Online and offline follow the socket, never a column. */
   async myPresence(scope: TenantScope) {
     const me = await this.prisma.user.findUnique({
@@ -157,6 +150,13 @@ export class ConversationsService {
     return { presenceStatus: me?.presenceStatus ?? null };
   }
 
+  /**
+   * Setting, or clearing, your own Away/Busy.
+   *
+   * Only the override is stored. Online and offline follow the socket, so there is
+   * nothing here to go stale when a browser closes without saying goodbye. Clearing it
+   * hands the dot back to the connection, which is why "Auto" has to be offerable.
+   */
   async setPresence(scope: TenantScope, status: string | null) {
     const allowed = ['AWAY', 'BUSY'];
     const next = status && allowed.includes(status) ? status : null;
@@ -262,18 +262,33 @@ export class ConversationsService {
    * Nothing is sent here. Whether this can carry a plain message or has to be a template
    * is the service window's answer, and the caller asks it next.
    */
-  async startConversation(scope: TenantScope, body: { phone?: string; name?: string }) {
+  async startConversation(
+    scope: TenantScope,
+    body: { phone?: string; name?: string; whatsappIntegrationId?: string },
+  ) {
     const phone = normalizePhone(body?.phone ?? '');
     if (phone.length < 8 || phone.length > 15) {
       throw new BadRequestException('Enter a phone number with its country code, like 919876543210.');
     }
 
+    // The number the chat is being started from, which is the one chosen in the navbar
+    // rather than whichever happens to be the default. Starting a chat from one number
+    // and having it open on another is how a reply goes out from the wrong account.
     const integration = await this.prisma.whatsAppIntegration.findFirst({
-      where:   { businessId: scope.businessId, tenantId: scope.tenantId, isActive: true },
+      where: {
+        businessId: scope.businessId, tenantId: scope.tenantId, isActive: true,
+        ...(body?.whatsappIntegrationId ? { id: body.whatsappIntegrationId } : {}),
+      },
       orderBy: { isDefault: 'desc' },
       select:  { id: true },
     });
-    if (!integration) throw new BadRequestException('Connect a WhatsApp number first.');
+    if (!integration) {
+      throw new BadRequestException(
+        body?.whatsappIntegrationId
+          ? 'That WhatsApp number is not connected to this business.'
+          : 'Connect a WhatsApp number first.',
+      );
+    }
 
     const name = body?.name?.trim();
     const contact = await this.prisma.contact.upsert({
@@ -287,11 +302,29 @@ export class ConversationsService {
       select: { id: true, name: true, phone: true },
     });
 
-    const existing = await this.prisma.conversation.findFirst({
-      where:  { contactId: contact.id, tenantId: scope.tenantId, businessId: scope.businessId },
-      select: { id: true },
+    // Per number, exactly as the inbound webhook does it: somebody who deals with two
+    // of the workspace's numbers is having two conversations, and every reply goes back
+    // out through the number its thread is on. This looked for any thread with this
+    // contact, so starting a chat from a second number silently handed back the first
+    // number's thread — which then did not even appear in the list, because the list is
+    // filtered by the number you are on.
+    const threads = await this.prisma.conversation.findMany({
+      where:   { contactId: contact.id, tenantId: scope.tenantId, businessId: scope.businessId },
+      orderBy: { createdAt: 'desc' },
+      select:  { id: true, whatsappIntegrationId: true },
     });
+    const existing =
+      threads.find((t) => t.whatsappIntegrationId === integration.id) ??
+      // A thread from before the number was recorded belongs to whoever answers it first.
+      threads.find((t) => t.whatsappIntegrationId === null);
+
     if (existing) {
+      if (!existing.whatsappIntegrationId) {
+        await this.prisma.conversation.update({
+          where: { id: existing.id },
+          data:  { whatsappIntegrationId: integration.id },
+        });
+      }
       return { success: true, data: { conversationId: existing.id, contact, created: false } };
     }
 
