@@ -24,6 +24,15 @@ export interface PermissionPrincipal {
 export class PermissionsService {
   private readonly logger = new Logger(PermissionsService.name);
   private readonly cache = new Map<string, { permissions: Set<string>; principal: PermissionPrincipal | null; expiresAt: number }>();
+  /**
+   * Role overrides, keyed by `accountType:role` rather than by user.
+   *
+   * They are a property of the role, so two agents in the same workspace were fetching
+   * byte-identical rows separately, each paying a round trip to a database 250 ms away —
+   * and paying it *after* the user lookup, because the query needs the role that lookup
+   * returns. Keeping them here makes a cold user cost one round trip instead of two.
+   */
+  private readonly roleCache = new Map<string, { overrides: Map<string, boolean>; expiresAt: number }>();
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -47,6 +56,25 @@ export class PermissionsService {
   invalidate(userId?: string) {
     if (userId) this.cache.delete(userId);
     else this.cache.clear();
+    // Role overrides are shared, so a blanket invalidation has to drop them too —
+    // otherwise an edited role keeps answering from the old table for another minute.
+    if (!userId) this.roleCache.clear();
+  }
+
+  /** Overrides for one role, shared by every user who holds it. */
+  private async roleOverridesFor(accountType: string, role: string): Promise<Map<string, boolean>> {
+    const key = `${accountType}:${role}`;
+    const cached = this.roleCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.overrides;
+
+    const rows = await this.prisma.rolePermission.findMany({
+      where:  { accountType: accountType as any, role: role as any },
+      select: { accountType: true, role: true, permission: true, allowed: true },
+    }).catch(() => []);
+
+    const overrides = new Map(rows.map(r => [`${r.accountType}:${r.role}:${r.permission}`, r.allowed]));
+    this.roleCache.set(key, { overrides, expiresAt: Date.now() + CACHE_TTL_MS });
+    return overrides;
   }
 
   private async load(userId: string) {
@@ -74,12 +102,7 @@ export class PermissionsService {
         resellerType: user.tenant.resellerType ?? null,
       };
 
-      const roleRows = await this.prisma.rolePermission.findMany({
-        where:  { accountType: user.tenant.accountType, role: user.role },
-        select: { accountType: true, role: true, permission: true, allowed: true },
-      }).catch(() => []);
-
-      const roleOverrides = new Map(roleRows.map(r => [`${r.accountType}:${r.role}:${r.permission}`, r.allowed]));
+      const roleOverrides = await this.roleOverridesFor(user.tenant.accountType, user.role);
       const userOverrides = new Map(user.userPermissions.map(p => [p.permission, p.allowed]));
 
       permissions = new Set(

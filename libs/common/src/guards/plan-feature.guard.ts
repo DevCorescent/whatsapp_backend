@@ -25,6 +25,8 @@ interface PlanSnapshot {
 /** Statuses that mean the plan is not paid for, regardless of the period dates. */
 const UNPAID_STATUSES = ['EXPIRED', 'PAST_DUE', 'CANCELLED'];
 
+interface PlanEndPolicy { behaviour: string; graceDays: number; walletOn: boolean }
+
 /**
  * Loads Subscription → Plan once a minute per tenant and answers 403 in the
  * `featureErrorBody` wire shape (lib/billing/limits.ts) so the UpgradeModal
@@ -33,6 +35,14 @@ const UNPAID_STATUSES = ['EXPIRED', 'PAST_DUE', 'CANCELLED'];
 @Injectable()
 export class PlanFeatureGuard implements CanActivate {
   private readonly cache = new Map<string, { plan: PlanSnapshot | null; expiresAt: number }>();
+  /**
+   * The platform's policy is one row for the whole deployment, so it was being fetched
+   * again for every tenant that missed the plan cache — and fetched *before* the
+   * subscription query rather than beside it. The database is 250 ms away from the
+   * application, so that was half a second of waiting, twice over, on a value that is
+   * identical for everyone and changes when an administrator edits one settings page.
+   */
+  private policyCache?: { value: PlanEndPolicy; expiresAt: number };
 
   constructor(
     private readonly reflector: Reflector,
@@ -86,9 +96,10 @@ export class PlanFeatureGuard implements CanActivate {
     const cached = this.cache.get(tenantId);
     if (cached && cached.expiresAt > Date.now()) return cached.plan;
 
-    const policy = await this.planEndPolicy();
-
-    const sub = await this.prisma.subscription.findUnique({
+    // Independent of each other, so they go together rather than one after the other.
+    const [policy, sub] = await Promise.all([
+      this.planEndPolicy(),
+      this.prisma.subscription.findUnique({
       where:  { tenantId },
       select: {
         status: true,
@@ -100,7 +111,8 @@ export class PlanFeatureGuard implements CanActivate {
           },
         },
       },
-    });
+      }),
+    ]);
     const plan: PlanSnapshot | null = sub?.plan
       ? {
           name: sub.plan.name, displayName: sub.plan.displayName,
@@ -133,12 +145,14 @@ export class PlanFeatureGuard implements CanActivate {
    * Read from the PLATFORM tenant rather than the one being checked: it is a rule about
    * the product, not a preference of the customer being refused.
    */
-  private async planEndPolicy(): Promise<{ behaviour: string; graceDays: number; walletOn: boolean }> {
+  private async planEndPolicy(): Promise<PlanEndPolicy> {
+    if (this.policyCache && this.policyCache.expiresAt > Date.now()) return this.policyCache.value;
+
     const platform = await this.prisma.tenant.findFirst({
       where:  { accountType: 'PLATFORM' },
       select: { settings: { select: { planEndBehaviour: true, planEndGraceDays: true, walletEnabled: true } } },
     });
-    return {
+    const value: PlanEndPolicy = {
       behaviour: platform?.settings?.planEndBehaviour ?? 'GRACE',
       graceDays: platform?.settings?.planEndGraceDays ?? 7,
       // The platform's master switch. A plan may include a wallet and the platform still
@@ -146,10 +160,15 @@ export class PlanFeatureGuard implements CanActivate {
       // has a wallet, whatever their plan says.
       walletOn:  platform?.settings?.walletEnabled === true,
     };
+    this.policyCache = { value, expiresAt: Date.now() + CACHE_TTL_MS };
+    return value;
   }
 
   invalidate(tenantId: string) {
     this.cache.delete(tenantId);
+    // The platform policy feeds every tenant's snapshot, so a change to it has to drop
+    // with them rather than linger for another minute.
+    this.policyCache = undefined;
   }
 }
 
