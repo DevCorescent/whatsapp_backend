@@ -77,7 +77,16 @@ export interface WAMessage {
   document?: WAMedia & { filename?: string; caption?: string };
   sticker?: WAMedia & { animated?: boolean };
   location?: { latitude: number; longitude: number; name?: string; address?: string };
-  interactive?: { type: string; button_reply?: { id: string; title: string }; list_reply?: { id: string; title: string } };
+  interactive?: {
+    type: string;
+    button_reply?: { id: string; title: string };
+    list_reply?: { id: string; title: string };
+    /**
+     * What an address form — and any other native flow — answers with. `response_json`
+     * is a JSON string of whatever the form collected, not an object.
+     */
+    nfm_reply?: { name?: string; body?: string; response_json?: string };
+  };
   button?: { payload: string; text: string };
   /**
    * One or more contact cards the customer shared. Distinct from the envelope's

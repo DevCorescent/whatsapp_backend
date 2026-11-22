@@ -63,6 +63,29 @@ function callPermissionCaption(message: WAMessage): string | null {
     : '✅ Allowed calls from this number';
 }
 
+/**
+ * What the customer filled into an address form, as one readable line.
+ *
+ * `response_json` is a JSON *string* of the submitted fields, so it is parsed and
+ * flattened rather than stored raw — an agent opening the thread should see the address,
+ * not a brace. A form we cannot parse still gets its own name rather than nothing.
+ */
+function nfmReplySummary(message: WAMessage): string | null {
+  const reply = message.interactive?.nfm_reply;
+  if (!reply) return null;
+
+  try {
+    const parsed = JSON.parse(reply.response_json ?? '{}') as Record<string, unknown>;
+    const values = Object.values(parsed)
+      .flatMap((v) => (v && typeof v === 'object' ? Object.values(v as Record<string, unknown>) : [v]))
+      .filter((v) => typeof v === 'string' && v.trim())
+      .map((v) => (v as string).trim());
+    if (values.length) return `📋 ${values.join(', ')}`;
+  } catch { /* not JSON, or not the shape we expect — fall through to the name */ }
+
+  return `📋 ${reply.name ?? reply.body ?? 'Form response'}`;
+}
+
 /** "Ravi Verma" or "Ravi Verma and 2 others" — a shared contact card, in one line. */
 function contactsSummary(message: WAMessage): string | null {
   const names = (message.contacts ?? [])
@@ -475,7 +498,15 @@ export class WebhookService {
       case 'video':       return message.video?.caption?.trim()    || null;
       case 'document':    return message.document?.caption?.trim() || null;
       case 'location':    return `📍 ${message.location?.name ?? 'Location'}`;
-      case 'interactive': return callPermissionCaption(message) ?? message.interactive?.button_reply?.title ?? message.interactive?.list_reply?.title ?? null;
+      case 'interactive': return callPermissionCaption(message)
+                              ?? message.interactive?.button_reply?.title
+                              ?? message.interactive?.list_reply?.title
+                              // An address form, and anything else built on Meta's native
+                              // flows, answers as nfm_reply: a body of JSON plus the name
+                              // of the form. Without this the thread showed the customer's
+                              // submitted address as an empty message.
+                              ?? nfmReplySummary(message)
+                              ?? null;
       case 'button':      return message.button?.text ?? null;
       case 'reaction':    return `${message.reaction?.emoji ?? '👍'} Reaction`;
       case 'contacts':    return contactsSummary(message);
