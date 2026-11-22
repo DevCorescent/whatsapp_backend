@@ -402,6 +402,16 @@ export class CampaignsService {
       const trackingBase = (process.env['TRACKING_BASE_URL'] ?? '').replace(/\/+$/, '');
       const urlSlots = dynamicUrlButtonIndexes(spec);
 
+      // ...and that is what this checks, which it did not before: it asked only whether a
+      // base was configured, then replaced the link with a bare id regardless of where
+      // the button pointed. A template whose button is `https://client.example/{{1}}`
+      // would have sent every recipient to `https://client.example/<random id>` — a dead
+      // link for the whole campaign, in exchange for a click figure. It has never fired
+      // only because TRACKING_BASE_URL is unset in production; setting it would have
+      // broken the next campaign with a dynamic URL button.
+      const trackedButtonUrl = urlSlots.length ? (spec.buttons?.[urlSlots[0]]?.url ?? '') : '';
+      const trackingPossible = Boolean(trackingBase) && trackedButtonUrl.startsWith(trackingBase);
+
       const contactRows = finalNumbers.map(phone => {
         const contact = contactMap.get(phone);
         const fields  = (recipientFields[phone] ?? {}) as Record<string, string>;
@@ -423,7 +433,7 @@ export class CampaignsService {
         const id = randomUUID();
         const firstUrlKey = urlSlots.length ? `url_${urlSlots[0] + 1}` : null;
         const destination = firstUrlKey ? (variables[firstUrlKey]?.trim() || null) : null;
-        const tracked = Boolean(trackingBase && destination);
+        const tracked = Boolean(trackingPossible && destination);
         if (tracked && firstUrlKey) variables[firstUrlKey] = id;
 
         return {
