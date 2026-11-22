@@ -94,12 +94,14 @@ export class AiReplyProcessor {
 
     // ── Send phase (NOT retryable — return normally even on error) ───────────
     const systemPrompt = this.buildSystemPrompt(business);
+    const lastFromCustomer = [...dbMessages].find(m => m.direction === 'INBOUND')?.content ?? '';
+    const knowledge = await this.knowledgeFor(conversation.businessId, lastFromCustomer);
     let reply: string;
     try {
       reply = await this.ai.generateReply(
         history,
         systemPrompt,
-        null,
+        knowledge,
         business.aiModel ?? undefined,
         { temperature: business.aiTemperature, maxTokens: business.aiMaxTokens },
       );
@@ -139,6 +141,54 @@ export class AiReplyProcessor {
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
+
+  /**
+   * What the workspace has written down that bears on this question.
+   *
+   * `generateReply` has always taken a knowledge argument and this passed `null`, so the
+   * auto-reply answered from the system prompt alone: it never saw a single uploaded
+   * document, however many were indexed, and said the same general thing to every
+   * question. The agent-facing "AI reply" button did consult the knowledge base, which
+   * is why the two gave different answers to the same message.
+   *
+   * A short message has nothing to match on, so the top documents go in regardless —
+   * they are the business context either way.
+   */
+  private async knowledgeFor(businessId: string, question: string): Promise<string | null> {
+    const q = (question ?? '').trim();
+    try {
+      const long = q.split(/\s+/).length > 3;
+      let docs = await this.prisma.knowledgeDoc.findMany({
+        where: long
+          ? { businessId, isIndexed: true, content: { contains: q.slice(0, 80), mode: 'insensitive' } }
+          : { businessId, isIndexed: true },
+        take: 3,
+        select: { name: true, content: true },
+      });
+      if (!docs.length && long) {
+        docs = await this.prisma.knowledgeDoc.findMany({
+          where: { businessId, isIndexed: true },
+          take: 3,
+          select: { name: true, content: true },
+        });
+      }
+
+      // A document with no text is no use, and several carry none: the text has to be
+      // extracted when it is uploaded, and for some file types it never was.
+      const usable = docs.filter(d => (d.content ?? '').trim().length > 0);
+      this.logger.log(
+        `KB for business=${businessId} q="${q.slice(0, 40)}" docs=${docs.length} withText=${usable.length}`,
+      );
+      if (!usable.length) return null;
+
+      return usable
+        .map(d => [`## ${d.name}`, (d.content ?? '').slice(0, 4000)].join('\n'))
+        .join('\n\n');
+    } catch (err) {
+      this.logger.warn(`knowledge lookup failed for ${businessId}: ${String(err).slice(0, 120)}`);
+      return null;
+    }
+  }
 
   private buildSystemPrompt(business: {
     name: string;
