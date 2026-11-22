@@ -25,13 +25,30 @@ export class AccountService {
 
   // ── Category ───────────────────────────────────────────────────────────────
 
+  /**
+   * The workspace's category, and the ones it can choose from.
+   *
+   * The list was missing: this returned the chosen category alone while the settings
+   * form reads `categories` to fill its dropdown, so Business category offered nothing
+   * but "— Select a category —" no matter how many the platform had defined.
+   *
+   * A category the platform later deactivates stays on the accounts that already picked
+   * it — the form adds it back to its own options — so only the active ones are listed.
+   */
   async getCategory(scope: TenantScope) {
-    const tenant = await this.prisma.tenant.findUnique({
-      where:   { id: scope.tenantId },
-      include: { category: true },
-    });
+    const [tenant, categories] = await Promise.all([
+      this.prisma.tenant.findUnique({
+        where:   { id: scope.tenantId },
+        include: { category: true },
+      }),
+      this.prisma.businessCategory.findMany({
+        where:   { isActive: true },
+        orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+        select:  { id: true, name: true },
+      }),
+    ]);
     if (!tenant) throw new NotFoundException('Tenant not found');
-    return { categoryId: tenant.categoryId, category: tenant.category };
+    return { categoryId: tenant.categoryId, category: tenant.category, categories };
   }
 
   async setCategory(scope: TenantScope, categoryId: string) {
