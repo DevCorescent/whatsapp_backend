@@ -148,6 +148,15 @@ export class ConversationsService {
    * nothing here to go stale when a browser closes without saying goodbye. Clearing it
    * hands the dot back to the connection, which is why "Auto" has to be offerable.
    */
+  /** Only the stored override. Online and offline follow the socket, never a column. */
+  async myPresence(scope: TenantScope) {
+    const me = await this.prisma.user.findUnique({
+      where:  { id: scope.userId },
+      select: { presenceStatus: true },
+    });
+    return { presenceStatus: me?.presenceStatus ?? null };
+  }
+
   async setPresence(scope: TenantScope, status: string | null) {
     const allowed = ['AWAY', 'BUSY'];
     const next = status && allowed.includes(status) ? status : null;

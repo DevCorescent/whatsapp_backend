@@ -49,6 +49,20 @@ export class ConversationsController {
 
   // Declared above `:id`, which would otherwise read this as a conversation called
   // "agents". Nest matches in declaration order.
+  /**
+   * Your own stored Away/Busy, so a reload restores what you chose.
+   *
+   * The header asked `/api/auth/me` for this, which is not a route — it fell into
+   * NextAuth's catch-all and answered 400 on every page load. The fetch swallowed the
+   * error, so nothing broke visibly; the override simply never came back after a reload
+   * and the console carried a 400 all day.
+   */
+  @Get('presence')
+  @ApiOperation({ summary: 'Your own stored Away/Busy, if any' })
+  getPresence(@CurrentTenant() scope: TenantScope) {
+    return this.svc.myPresence(scope);
+  }
+
   @Patch('presence')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Set or clear your own Away/Busy' })
