@@ -550,6 +550,8 @@ export class SettingsService {
       throw new BadRequestException('Could not reach Meta to finish connecting this number. Try again.');
     }
 
+    const details = await this.fetchNumberDetails(data.phoneNumberId, accessToken);
+
     return this.prisma.whatsAppIntegration.upsert({
       where:  { phoneNumberId: data.phoneNumberId },
       create: {
@@ -559,13 +561,57 @@ export class SettingsService {
         whatsappBusinessId: data.wabaId,
         accessToken,
         isActive:           true,
+        ...details,
       },
       update: {
         whatsappBusinessId: data.wabaId,
         accessToken,
         isActive:           true,
+        ...details,
       },
     });
+  }
+
+  /**
+   * What Meta calls this number, asked of Meta.
+   *
+   * Connecting stored the ids and the token and nothing else, so a freshly connected
+   * number showed as "Number unavailable" with no name and no rating — the one moment a
+   * person is looking at the screen to check it worked. The comment at the top of the
+   * connect card has always claimed this happens ("re-derives the ids from Meta rather
+   * than believing the ones this component forwarded"); now it does.
+   *
+   * Best effort on purpose: the number is connected either way, and failing the whole
+   * connection because a label could not be read would throw away a working token.
+   */
+  private async fetchNumberDetails(phoneNumberId: string, accessToken: string): Promise<{
+    phoneNumber?: string; displayName?: string;
+    qualityRating?: string; codeVerificationStatus?: string;
+  }> {
+    const version = process.env.WHATSAPP_API_VERSION ?? 'v21.0';
+    try {
+      const res = await fetch(
+        `https://graph.facebook.com/${version}/${phoneNumberId}` +
+        `?fields=display_phone_number,verified_name,quality_rating,code_verification_status`,
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      );
+      const json: any = await res.json().catch(() => null);
+      if (!res.ok) {
+        this.logger.warn(
+          `Connected ${phoneNumberId} but could not read its details: ${json?.error?.message ?? res.status}`,
+        );
+        return {};
+      }
+      return {
+        ...(json?.display_phone_number     ? { phoneNumber:            json.display_phone_number } : {}),
+        ...(json?.verified_name            ? { displayName:            json.verified_name } : {}),
+        ...(json?.quality_rating           ? { qualityRating:          json.quality_rating } : {}),
+        ...(json?.code_verification_status ? { codeVerificationStatus: json.code_verification_status } : {}),
+      };
+    } catch (err) {
+      this.logger.warn(`Connected ${phoneNumberId} but could not reach Meta for its details: ${(err as Error).message}`);
+      return {};
+    }
   }
 
   async connectManual(scope: TenantScope, data: {
